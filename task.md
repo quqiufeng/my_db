@@ -411,27 +411,32 @@
   - [ ] cache stats/compact/purge/check
 
 ### 9.11 FFI 绑定
-- [ ] 9.11.1 Python 绑定
-  - [ ] mydb.py 添加 Cache 类
-  - [ ] cache.open/set/get/search
-- [ ] 9.11.2 LuaJIT 绑定
-  - [ ] mydb.lua 添加 Cache 模块
-  - [ ] cache.open/set/get/search
+- [x] 9.11.1 Python 绑定 (mydb/cache.py)
+  - [x] Cache 类：dict-like 接口 (__getitem__, __setitem__, __contains__, __delitem__)
+  - [x] open_cache() 工厂函数
+  - [x] set_json/get_json: JSON 自动序列化
+  - [x] Namespace: set_ns/get_ns/del_ns
+  - [x] Search: search_prefix/regex/fuzzy/tag
+  - [x] Iterator: items/keys/values (yield generator)
+  - [x] Management: expire/touch/compact/purge_expired/sync
+- [ ] 9.11.2 LuaJIT 绑定 (Phase 10)
 
 ### 9.12 测试
-- [ ] 9.12.1 单元测试
-  - [ ] tests/test_cache.c — 基础 CRUD
-  - [ ] tests/test_cache_search.c — 搜索测试
-  - [ ] tests/test_cache_namespace.c — namespace 测试
-  - [ ] tests/test_cache_ttl.c — TTL/LRU 测试
-- [ ] 9.12.2 性能测试
-  - [ ] tests/test_cache_perf.c — 10万条性能基准
+- [x] 9.12.1 单元测试 (tests/test_cache_full.c)
+  - [x] test_basic_crud — 基础 CRUD
+  - [x] test_namespace — namespace 操作
+  - [x] test_search — 前缀/范围/正则/模糊搜索
+  - [x] test_ttl_lru — TTL 过期和 LRU 淘汰
+  - [x] test_iterator — 迭代器遍历
+  - [x] test_persistence — 重启持久化
+  - [x] test_stats — 统计信息
+- [ ] 9.12.2 性能测试 (Phase 10)
 
 ### 9.13 构建系统
-- [ ] 9.13.1 Makefile 更新
-  - [ ] 编译 cache 模块
-  - [ ] 编译测试
-  - [ ] 编译 CLI 工具
+- [x] 9.13.1 Makefile 更新
+  - [x] 编译 cache 模块到 libmydb.so
+  - [x] tests/test_cache, tests/test_cache_full
+  - [x] tools/import_book
 
 ---
 

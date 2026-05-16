@@ -10,7 +10,8 @@ TEST_DIR = tests
 SOURCES = $(wildcard $(SRC_DIR)/utils/*.c) \
           $(wildcard $(SRC_DIR)/storage/*.c) \
           $(wildcard $(SRC_DIR)/core/*.c) \
-          $(wildcard $(SRC_DIR)/types/*.c)
+          $(wildcard $(SRC_DIR)/types/*.c) \
+          $(wildcard $(SRC_DIR)/cache/*.c)
 
 OBJECTS = $(SOURCES:$(SRC_DIR)/%.c=$(OBJ_DIR)/%.o)
 
@@ -22,17 +23,21 @@ TEST_PERF = $(TEST_DIR)/test_perf
 TEST_EDGE = $(TEST_DIR)/test_edge
 TEST_COMPOSITE = $(TEST_DIR)/test_composite
 TEST_WAL = $(TEST_DIR)/test_wal
+TEST_CACHE = $(TEST_DIR)/test_cache
+TEST_CACHE_FULL = $(TEST_DIR)/test_cache_full
 
 EXAMPLE_DIR = examples
 EXAMPLE_C = $(EXAMPLE_DIR)/example_c
+TOOLS_DIR = tools
+IMPORT_BOOK = $(TOOLS_DIR)/import_book
 
 PREFIX ?= /usr/local
 LIBDIR = $(PREFIX)/lib
 INCLUDEDIR = $(PREFIX)/include
 
-.PHONY: all clean test test_join test_perf test_edge test_composite test_wal example install
+.PHONY: all clean test test_join test_perf test_edge test_composite test_wal test_cache test_cache_full example install
 
-all: $(LIB) $(TEST_BASIC) $(TEST_JOIN) $(TEST_PERF) $(TEST_EDGE) $(TEST_COMPOSITE) $(TEST_WAL) example
+all: $(LIB) $(TEST_BASIC) $(TEST_JOIN) $(TEST_PERF) $(TEST_EDGE) $(TEST_COMPOSITE) $(TEST_WAL) $(TEST_CACHE) $(TEST_CACHE_FULL) $(IMPORT_BOOK) example
 
 $(LIB): $(OBJECTS)
 	$(CC) $(LDFLAGS) -o $@ $^
@@ -83,6 +88,23 @@ test_wal: $(TEST_WAL)
 	@rm -f wal_data.bin wal_index.index wal_test.bin wal_data2.bin wal_index2.index wal_test2.bin
 	LD_LIBRARY_PATH=. ./$(TEST_WAL)
 
+test_cache: $(TEST_CACHE)
+	@rm -rf test_cache_dir test_cache_lru
+	LD_LIBRARY_PATH=. ./$(TEST_CACHE)
+
+test_cache_full: $(TEST_CACHE_FULL)
+	@rm -rf /tmp/test_crud /tmp/test_ns /tmp/test_search /tmp/test_ttl /tmp/test_iter /tmp/test_persist /tmp/test_stats
+	LD_LIBRARY_PATH=. ./$(TEST_CACHE_FULL)
+
+$(TEST_CACHE): $(TEST_DIR)/test_cache.c $(LIB)
+	$(CC) $(CFLAGS) -o $@ $< -L. -lmydb -Wl,-rpath,.
+
+$(TEST_CACHE_FULL): $(TEST_DIR)/test_cache_full.c $(LIB)
+	$(CC) $(CFLAGS) -o $@ $< -L. -lmydb -Wl,-rpath,.
+
+$(IMPORT_BOOK): $(TOOLS_DIR)/import_book.c $(LIB)
+	$(CC) $(CFLAGS) -o $@ $< -L. -lmydb -Wl,-rpath,.
+
 example: $(LIB)
 	$(CC) $(CFLAGS) -o $(EXAMPLE_C) $(EXAMPLE_DIR)/example.c -L. -lmydb -Wl,-rpath,.
 	@echo "C example built: $(EXAMPLE_C)"
@@ -98,4 +120,4 @@ install: $(LIB)
 	@echo "Header:  $(INCLUDEDIR)/mydb.h"
 
 clean:
-	rm -rf $(OBJ_DIR) $(LIB) $(TEST_BASIC) $(TEST_JOIN) $(TEST_PERF) $(TEST_EDGE) $(TEST_COMPOSITE) $(TEST_WAL) $(EXAMPLE_C) *.bin *.index
+	rm -rf $(OBJ_DIR) $(LIB) $(TEST_BASIC) $(TEST_JOIN) $(TEST_PERF) $(TEST_EDGE) $(TEST_COMPOSITE) $(TEST_WAL) $(TEST_CACHE) $(TEST_CACHE_FULL) $(IMPORT_BOOK) $(EXAMPLE_C) *.bin *.index test_cache_dir test_cache_lru
