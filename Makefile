@@ -9,7 +9,8 @@ TEST_DIR = tests
 # 源文件
 SOURCES = $(wildcard $(SRC_DIR)/utils/*.c) \
           $(wildcard $(SRC_DIR)/storage/*.c) \
-          $(wildcard $(SRC_DIR)/core/*.c)
+          $(wildcard $(SRC_DIR)/core/*.c) \
+          $(wildcard $(SRC_DIR)/types/*.c)
 
 OBJECTS = $(SOURCES:$(SRC_DIR)/%.c=$(OBJ_DIR)/%.o)
 

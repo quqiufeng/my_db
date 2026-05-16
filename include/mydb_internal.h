@@ -115,6 +115,19 @@ int wal_append(db_wal_t* wal, int op, const char* table_name,
 int wal_replay(db_wal_t* wal, db_instance_t* db);
 int wal_fsync(db_wal_t* wal);
 
+// ====== 哈希表操作 ======
+void* hash_create(void);
+void hash_destroy(void* hash);
+int hash_insert(void* hash, const void* key, size_t key_len, rowid_t value);
+rowid_t hash_lookup(void* hash, const void* key, size_t key_len);
+int hash_delete(void* hash, const void* key, size_t key_len);
+
+// ====== B+树操作 ======
+void* btree_create(size_t key_size, int key_type);
+void btree_destroy(void* tree);
+int btree_insert(void* tree, void* key, rowid_t value);
+rowid_t* btree_range(void* tree, void* min_key, void* max_key, size_t* count);
+
 // ====== 索引操作 ======
 int index_create(db_table_t* table, const char* field_name,
                  size_t field_offset, int field_type);

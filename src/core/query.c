@@ -2,6 +2,49 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+// 查找是否有索引匹配给定的字段偏移
+static db_index_t* find_index(db_table_t* table, size_t field_offset) {
+    if (!table || !table->indexes) return NULL;
+    
+    db_index_t* index = table->indexes;
+    while (index) {
+        if (index->field_offset == field_offset) {
+            return index;
+        }
+        index = index->next;
+    }
+    return NULL;
+}
+
+// 使用索引查找
+static rowid_t* query_with_index(db_table_t* table, db_index_t* index, 
+                                 const db_condition_t* cond, size_t* count) {
+    if (!table || !index || !cond || !count) return NULL;
+    *count = 0;
+    
+    if (index->type == INDEX_HASH && cond->op == 0) {
+        // 哈希索引只支持等值查询
+        size_t key_len = index->field_size;
+        if (index->field_type == DB_TYPE_STRING) {
+            key_len = strlen((char*)cond->value);
+        } else {
+            key_len = sizeof(uint64_t);
+        }
+        
+        rowid_t rowid = hash_lookup(index->data, cond->value, key_len);
+        if (rowid > 0) {
+            rowid_t* result = (rowid_t*)malloc(sizeof(rowid_t));
+            if (result) {
+                result[0] = rowid;
+                *count = 1;
+            }
+            return result;
+        }
+    }
+    
+    return NULL;
+}
+
 bool row_match(db_table_t* table, void* row_ptr,
                const db_condition_t* conditions, size_t count) {
     (void)table;
@@ -92,7 +135,37 @@ static rowid_t* query_internal(db_table_t* table,
         return NULL;
     }
     
-    // 收集匹配的行
+    // 尝试使用索引（如果有的话）
+    if (condition_count > 0) {
+        db_index_t* idx = find_index(table, conditions[0].field_offset);
+        if (idx && conditions[0].op == 0) {  // 等值查询
+            size_t index_count = 0;
+            rowid_t* index_results = query_with_index(table, idx, &conditions[0], &index_count);
+            if (index_results && index_count > 0) {
+                // 用索引结果过滤其余条件
+                rowid_t* filtered = (rowid_t*)malloc(sizeof(rowid_t) * index_count);
+                size_t filtered_count = 0;
+                
+                for (size_t i = 0; i < index_count; i++) {
+                    size_t offset = table->data_offset + (index_results[i] - 1) * table->row_stride;
+                    row_header_t* header = (row_header_t*)PTR(table->data_pool->base, offset);
+                    if (header->flags & MYDB_DELETED_FLAG) continue;
+                    
+                    void* row_ptr = (char*)header + sizeof(row_header_t);
+                    if (row_match(table, row_ptr, conditions, condition_count)) {
+                        filtered[filtered_count++] = index_results[i];
+                    }
+                }
+                
+                free(index_results);
+                *out_count = filtered_count;
+                return filtered;
+            }
+            if (index_results) free(index_results);
+        }
+    }
+    
+    // 回退到全表扫描
     rowid_t* results = (rowid_t*)malloc(sizeof(rowid_t) * table->row_count);
     if (!results) {
         *out_count = 0;

@@ -113,7 +113,7 @@ int btree_insert(void* tree, void* key, rowid_t value) {
     return 0;
 }
 
-static void btree_split_child(btree_t* tree, btree_node_t* parent, int idx) {
+static void btree_split_child(btree_t* tree __attribute__((unused)), btree_node_t* parent, int idx) {
     btree_node_t* child = parent->children[idx];
     btree_node_t* new_child = btree_create_node(child->is_leaf);
     if (!new_child) return;
