@@ -308,3 +308,156 @@
 - ✅ make example — 编译示例
 - ✅ make install — 安装到 /usr/local
 - ✅ make clean — 清理
+
+---
+
+## Phase 9: KV Cache 系统（AI Agent 记忆存储）
+
+基于 kvCache.md 设计文档开发。
+
+### 9.1 核心 API 设计
+- [ ] 9.1.1 创建 `include/cache.h`
+  - [ ] 定义 cache_t 不透明句柄
+  - [ ] 定义错误码（和 mydb.h 统一）
+  - [ ] 声明 cache_open/close/sync
+  - [ ] 声明 cache_set/get/del/exists
+  - [ ] 声明 cache_search_prefix/range/regex/fuzzy
+  - [ ] 声明 cache_iter_create/next/destroy
+  - [ ] 声明 cache_ns（namespace 句柄）
+
+### 9.2 存储层
+- [ ] 9.2.1 创建 `src/cache/cache.c`
+  - [ ] 复用 db_pool_t（mmap 零拷贝）
+  - [ ] Entry 格式：[key_len:4][value_len:4][expire_at:8][access_time:8][flags:2][key...][value...]
+  - [ ] 文件头：magic "MYCA" + version + used + entry_count + hash_offset + sorted_offset
+  - [ ] cache_open() — 打开/创建 cache.bin
+  - [ ] cache_close() — 关闭并释放资源
+  - [ ] cache_sync() — msync 刷盘
+
+### 9.3 Hash 索引（借鉴 code_bin）
+- [ ] 9.3.1 创建 `src/cache/hash_index.c`
+  - [ ] FNV-1a hash 算法
+  - [ ] 链地址法冲突处理
+  - [ ] 自动扩容（负载因子 > 0.75）
+  - [ ] hash_insert() — 插入 key → entry_offset
+  - [ ] hash_lookup() — 查找 key
+  - [ ] hash_delete() — 删除 key
+  - [ ] 零拷贝：所有数据在 pool 中，只存 offset
+
+### 9.4 排序数组索引
+- [ ] 9.4.1 创建 `src/cache/sorted_array.c`
+  - [ ] pool_alloc 分配连续数组
+  - [ ] 二分查找定位
+  - [ ] 插入时保持有序（O(n) 移动，n < 10万可接受）
+  - [ ] sorted_insert() — 插入 key_offset
+  - [ ] sorted_remove() — 删除 key_offset
+  - [ ] sorted_find_prefix() — 二分找前缀起点
+  - [ ] sorted_find_range() — 二分找范围起止
+
+### 9.5 Namespace 支持
+- [ ] 9.5.1 创建 `src/cache/namespace.c`
+  - [ ] 解析 key 中的 namespace（按 / 分割）
+  - [ ] namespace_index: hashmap → vector of entry_offsets
+  - [ ] hierarchy_index: parent_ns → child_ns list
+  - [ ] cache_ns() — 创建 namespace 句柄
+  - [ ] cache_set_ns() — 在 namespace 内设置
+  - [ ] cache_get_ns() — 在 namespace 内获取
+
+### 9.6 搜索实现
+- [ ] 9.6.1 创建 `src/cache/search.c`
+  - [ ] cache_search_prefix() — 前缀搜索
+  - [ ] cache_search_range() — 范围搜索
+  - [ ] cache_search_regex() — 正则搜索（POSIX regexec）
+  - [ ] cache_search_fuzzy() — 模糊搜索（Levenshtein 距离）
+  - [ ] cache_search_tag() — 标签搜索（遍历 JSON 提取 tags）
+  - [ ] 结果排序：按相关性 score 排序
+
+### 9.7 TTL 和 LRU
+- [ ] 9.7.1 生命周期管理
+  - [ ] 惰性过期：get 时检查 expire_at
+  - [ ] LRU 淘汰：超过 max_memory 时淘汰最老的非永久条目
+  - [ ] cache_purge_expired() — 清理所有过期条目
+  - [ ] cache_compact() — 物理回收空间
+
+### 9.8 迭代器
+- [ ] 9.8.1 创建 `src/cache/iter.c`
+  - [ ] cache_iter_create() — 创建迭代器
+  - [ ] cache_iter_next() — 遍历所有 entry
+  - [ ] cache_iter_ns_next() — 遍历指定 namespace
+  - [ ] cache_iter_destroy() — 释放迭代器
+
+### 9.9 导入工具
+- [ ] 9.9.1 电子书导入（Python）
+  - [ ] tools/import_book.py — 复用 WordCard 解析库
+  - [ ] 分章逻辑（split_into_chapters）
+  - [ ] LLM 生成摘要
+  - [ ] 生成 tags
+  - [ ] 存入 KV Cache
+- [ ] 9.9.2 GitHub 源码导入（Python）
+  - [ ] tools/import_github.py
+  - [ ] 克隆仓库
+  - [ ] 扫描文件树
+  - [ ] 提取函数签名
+  - [ ] LLM 分析代码生成摘要
+  - [ ] 存入 KV Cache
+
+### 9.10 CLI 工具
+- [ ] 9.10.1 命令行接口
+  - [ ] cache set/get/del/list
+  - [ ] cache search --prefix/--regex/--fuzzy
+  - [ ] cache import-book/import-github
+  - [ ] cache stats/compact/purge/check
+
+### 9.11 FFI 绑定
+- [ ] 9.11.1 Python 绑定
+  - [ ] mydb.py 添加 Cache 类
+  - [ ] cache.open/set/get/search
+- [ ] 9.11.2 LuaJIT 绑定
+  - [ ] mydb.lua 添加 Cache 模块
+  - [ ] cache.open/set/get/search
+
+### 9.12 测试
+- [ ] 9.12.1 单元测试
+  - [ ] tests/test_cache.c — 基础 CRUD
+  - [ ] tests/test_cache_search.c — 搜索测试
+  - [ ] tests/test_cache_namespace.c — namespace 测试
+  - [ ] tests/test_cache_ttl.c — TTL/LRU 测试
+- [ ] 9.12.2 性能测试
+  - [ ] tests/test_cache_perf.c — 10万条性能基准
+
+### 9.13 构建系统
+- [ ] 9.13.1 Makefile 更新
+  - [ ] 编译 cache 模块
+  - [ ] 编译测试
+  - [ ] 编译 CLI 工具
+
+---
+
+## Phase 10: 优化与完善
+
+### 10.1 性能优化
+- [ ] 10.1.1 JSON 解析优化（缓存 parsed JSON）
+- [ ] 10.1.2 批量操作（cache_batch_set）
+- [ ] 10.1.3 内存预分配（预估 entry 大小）
+
+### 10.2 错误处理
+- [ ] 10.2.1 cache_check() — 完整性检查
+- [ ] 10.2.2 损坏恢复（自动重建索引）
+
+### 10.3 文档
+- [ ] 10.3.1 更新 README.md（添加 KV Cache 说明）
+- [ ] 10.3.2 添加 cache 使用示例
+
+---
+
+## 当前状态
+
+**🔄 V2.0 KV Cache 开发中**
+
+| Phase | 任务数 | 已完成 | 状态 |
+|-------|--------|--------|------|
+| Phase 1-8 | 42 | 42 | ✅ V1.0 完成 |
+| Phase 9 | 13 | 0 | 🔄 KV Cache 开发中 |
+| Phase 10 | 3 | 0 | ⏳ 待开始 |
+
+**总计：58 个任务，已完成 42 个（72%）**
