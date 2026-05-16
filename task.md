@@ -188,10 +188,10 @@
   - [ ] 测试 Checkpoint
 
 ### 6.2 FFI 测试
-- [ ] 6.2.1 `tests/test_ffi.lua` ⏳ V2.0
-  - [ ] LuaJIT FFI 完整测试
-- [ ] 6.2.2 `tests/test_ffi.py` ⏳ V2.0
-  - [ ] Python ctypes 完整测试
+- [x] 6.2.1 `tests/test_ffi.lua` ✅ V1.0
+  - [x] LuaJIT FFI 完整测试（16/16 通过）
+- [x] 6.2.2 `tests/test_ffi.py` ✅ V1.0
+  - [x] Python ctypes 完整测试（16/16 通过）
 
 ### 6.3 示例程序
 - [ ] 6.3.1 `examples/example.c` ⏳ 可用 tests/test_basic.c 代替
@@ -226,7 +226,7 @@
 - [x] 8.1.2 LIMIT offset > 总行数返回 "[]"
 - [x] 8.1.3 JOIN 无匹配返回 "[]"
 - [x] 8.1.4 DELETE/UPDATE 不存在返回 DB_ERR_NOENT
-- [ ] 8.1.5 表名重复注册返回 DB_ERR_EXIST ⏳ V2.0
+- [x] 8.1.5 表名重复注册返回 DB_ERR_EXIST ✅ V1.0
 - [ ] 8.1.6 查询结果超过 max_rows 返回 DB_ERR_RESULT_TOO_LARGE ⏳ V2.0
 
 ### 8.2 性能优化
@@ -257,7 +257,7 @@
 | Phase 7 | 2 | 2 | ✅ 完成 |
 | Phase 8 | 8 | 6 | ✅ 主要边界情况完成 |
 
-**总计：42 个任务，已完成 34 个（81%）**
+**总计：42 个任务，已完成 36 个（86%）**
 
 **✅ V1.0 已实现：**
 - ✅ mmap 零拷贝内存池（支持动态扩展 mremap）
@@ -281,13 +281,14 @@
 - ✅ 性能：50万行/秒插入速度
 - ✅ FFI 友好（纯 C API，支持 LuaJIT/Python）
 - ✅ 零编译警告
+- ✅ 边界情况处理（空表、LIMIT越界、重复表名等）
+- ✅ WAL 崩溃恢复 API（db_wal_replay）
 
 **⏳ V2.0 待实现：**
-- ⏳ WAL 崩溃恢复自动触发（db_open 时调用 wal_replay）
 - ⏳ 复合索引
 - ⏳ B+树索引用于 ORDER BY 和范围查询
 - ⏳ 索引与数据持久化（索引存入 .index 文件）
-- ⏳ FFI 测试（LuaJIT / Python）
+- ⏳ 查询结果超过 max_rows 返回错误
 - ⏳ 示例程序（C / Lua / Python）
 - ⏳ 安装目标（make install）
 - ⏳ Checkpoint 机制
