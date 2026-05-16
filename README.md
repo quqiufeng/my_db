@@ -500,7 +500,6 @@ users:set_compact_threshold(0.3)  -- 删除率 ≥ 30% 时自动触发
 ```
 my_db/
 ├── design.md                # 设计方案
-├── ARCHITECTURE_CHANGES.md  # 架构变更记录（原设计 vs 实际实现）
 ├── README.md                # 本文件
 ├── task.md                  # 开发任务列表
 ├── LICENSE

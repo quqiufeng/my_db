@@ -970,7 +970,6 @@ mydb.db_close(db)
 my_db/
 ├── design.md              # 本文件（设计方案）
 ├── README.md              # 项目说明
-├── ARCHITECTURE_CHANGES.md # 架构变更记录（原设计 vs 实际实现）
 ├── task.md                # 开发任务列表
 ├── LICENSE
 ├── Makefile
