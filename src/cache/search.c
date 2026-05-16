@@ -17,10 +17,11 @@ static const char* entry_key(cache_t* cache, size_t offset, size_t* key_len_out)
 }
 
 // 从 entry_offset 读取 value
+// Layout: [header][key(key_len+1)][value(value_len+1)]
 static const char* entry_value(cache_t* cache, size_t offset, size_t* value_len_out) {
     cache_entry_header_t* h = (cache_entry_header_t*)CACHE_PTR(cache, offset);
     if (value_len_out) *value_len_out = h->value_len;
-    return (const char*)CACHE_PTR(cache, offset + sizeof(cache_entry_header_t) + h->key_len);
+    return (const char*)CACHE_PTR(cache, offset + sizeof(cache_entry_header_t) + h->key_len + 1);
 }
 
 // 检查 entry 是否有效（未删除、未过期）

@@ -29,9 +29,9 @@ int cache_entry_is_expired(cache_entry_t* entry, uint64_t now) {
     return entry->expire_at < now;
 }
 
-// 计算 entry 总大小（含 header + key + value，对齐）
+// 计算 entry 总大小（含 header + key + '\0' + value + '\0'，对齐）
 size_t cache_entry_total_size(cache_entry_header_t* header) {
-    size_t size = sizeof(cache_entry_header_t) + header->key_len + header->value_len;
+    size_t size = sizeof(cache_entry_header_t) + header->key_len + 1 + header->value_len + 1;
     return (size + MYDB_ALIGN - 1) & ~(MYDB_ALIGN - 1);
 }
 
@@ -65,11 +65,12 @@ static void cache_header_save(cache_t* cache) {
 }
 
 // 解析现有 entry（从 pool offset 读取）
+// Layout: [header][key(key_len+1)][value(value_len+1)]
 static void cache_entry_parse(cache_t* cache, size_t offset, cache_entry_t* entry) {
     cache_entry_header_t* header = (cache_entry_header_t*)CACHE_PTR(cache, offset);
     entry->offset = offset;
     entry->key_offset = offset + sizeof(cache_entry_header_t);
-    entry->value_offset = entry->key_offset + header->key_len;
+    entry->value_offset = entry->key_offset + header->key_len + 1;  // +1 for key's '\0'
     entry->key_len = header->key_len;
     entry->value_len = header->value_len;
     entry->expire_at = header->expire_at;
@@ -235,8 +236,8 @@ int cache_set(cache_t* cache, const char* key, const char* value, uint64_t ttl_m
     if (key_len == 0 || key_len >= CACHE_MAX_KEY_LEN) return CACHE_ERR_INVAL;
     if (value_len >= CACHE_MAX_VALUE_LEN) return CACHE_ERR_INVAL;
     
-    // 检查内存限制（+1 给 value 末尾的 '\0'，方便 C 字符串处理）
-    size_t entry_size = sizeof(cache_entry_header_t) + key_len + value_len + 1;
+    // 检查内存限制（+2: key 和 value 各一个 '\0'，方便 C 字符串处理）
+    size_t entry_size = sizeof(cache_entry_header_t) + key_len + 1 + value_len + 1;
     size_t aligned_size = (entry_size + MYDB_ALIGN - 1) & ~(MYDB_ALIGN - 1);
     
     // LRU 淘汰：如果内存不足，淘汰最老的非永久条目
@@ -299,8 +300,9 @@ int cache_set(cache_t* cache, const char* key, const char* value, uint64_t ttl_m
     // 写入 key 和 value
     char* key_ptr = (char*)CACHE_PTR(cache, offset + sizeof(cache_entry_header_t));
     memcpy(key_ptr, key, key_len);
+    key_ptr[key_len] = '\0';  // null-terminate for C string compatibility
     
-    char* value_ptr = key_ptr + key_len;
+    char* value_ptr = key_ptr + key_len + 1;
     memcpy(value_ptr, value, value_len);
     value_ptr[value_len] = '\0';  // null-terminate for C string compatibility
     
