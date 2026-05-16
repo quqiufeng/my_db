@@ -374,11 +374,11 @@
   - [x] namespace 过滤支持
 
 ### 9.7 TTL 和 LRU
-- [ ] 9.7.1 生命周期管理
-  - [ ] 惰性过期：get 时检查 expire_at
-  - [ ] LRU 淘汰：超过 max_memory 时淘汰最老的非永久条目
-  - [ ] cache_purge_expired() — 清理所有过期条目
-  - [ ] cache_compact() — 物理回收空间
+- [x] 9.7.1 生命周期管理
+  - [x] 惰性过期：get 时检查 expire_at（已集成到 cache_get/find_entry）
+  - [x] LRU 淘汰：超过 max_memory 时淘汰最老的非永久条目
+  - [x] cache_purge_expired() — 清理所有过期条目
+  - [x] cache_compact() — 物理回收空间（返回可清理数量）
 
 ### 9.8 迭代器
 - [ ] 9.8.1 创建 `src/cache/iter.c`

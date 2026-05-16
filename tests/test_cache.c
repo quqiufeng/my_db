@@ -2,6 +2,8 @@
 #include <stdio.h>
 #include <string.h>
 #include <assert.h>
+#include <unistd.h>
+#include <stdlib.h>
 
 int main() {
     printf("=== KV Cache 基础测试 ===\n\n");
@@ -123,6 +125,48 @@ int main() {
     cache_results_free(results);
     
     cache_close(cache);
+    
+    printf("\n=== TTL/LRU 测试 ===\n");
+    
+    // 17. TTL 过期测试
+    cache = cache_open("test_cache_dir", 10 * 1024 * 1024);
+    ret = cache_set(cache, "/ttl/test", "will expire", 100);  // 100ms TTL
+    assert(ret == CACHE_OK);
+    assert(cache_get(cache, "/ttl/test") != NULL);
+    printf("[OK] TTL 设置成功\n");
+    
+    // 等待过期
+    usleep(200000);  // 200ms
+    assert(cache_get(cache, "/ttl/test") == NULL);
+    printf("[OK] TTL 过期后获取为 NULL\n");
+    
+    // 18. LRU 淘汰测试（创建小内存 cache）
+    cache_close(cache);
+    (void)system("rm -rf test_cache_lru");
+    cache_t* lru_cache = cache_open("test_cache_lru", 80);  // 80 bytes，只能存一个 entry
+    assert(lru_cache != NULL);
+    
+    // 设置第一个 key（约 64 bytes）
+    ret = cache_set(lru_cache, "/lru/1", "first entry", 1000);
+    assert(ret == CACHE_OK);
+    assert(cache_get(lru_cache, "/lru/1") != NULL);
+    
+    // 设置第二个 key，触发 LRU，淘汰第一个
+    ret = cache_set(lru_cache, "/lru/2", "second entry", 1000);
+    assert(ret == CACHE_OK);
+    assert(cache_get(lru_cache, "/lru/1") == NULL);  // 被淘汰
+    assert(cache_get(lru_cache, "/lru/2") != NULL);
+    
+    // 设置第三个 key，触发 LRU，淘汰第二个
+    ret = cache_set(lru_cache, "/lru/3", "third entry", 1000);
+    assert(ret == CACHE_OK);
+    assert(cache_get(lru_cache, "/lru/2") == NULL);  // 被淘汰
+    assert(cache_get(lru_cache, "/lru/3") != NULL);
+    
+    printf("[OK] LRU 淘汰正常工作\n");
+    
+    cache_close(lru_cache);
+    (void)system("rm -rf test_cache_lru");
     
     printf("\n=== 所有测试通过 ===\n");
     return 0;

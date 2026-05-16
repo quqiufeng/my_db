@@ -238,8 +238,49 @@ int cache_set(cache_t* cache, const char* key, const char* value, uint64_t ttl_m
     // 检查内存限制
     size_t entry_size = sizeof(cache_entry_header_t) + key_len + value_len;
     size_t aligned_size = (entry_size + MYDB_ALIGN - 1) & ~(MYDB_ALIGN - 1);
-    if (cache->memory_used + aligned_size > cache->memory_max) {
-        return CACHE_ERR_NOMEM;
+    
+    // LRU 淘汰：如果内存不足，淘汰最老的非永久条目
+    while (cache->memory_used + aligned_size > cache->memory_max) {
+        // 找到 access_time 最老的非永久、未删除条目
+        uint64_t oldest_time = UINT64_MAX;
+        size_t oldest_offset = 0;
+        char oldest_key[1024];
+        size_t oldest_key_len = 0;
+        size_t oldest_size = 0;
+        
+        for (size_t i = 0; i < cache->sorted.count; i++) {
+            size_t offset = cache_sorted_get(cache, i);
+            if (!offset) continue;
+            
+            cache_entry_header_t* h = (cache_entry_header_t*)CACHE_PTR(cache, offset);
+            if (h->flags & CACHE_ENTRY_DELETED) continue;
+            if (h->flags & CACHE_ENTRY_PERMANENT) continue;
+            
+            if (h->access_time < oldest_time) {
+                oldest_time = h->access_time;
+                oldest_offset = offset;
+                oldest_key_len = h->key_len < sizeof(oldest_key) - 1 ? h->key_len : sizeof(oldest_key) - 1;
+                memcpy(oldest_key, (char*)CACHE_PTR(cache, offset + sizeof(cache_entry_header_t)), oldest_key_len);
+                oldest_key[oldest_key_len] = '\0';
+                oldest_size = cache_entry_total_size(h);
+            }
+        }
+        
+        if (!oldest_offset) {
+            return CACHE_ERR_NOMEM;  // 没有可淘汰的条目
+        }
+        
+        // 直接淘汰（不调用 cache_del 避免递归和重复操作）
+        cache_entry_header_t* h = (cache_entry_header_t*)CACHE_PTR(cache, oldest_offset);
+        h->flags |= CACHE_ENTRY_DELETED;
+        cache->entry_count--;
+        cache->deleted_count++;
+        cache->memory_used -= oldest_size;
+        
+        // 更新索引
+        cache_hash_remove(cache, oldest_key, oldest_key_len);
+        cache_sorted_remove(cache, oldest_key, oldest_key_len);
+        cache_ns_remove(cache, oldest_key);
     }
     
     // 分配 entry 内存
