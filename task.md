@@ -316,14 +316,14 @@
 基于 kvCache.md 设计文档开发。
 
 ### 9.1 核心 API 设计
-- [ ] 9.1.1 创建 `include/cache.h`
-  - [ ] 定义 cache_t 不透明句柄
-  - [ ] 定义错误码（和 mydb.h 统一）
-  - [ ] 声明 cache_open/close/sync
-  - [ ] 声明 cache_set/get/del/exists
-  - [ ] 声明 cache_search_prefix/range/regex/fuzzy
-  - [ ] 声明 cache_iter_create/next/destroy
-  - [ ] 声明 cache_ns（namespace 句柄）
+- [x] 9.1.1 创建 `include/cache.h`
+  - [x] 定义 cache_t 不透明句柄
+  - [x] 定义错误码（和 mydb.h 统一）
+  - [x] 声明 cache_open/close/sync
+  - [x] 声明 cache_set/get/del/exists
+  - [x] 声明 cache_search_prefix/range/regex/fuzzy
+  - [x] 声明 cache_iter_create/next/destroy
+  - [x] 声明 cache_ns（namespace 句柄）
 
 ### 9.2 存储层
 - [ ] 9.2.1 创建 `src/cache/cache.c`
