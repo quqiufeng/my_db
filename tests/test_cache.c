@@ -124,6 +124,31 @@ int main() {
     }
     cache_results_free(results);
     
+    // 迭代器测试
+    printf("\n=== 迭代器测试 ===\n");
+    cache_iter_t* it = cache_iter_create(cache);
+    assert(it != NULL);
+    
+    const char* it_key;
+    const char* it_value;
+    int iter_count = 0;
+    while (cache_iter_next(it, &it_key, &it_value)) {
+        iter_count++;
+    }
+    printf("[OK] 迭代器遍历: %d 条\n", iter_count);
+    assert(iter_count == (int)cache_count(cache));
+    
+    // namespace 迭代器
+    cache_iter_reset(it);
+    iter_count = 0;
+    while (cache_iter_ns_next(it, "/coding/cpp", &it_key, &it_value)) {
+        iter_count++;
+        printf("    - %s\n", it_key);
+    }
+    printf("[OK] namespace 迭代器 '/coding/cpp': %d 条\n", iter_count);
+    
+    cache_iter_destroy(it);
+    
     cache_close(cache);
     
     printf("\n=== TTL/LRU 测试 ===\n");

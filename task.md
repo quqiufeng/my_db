@@ -381,11 +381,12 @@
   - [x] cache_compact() — 物理回收空间（返回可清理数量）
 
 ### 9.8 迭代器
-- [ ] 9.8.1 创建 `src/cache/iter.c`
-  - [ ] cache_iter_create() — 创建迭代器
-  - [ ] cache_iter_next() — 遍历所有 entry
-  - [ ] cache_iter_ns_next() — 遍历指定 namespace
-  - [ ] cache_iter_destroy() — 释放迭代器
+- [x] 9.8.1 创建 `src/cache/iter.c`
+  - [x] cache_iter_create() — 创建迭代器
+  - [x] cache_iter_next() — 遍历所有 entry（按 key 字典序）
+  - [x] cache_iter_ns_next() — 遍历指定 namespace
+  - [x] cache_iter_destroy() — 释放迭代器
+  - [x] cache_iter_reset() — 重置迭代器位置
 
 ### 9.9 导入工具
 - [ ] 9.9.1 电子书导入（Python）

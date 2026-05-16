@@ -74,6 +74,14 @@ typedef struct cache_ns_node {
     size_t child_capacity;
 } cache_ns_node_t;
 
+// ====== 迭代器 ======
+struct cache_iter {
+    cache_t* cache;
+    size_t index;               // 当前在 sorted 数组中的位置
+    const char* ns_prefix;      // namespace 过滤（NULL = 不过滤）
+    size_t ns_prefix_len;       // namespace 前缀长度
+};
+
 // ====== Cache 实例 ======
 struct cache {
     db_pool_t pool;             // mmap pool（复用 my_db）
