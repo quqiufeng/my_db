@@ -5,6 +5,7 @@
 #include <time.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <sys/mman.h>
 
 // 从 pool 分配内存并返回 offset
 static size_t cache_pool_alloc(cache_t* cache, size_t size) {
@@ -416,19 +417,108 @@ int cache_check(const char* db_dir) {
     int fd = open(path, O_RDONLY);
     if (fd < 0) return CACHE_ERR_IO;
     
-    char magic[4];
-    if (read(fd, magic, 4) != 4 || memcmp(magic, CACHE_MAGIC, 4) != 0) {
+    // 读取并验证文件头
+    char header_buf[CACHE_HEADER_SIZE];
+    ssize_t n = read(fd, header_buf, CACHE_HEADER_SIZE);
+    if (n != CACHE_HEADER_SIZE) {
         close(fd);
         return CACHE_ERR_CORRUPTED;
     }
     
-    uint32_t version;
-    if (read(fd, &version, 4) != 4 || version != CACHE_VERSION) {
+    if (memcmp(header_buf, CACHE_MAGIC, 4) != 0) {
         close(fd);
         return CACHE_ERR_CORRUPTED;
     }
     
+    uint32_t version = *(uint32_t*)(header_buf + 4);
+    if (version != CACHE_VERSION) {
+        close(fd);
+        return CACHE_ERR_CORRUPTED;
+    }
+    
+    uint64_t file_used = *(uint64_t*)(header_buf + 8);
+    uint64_t entry_count = *(uint64_t*)(header_buf + 16);
+    
+    // 获取文件大小
+    off_t file_size = lseek(fd, 0, SEEK_END);
+    if (file_size < 0) {
+        close(fd);
+        return CACHE_ERR_IO;
+    }
+    
+    // 映射文件进行完整检查
+    void* map = mmap(NULL, file_size, PROT_READ, MAP_PRIVATE, fd, 0);
     close(fd);
+    
+    if (map == MAP_FAILED) {
+        return CACHE_ERR_IO;
+    }
+    
+    // 扫描所有 entry（跳过 hash bucket 等非 entry 数据）
+    size_t offset = CACHE_HEADER_SIZE;
+    size_t valid_count = 0;
+    size_t deleted_count = 0;
+    size_t expired_count = 0;
+    size_t skipped_count = 0;
+    uint64_t now = cache_now_ms();
+    
+    while (offset + sizeof(cache_entry_header_t) <= (size_t)file_used) {
+        cache_entry_header_t* h = (cache_entry_header_t*)((char*)map + offset);
+        
+        // 检查是否是有效的 entry header（同 cache_open 重建逻辑）
+        if (h->key_len == 0 || h->key_len > CACHE_MAX_KEY_LEN ||
+            h->value_len > CACHE_MAX_VALUE_LEN) {
+            // 不是 entry（可能是 hash bucket 或其他内部数据），跳过
+            offset += MYDB_ALIGN;
+            skipped_count++;
+            continue;
+        }
+        
+        // 计算 entry 总大小
+        size_t total_size = cache_entry_total_size(h);
+        
+        // 检查是否越界
+        if (offset + total_size > (size_t)file_used) {
+            fprintf(stderr, "  Warning: entry at offset %zu exceeds file size\n", offset);
+            break;
+        }
+        
+        // 检查对齐
+        if (total_size % MYDB_ALIGN != 0) {
+            fprintf(stderr, "  Warning: entry at offset %zu not aligned\n", offset);
+            offset += MYDB_ALIGN;
+            continue;
+        }
+        
+        // 统计
+        if (h->flags & CACHE_ENTRY_DELETED) {
+            deleted_count++;
+        } else if (h->expire_at > 0 && h->expire_at < now) {
+            expired_count++;
+        } else {
+            valid_count++;
+        }
+        
+        offset += total_size;
+    }
+    
+    munmap(map, file_size);
+    
+    // 输出检查结果（到 stderr，因为这是一个诊断工具）
+    fprintf(stderr, "Cache check: %s\n", path);
+    fprintf(stderr, "  File size: %ld bytes\n", (long)file_size);
+    fprintf(stderr, "  Header used: %lu bytes\n", (unsigned long)file_used);
+    fprintf(stderr, "  Valid entries: %zu\n", valid_count);
+    fprintf(stderr, "  Deleted entries: %zu\n", deleted_count);
+    fprintf(stderr, "  Expired entries: %zu\n", expired_count);
+    fprintf(stderr, "  Skipped (internal): %zu\n", skipped_count);
+    
+    // 验证 entry_count 是否匹配
+    if (valid_count != entry_count) {
+        fprintf(stderr, "  Warning: entry_count mismatch (header=%lu, actual=%zu)\n",
+                (unsigned long)entry_count, valid_count);
+    }
+    
     return CACHE_OK;
 }
 
