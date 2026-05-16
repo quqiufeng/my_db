@@ -556,6 +556,114 @@ Trie 树前缀搜索是 O(key_len)，理论上最优。但：
 
 ## 10. 未来扩展
 
+## 11. 电子书导入设计
+
+### 11.1 复用 WordCard 解析能力
+
+WordCard 项目（`~/WordCard`）已集成 C++ 电子书解析库：
+- `libmobiparse.so` - MOBI/AZW3 解析（基于 libmobi）
+- `libpdfparse.so` - PDF 解析（基于 MuPDF）
+
+**复用策略**：
+```
+KV Cache 导入工具
+├── 复用 WordCard 的 C++ 解析库（通过 ctypes）
+│   ├── libmobiparse.so → 提取 MOBI/AZW3 纯文本
+│   └── libpdfparse.so  → 提取 PDF 纯文本 + 页码
+│
+├── 复用分章逻辑（import_book.py 的 split_into_chapters）
+│   ├── PDF：按页码分隔符分章
+│   ├── MOBI：按 "Chapter X" 标题分章
+│   └──  fallback：固定长度分块
+│
+└── 不复用词汇提取（KV Cache 不需要背单词）
+```
+
+### 11.2 导入流程
+
+```python
+# tools/import_book.py
+
+def import_book_to_cache(cache_dir: str, book_path: str, namespace: str):
+    """将电子书导入 KV Cache"""
+    
+    # 1. 解析电子书
+    text = parse_book(book_path)  # 复用 WordCard 解析器
+    
+    # 2. 智能分章
+    chapters = split_into_chapters(text)  # 复用 WordCard 分章逻辑
+    
+    # 3. 逐章处理
+    for ch in chapters:
+        # 3.1 提取关键段落（信息量最大的段落）
+        key_paragraphs = extract_key_paragraphs(ch.text, max_chars=2000)
+        
+        # 3.2 调用 LLM 生成精华摘要
+        summary = call_llm(f"总结以下技术文档的核心要点（200字内）：\n{key_paragraphs}")
+        
+        # 3.3 生成 tags（LLM 自动提取）
+        tags = call_llm(f"从以下文本提取 3-5 个关键词标签（逗号分隔）：\n{summary}")
+        
+        # 3.4 构建 KV entry
+        key = f"{namespace}/chapter-{ch.number}"
+        value = json.dumps({
+            "t": "book-chapter",
+            "c": summary,
+            "s": book_path,           # 源文件路径
+            "p": f"page:{ch.start_page}",
+            "i": 4,
+            "tags": tags.split(","),
+            "full_text_hash": hash(ch.text)  # 用于去重校验
+        })
+        
+        # 3.5 存入 KV Cache（通过 ctypes 调用 libmydb.so）
+        cache_set(cache, key, value, TTL_PERMANENT)
+    
+    # 4. 生成目录索引
+    toc = generate_toc(chapters)
+    cache_set(cache, f"{namespace}/_meta/toc", toc, TTL_PERMANENT)
+    
+    cache_sync(cache)
+```
+
+### 11.3 使用示例
+
+```bash
+# 导入技术书籍
+python tools/import_book.py \
+  --book "Effective_CPP.pdf" \
+  --cache-dir "./agent-memory" \
+  --namespace "/books/effective-cpp" \
+  --llm-url "http://localhost:11434" \
+  --chunk-size 2000
+
+# 导入后搜索
+python -c "
+from mydb import Cache
+cache = Cache.open('agent-memory')
+results = cache.prefix('/books/effective-cpp/')
+for r in results:
+    print(f'{r.key}: {r.value}')
+"
+```
+
+### 11.4 与 WordCard 的关系
+
+| | WordCard | KV Cache 导入工具 |
+|--|----------|-------------------|
+| **目标** | 背单词、学英语 | Agent 知识库 |
+| **存储内容** | 单词卡、理解题 | 精华摘要、技术要点 |
+| **解析库** | 复用 `libmobiparse.so` + `libpdfparse.so` | **复用相同的库** |
+| **分章逻辑** | `split_into_chapters()` | **复用相同的函数** |
+| **LLM 用途** | 翻译、出题 | **生成摘要、提取 tags** |
+| **存储后端** | SQLite | **KV Cache (mmap)** |
+
+**不重复造轮子**：解析和分章直接复用 WordCard 的成熟代码。
+
+---
+
+## 12. 未来扩展
+
 ### Phase 2
 - [ ] 向量搜索：集成 HNSW，支持语义相似度搜索（"找和 move semantics 相关的知识点"）
 - [ ] 标签索引：维护 tag → [offsets] 反向索引，加速标签搜索
