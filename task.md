@@ -391,10 +391,10 @@
 ### 9.9 导入工具
 - [x] 9.9.1 电子书导入（C 工具）
   - [x] tools/import_book.c — 复用 WordCard wrapper 库
-  - [x] 分块逻辑（split_into_chunks，按大小分块）
+  - [x] 分块逻辑（split_into_chunks，按 ~4KB 在段落边界分块）
   - [x] 存入 KV Cache（JSON 格式）
-  - [ ] LLM 生成摘要（Phase 10）
-  - [ ] 生成 tags（Phase 10）
+  - [~] LLM 生成摘要 — 跳过（已在 WordCard 验证，无需重复集成）
+  - [~] 生成 tags — 跳过
 - [ ] 9.9.2 GitHub 源码导入（Python）
   - [ ] tools/import_github.py
   - [ ] 克隆仓库
