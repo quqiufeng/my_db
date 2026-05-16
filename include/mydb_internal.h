@@ -119,6 +119,8 @@ void db_set_error(db_instance_t* db, int code, const char* fmt, ...);
 
 // ====== 池操作 ======
 int pool_init(db_pool_t* pool, const char* path, size_t initial_size);
+int pool_init_with_header(db_pool_t* pool, const char* path, size_t initial_size,
+                          const char* magic, uint32_t version, size_t* out_used);
 void pool_close(db_pool_t* pool);
 int pool_sync(db_pool_t* pool);
 void* pool_alloc(db_pool_t* pool, size_t size);

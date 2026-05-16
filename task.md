@@ -326,13 +326,13 @@
   - [x] 声明 cache_ns（namespace 句柄）
 
 ### 9.2 存储层
-- [ ] 9.2.1 创建 `src/cache/cache.c`
-  - [ ] 复用 db_pool_t（mmap 零拷贝）
-  - [ ] Entry 格式：[key_len:4][value_len:4][expire_at:8][access_time:8][flags:2][key...][value...]
-  - [ ] 文件头：magic "MYCA" + version + used + entry_count + hash_offset + sorted_offset
-  - [ ] cache_open() — 打开/创建 cache.bin
-  - [ ] cache_close() — 关闭并释放资源
-  - [ ] cache_sync() — msync 刷盘
+- [x] 9.2.1 创建 `src/cache/cache.c`
+  - [x] 复用 db_pool_t（mmap 零拷贝）
+  - [x] Entry 格式：[key_len:4][value_len:4][expire_at:8][access_time:8][flags:2][key...][value...]
+  - [x] 文件头：magic "MYCA" + version + used + entry_count + hash_offset + sorted_offset
+  - [x] cache_open() — 打开/创建 cache.bin
+  - [x] cache_close() — 关闭并释放资源
+  - [x] cache_sync() — msync 刷盘
 
 ### 9.3 Hash 索引（借鉴 code_bin）
 - [ ] 9.3.1 创建 `src/cache/hash_index.c`

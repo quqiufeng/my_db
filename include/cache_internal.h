@@ -9,7 +9,9 @@
 // ====== 文件格式常量 ======
 #define CACHE_MAGIC     "MYCA"   // Magic: "MYCA"
 #define CACHE_VERSION   1
-#define CACHE_HEADER_SIZE 48     // 对齐到 8
+#define CACHE_HEADER_SIZE 48     // cache 文件头大小，对齐到 8
+#define CACHE_ENTRY_HEADER_SIZE 28  // entry 头大小（packed）
+#define CACHE_ENTRY_HEADER_ALIGNED 32 // entry 头对齐到 8
 
 // ====== Entry 标志位 ======
 #define CACHE_ENTRY_DELETED     0x01  // 逻辑删除
@@ -25,8 +27,8 @@ typedef struct __attribute__((packed)) {
     uint16_t reserved;          // 保留（对齐到 8）
 } cache_entry_header_t;
 
-// 总大小：24 bytes（对齐到 8）
-_Static_assert(sizeof(cache_entry_header_t) == 24, "Entry header must be 24 bytes");
+// 总大小：28 bytes（packed，但后续对齐到 32）
+_Static_assert(sizeof(cache_entry_header_t) == 28, "Entry header must be 28 bytes");
 
 // ====== Entry（内存中的表示）======
 typedef struct {
