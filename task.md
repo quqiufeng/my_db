@@ -404,56 +404,60 @@
   - [~] LLM 分析代码生成摘要 — 跳过
 
 ### 9.10 CLI 工具
-- [x] 9.10.1 命令行接口（import_book CLI）
-  - [x] cache import-book <file> [namespace]
-  - [ ] cache set/get/del/list
-  - [ ] cache search --prefix/--regex/--fuzzy
-  - [ ] cache stats/compact/purge/check
+- [x] 9.10.1 命令行接口 (tools/cache_cli.py)
+  - [x] cache set/get/del/exists
+  - [x] cache list --prefix/--limit
+  - [x] cache search --prefix/--regex/--fuzzy/--tag
+  - [x] cache stats/compact/purge/check
+  - [x] cache import-book/import-github
 
 ### 9.11 FFI 绑定
 - [x] 9.11.1 Python 绑定 (mydb/cache.py)
-  - [x] Cache 类：dict-like 接口 (__getitem__, __setitem__, __contains__, __delitem__)
+  - [x] Cache 类：dict-like 接口
   - [x] open_cache() 工厂函数
   - [x] set_json/get_json: JSON 自动序列化
   - [x] Namespace: set_ns/get_ns/del_ns
   - [x] Search: search_prefix/regex/fuzzy/tag
   - [x] Iterator: items/keys/values (yield generator)
   - [x] Management: expire/touch/compact/purge_expired/sync
-- [ ] 9.11.2 LuaJIT 绑定 (Phase 10)
+- [x] 9.11.2 LuaJIT 绑定 (mydb.lua)
+  - [x] Cache 类 (set/get/delete/exists)
+  - [x] Namespace: set_ns/get_ns/delete_ns
+  - [x] Search: search_prefix/regex/fuzzy/tag
+  - [x] Iterator: items/keys/values (Lua coroutines)
+  - [x] Management: expire/touch/compact/purge/sync
 
 ### 9.12 测试
 - [x] 9.12.1 单元测试 (tests/test_cache_full.c)
-  - [x] test_basic_crud — 基础 CRUD
-  - [x] test_namespace — namespace 操作
-  - [x] test_search — 前缀/范围/正则/模糊搜索
-  - [x] test_ttl_lru — TTL 过期和 LRU 淘汰
-  - [x] test_iterator — 迭代器遍历
-  - [x] test_persistence — 重启持久化
-  - [x] test_stats — 统计信息
-- [ ] 9.12.2 性能测试 (Phase 10)
+  - [x] test_basic_crud / test_namespace / test_search
+  - [x] test_ttl_lru / test_iterator / test_persistence / test_stats
+- [x] 9.12.2 性能测试 (tests/test_cache_perf.c)
+  - [x] Insert: ~6,757 ops/sec (5K entries)
+  - [x] Get: ~5M ops/sec (Hash 索引)
+  - [x] Prefix search: ~1M searches/sec
 
 ### 9.13 构建系统
 - [x] 9.13.1 Makefile 更新
   - [x] 编译 cache 模块到 libmydb.so
-  - [x] tests/test_cache, tests/test_cache_full
-  - [x] tools/import_book
+  - [x] tests/test_cache, tests/test_cache_full, tests/test_cache_perf
+  - [x] tools/import_book, tools/cache
 
 ---
 
 ## Phase 10: 优化与完善
 
 ### 10.1 性能优化
-- [ ] 10.1.1 JSON 解析优化（缓存 parsed JSON）
-- [ ] 10.1.2 批量操作（cache_batch_set）
-- [ ] 10.1.3 内存预分配（预估 entry 大小）
+- [x] 10.1.1 cache_batch_set() — 批量插入 (2.5x 提速)
+- [~] 10.1.2 JSON 解析优化 — 暂不实现
+- [~] 10.1.3 内存预分配 — 暂不实现
 
 ### 10.2 错误处理
-- [ ] 10.2.1 cache_check() — 完整性检查
-- [ ] 10.2.2 损坏恢复（自动重建索引）
+- [x] 10.2.1 cache_check() — 完整性检查（全量扫描）
+- [~] 10.2.2 损坏恢复 — 当前可重建索引，自动恢复待优化
 
 ### 10.3 文档
-- [ ] 10.3.1 更新 README.md（添加 KV Cache 说明）
-- [ ] 10.3.2 添加 cache 使用示例
+- [x] 10.3.1 更新 README.md（添加 KV Cache 章节）
+- [x] 10.3.2 添加 cache 使用示例（C/Python/Lua）
 
 ---
 
