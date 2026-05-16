@@ -123,8 +123,16 @@ class _CacheResult(ctypes.Structure):
         ("score", ctypes.c_double),
     ]
 
-_lib.cache_search_options_default.argtypes = []
-_lib.cache_search_options_default.restype = _CacheSearchOptions
+# cache_search_options_default 是 C 内联函数，不在 .so 中
+# 我们在 Python 中直接构造默认值
+
+def _default_search_options():
+    """创建默认搜索选项"""
+    opts = _CacheSearchOptions()
+    opts.max_results = 100
+    opts.case_sensitive = 0
+    opts.ns_filter = None
+    return opts
 
 # cache_search_prefix(cache_t*, const char*, options*, result**, count*) -> int
 _lib.cache_search_prefix.argtypes = [

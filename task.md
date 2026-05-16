@@ -395,13 +395,13 @@
   - [x] 存入 KV Cache（JSON 格式）
   - [~] LLM 生成摘要 — 跳过（已在 WordCard 验证，无需重复集成）
   - [~] 生成 tags — 跳过
-- [ ] 9.9.2 GitHub 源码导入（Python）
-  - [ ] tools/import_github.py
-  - [ ] 克隆仓库
-  - [ ] 扫描文件树
-  - [ ] 提取函数签名
-  - [ ] LLM 分析代码生成摘要
-  - [ ] 存入 KV Cache
+- [x] 9.9.2 GitHub 源码导入（Python）
+  - [x] tools/import_github.py — 复用 code_bin ctags 解析思路
+  - [x] git clone --depth 1 浅克隆
+  - [x] ctags-universal --output-format=json 提取符号
+  - [x] 解析 name/path/kind/line/signature（同 code_bin parse_ctags_line）
+  - [x] 存储符号索引 + 源码文件内容
+  - [~] LLM 分析代码生成摘要 — 跳过
 
 ### 9.10 CLI 工具
 - [x] 9.10.1 命令行接口（import_book CLI）

@@ -235,8 +235,8 @@ int cache_set(cache_t* cache, const char* key, const char* value, uint64_t ttl_m
     if (key_len == 0 || key_len >= CACHE_MAX_KEY_LEN) return CACHE_ERR_INVAL;
     if (value_len >= CACHE_MAX_VALUE_LEN) return CACHE_ERR_INVAL;
     
-    // 检查内存限制
-    size_t entry_size = sizeof(cache_entry_header_t) + key_len + value_len;
+    // 检查内存限制（+1 给 value 末尾的 '\0'，方便 C 字符串处理）
+    size_t entry_size = sizeof(cache_entry_header_t) + key_len + value_len + 1;
     size_t aligned_size = (entry_size + MYDB_ALIGN - 1) & ~(MYDB_ALIGN - 1);
     
     // LRU 淘汰：如果内存不足，淘汰最老的非永久条目
@@ -302,6 +302,7 @@ int cache_set(cache_t* cache, const char* key, const char* value, uint64_t ttl_m
     
     char* value_ptr = key_ptr + key_len;
     memcpy(value_ptr, value, value_len);
+    value_ptr[value_len] = '\0';  // null-terminate for C string compatibility
     
     // 更新统计
     cache->entry_count++;
