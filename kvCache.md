@@ -8,6 +8,23 @@
 
 ## 1. 设计哲学
 
+### 核心约束：单机单线程（多读单写）
+
+和 my_db 数据库层保持一致：
+- **无事务**：不需要 ACID，不需要 WAL
+- **无并发控制**：不需要锁、MVCC、隔离级别
+- **多读单写**：多 Agent 可以同时只读，写入由单一 Agent 负责
+- **应用层协调**：如果多 Agent 需要写入，由应用层协调（如一个 Agent 专门负责导入）
+
+**使用模式**：
+```
+Agent A（主 Agent）: 读/写 cache，导入新记忆
+Agent B（辅助）:     只读 cache，搜索知识
+Agent C（分析）:     只读 cache，生成报告
+```
+
+如果需要多线程，由调用方在应用层加锁（和 my_db 一样）。
+
 ### 为什么不是传统数据库？
 
 传统数据库（MySQL/PostgreSQL）是为**结构化业务数据**设计的：
@@ -184,6 +201,15 @@ cache_set_json(cache, "/coding/design-patterns/singleton",
 ### 4.1 基础操作
 
 ```c
+// 错误码（和 my_db 统一）
+#define CACHE_OK           0
+#define CACHE_ERR_INVAL   -1   // 参数错误
+#define CACHE_ERR_IO      -2   // 文件/磁盘错误
+#define CACHE_ERR_NOMEM   -3   // 内存不足
+#define CACHE_ERR_NOENT   -4   // key 不存在
+#define CACHE_ERR_EXIST   -5   // key 已存在（预留）
+#define CACHE_ERR_CORRUPTED -6 // 文件损坏
+
 // 生命周期
 cache_t cache_open(const char* db_dir, size_t max_memory);
 void cache_close(cache_t cache);
@@ -998,9 +1024,108 @@ def update_github_project(cache, repo_url: str):
     cache_sync(cache)
 ```
 
+## 14. CLI 工具设计
+
+### 14.1 命令行接口
+
+```bash
+# 基础操作
+mydb-cache set /coding/cpp/move "右值引用..." --ttl 0
+mydb-cache get /coding/cpp/move
+mydb-cache del /coding/cpp/move
+mydb-cache list --prefix /coding/cpp/
+
+# 搜索
+mydb-cache search --prefix /coding/cpp/           # 前缀搜索
+mydb-cache search --regex ".*async.*"             # 正则搜索
+mydb-cache search --fuzzy "move semantics"        # 模糊搜索
+mydb-cache search --tag "performance"             # 标签搜索
+
+# 导入（记忆更新工具）
+mydb-cache import-book Effective_CPP.pdf --ns /books/effective-cpp
+mydb-cache import-github redis/redis --ns /github/redis/redis
+
+# 管理
+mydb-cache stats                                   # 统计信息
+mydb-cache compact                                 # 物理清理
+mydb-cache purge-expired                           # 清理过期
+mydb-cache check                                   # 完整性检查
+mydb-cache export --output backup.json             # 导出
+mydb-cache import --input backup.json              # 导入
+```
+
+### 14.2 设计哲学
+
+- **简单直接**：和 `git` 一样，动词 + 名词
+- **JSON 输出**：`--json` 选项，便于脚本处理
+- **Unix 管道**：支持 `|` 管道操作
+- **批量操作**：`--batch` 选项，减少系统调用
+
 ---
 
-## 13. 未来扩展
+## 15. 性能基准（验收标准）
+
+| 指标 | 目标 | 测试方法 | 说明 |
+|------|------|----------|------|
+| **set** | > 500K ops/sec | 10万次连续写入 | 单线程，无 fsync |
+| **get** | > 2M ops/sec | 10万次连续读取 | 内存命中 |
+| **prefix search** | > 100K ops/sec | 1万次前缀搜索 | 返回 100 条结果 |
+| **range search** | > 100K ops/sec | 1万次范围搜索 | 返回 100 条结果 |
+| **regex search** | > 10K ops/sec | 1千次正则搜索 | 简单模式 `.*async.*` |
+| **fuzzy search** | > 1K ops/sec | 1千次模糊搜索 | Levenshtein 距离 |
+| **memory per entry** | ~key+value+48B | 统计平均 | 包含索引开销 |
+| **startup time** | < 10ms | 加载 10万条 | 从 mmap 恢复 |
+| **compact time** | < 1s | 清理 50% 过期数据 | 重建索引 |
+
+**测试环境**: Ubuntu 22.04, x86_64, 16GB RAM, SSD
+
+---
+
+## 16. FFI 绑定（后续实现）
+
+### 16.1 Python 绑定
+
+```python
+from mydb import Cache
+
+cache = Cache.open("agent-memory")
+cache.set("/coding/cpp/move", "右值引用...", ttl=0)
+results = cache.prefix("/coding/cpp/")
+for r in results:
+    print(f"{r.key}: {r.value}")
+```
+
+### 16.2 LuaJIT 绑定
+
+```lua
+local cache = require("mydb").Cache.open("agent-memory")
+cache:set("/coding/cpp/move", "右值引用...", 0)
+local results = cache:prefix("/coding/cpp/")
+for _, r in ipairs(results) do
+    print(r.key .. ": " .. r.value)
+end
+```
+
+---
+
+## 17. 未来扩展
+
+### Phase 2
+- [ ] 向量搜索：集成 HNSW，支持语义相似度搜索（"找和 move semantics 相关的知识点"）
+- [ ] 标签索引：维护 tag → [offsets] 反向索引，加速标签搜索
+- [ ] 跳表升级：数据量 > 100万时，排序数组升级为跳表
+- [ ] 源码语义分析：集成 tree-sitter，精确提取 AST 信息
+
+### Phase 3
+- [ ] 分布式：多 Agent 共享知识库（只读副本）
+- [ ] 快照：定期快照备份
+- [ ] 增量同步：GitHub webhook 自动更新项目记忆
+
+---
+
+*文档版本: 1.3*  
+*更新日期: 2026-05-16*  
+*状态: 设计完成，待实现*
 
 ### Phase 2
 - [ ] 向量搜索：集成 HNSW，支持语义相似度搜索（"找和 move semantics 相关的知识点"）
