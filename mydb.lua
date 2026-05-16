@@ -406,7 +406,278 @@ function DB:max_rows(n)
     _lib.db_config_max_rows(self._ptr, n)
 end
 
+-- ========================================================================
+-- KV Cache FFI 声明
+-- ========================================================================
+
+ffi.cdef[[
+    typedef struct cache cache_t;
+    typedef struct cache_iter cache_iter_t;
+    
+    typedef struct {
+        const char* key;
+        const char* value;
+        double score;
+    } cache_result_t;
+    
+    typedef struct {
+        int max_results;
+        int case_sensitive;
+        const char* ns_filter;
+    } cache_search_options_t;
+    
+    cache_t* cache_open(const char* db_dir, size_t max_memory);
+    void cache_close(cache_t* cache);
+    int cache_sync(cache_t* cache);
+    
+    int cache_set(cache_t* cache, const char* key, const char* value, uint64_t ttl_ms);
+    const char* cache_get(cache_t* cache, const char* key);
+    int cache_del(cache_t* cache, const char* key);
+    int cache_exists(cache_t* cache, const char* key);
+    
+    size_t cache_count(cache_t* cache);
+    size_t cache_memory_used(cache_t* cache);
+    size_t cache_memory_max(cache_t* cache);
+    
+    int cache_search_prefix(cache_t* cache, const char* prefix,
+                            const cache_search_options_t* options,
+                            cache_result_t** out_results, size_t* out_count);
+    int cache_search_range(cache_t* cache, const char* start_key, const char* end_key,
+                           const cache_search_options_t* options,
+                           cache_result_t** out_results, size_t* out_count);
+    int cache_search_regex(cache_t* cache, const char* pattern,
+                           const cache_search_options_t* options,
+                           cache_result_t** out_results, size_t* out_count);
+    int cache_search_fuzzy(cache_t* cache, const char* query,
+                           const cache_search_options_t* options,
+                           cache_result_t** out_results, size_t* out_count);
+    int cache_search_tag(cache_t* cache, const char* tag,
+                         const cache_search_options_t* options,
+                         cache_result_t** out_results, size_t* out_count);
+    void cache_results_free(cache_result_t* results);
+    
+    cache_iter_t* cache_iter_create(cache_t* cache);
+    void cache_iter_destroy(cache_iter_t* iter);
+    int cache_iter_next(cache_iter_t* iter, const char** key_out, const char** value_out);
+    void cache_iter_reset(cache_iter_t* iter);
+    
+    int cache_set_ns(cache_t* cache, const char* ns, const char* key, 
+                     const char* value, uint64_t ttl_ms);
+    const char* cache_get_ns(cache_t* cache, const char* ns, const char* key);
+    int cache_del_ns(cache_t* cache, const char* ns, const char* key);
+    
+    int cache_expire(cache_t* cache, const char* key);
+    int cache_touch(cache_t* cache, const char* key);
+    size_t cache_compact(cache_t* cache);
+    size_t cache_purge_expired(cache_t* cache);
+    int cache_check(const char* db_dir);
+]]
+
+-- ========================================================================
+-- Cache 对象
+-- ========================================================================
+
+local Cache = {}
+Cache.__index = Cache
+
+function Cache:set(key, value, ttl_ms)
+    ttl_ms = ttl_ms or 0
+    local ret = _lib.cache_set(self._ptr, key, value, ttl_ms)
+    if ret ~= 0 then
+        error("cache_set failed: " .. ret)
+    end
+    return self
+end
+
+function Cache:get(key)
+    local ptr = _lib.cache_get(self._ptr, key)
+    if ptr == nil then return nil end
+    return ffi.string(ptr)
+end
+
+function Cache:delete(key)
+    local ret = _lib.cache_del(self._ptr, key)
+    if ret == -4 then
+        error("Key not found: " .. key)
+    end
+    return ret == 0
+end
+
+function Cache:exists(key)
+    return _lib.cache_exists(self._ptr, key) ~= 0
+end
+
+function Cache:set_json(key, obj, ttl_ms)
+    local json = require("cjson").encode(obj)
+    return self:set(key, json, ttl_ms)
+end
+
+function Cache:get_json(key)
+    local value = self:get(key)
+    if not value then return nil end
+    return require("cjson").decode(value)
+end
+
+-- Namespace
+function Cache:set_ns(ns, key, value, ttl_ms)
+    ttl_ms = ttl_ms or 0
+    local ret = _lib.cache_set_ns(self._ptr, ns, key, value, ttl_ms)
+    if ret ~= 0 then
+        error("cache_set_ns failed: " .. ret)
+    end
+end
+
+function Cache:get_ns(ns, key)
+    local ptr = _lib.cache_get_ns(self._ptr, ns, key)
+    if ptr == nil then return nil end
+    return ffi.string(ptr)
+end
+
+function Cache:delete_ns(ns, key)
+    local ret = _lib.cache_del_ns(self._ptr, ns, key)
+    if ret == -4 then
+        error("Key not found: " .. ns .. "/" .. key)
+    end
+end
+
+-- Search helpers
+local function search_helper(cache, func_name, query, max_results)
+    max_results = max_results or 100
+    local opts = ffi.new("cache_search_options_t")
+    opts.max_results = max_results
+    opts.case_sensitive = 0
+    opts.ns_filter = nil
+    
+    local results_ptr = ffi.new("cache_result_t*[1]")
+    local count = ffi.new("size_t[1]")
+    
+    local func = _lib[func_name]
+    local ret = func(cache._ptr, query, opts, results_ptr, count)
+    
+    if ret ~= 0 then
+        return {}
+    end
+    
+    local results = {}
+    local n = tonumber(count[0])
+    for i = 0, n - 1 do
+        local r = results_ptr[0][i]
+        table.insert(results, {
+            key = ffi.string(r.key),
+            value = ffi.string(r.value),
+            score = tonumber(r.score),
+        })
+    end
+    
+    if results_ptr[0] ~= nil then
+        _lib.cache_results_free(results_ptr[0])
+    end
+    
+    return results
+end
+
+function Cache:search_prefix(prefix, max_results)
+    return search_helper(self, "cache_search_prefix", prefix, max_results)
+end
+
+function Cache:search_regex(pattern, max_results)
+    return search_helper(self, "cache_search_regex", pattern, max_results)
+end
+
+function Cache:search_fuzzy(query, max_results)
+    return search_helper(self, "cache_search_fuzzy", query, max_results)
+end
+
+function Cache:search_tag(tag, max_results)
+    return search_helper(self, "cache_search_tag", tag, max_results)
+end
+
+-- Iterator
+function Cache:items()
+    local iter = _lib.cache_iter_create(self._ptr)
+    if iter == nil then return function() end end
+    
+    return function()
+        local key_ptr = ffi.new("const char*[1]")
+        local value_ptr = ffi.new("const char*[1]")
+        
+        if _lib.cache_iter_next(iter, key_ptr, value_ptr) == 1 then
+            return ffi.string(key_ptr[0]), ffi.string(value_ptr[0])
+        else
+            _lib.cache_iter_destroy(iter)
+            return nil
+        end
+    end
+end
+
+function Cache:keys()
+    return coroutine.wrap(function()
+        for k, _ in self:items() do
+            coroutine.yield(k)
+        end
+    end)
+end
+
+function Cache:values()
+    return coroutine.wrap(function()
+        for _, v in self:items() do
+            coroutine.yield(v)
+        end
+    end)
+end
+
+-- Management
+function Cache:expire(key)
+    local ret = _lib.cache_expire(self._ptr, key)
+    if ret == -4 then error("Key not found: " .. key) end
+end
+
+function Cache:touch(key)
+    local ret = _lib.cache_touch(self._ptr, key)
+    if ret == -4 then error("Key not found: " .. key) end
+end
+
+function Cache:compact()
+    return tonumber(_lib.cache_compact(self._ptr))
+end
+
+function Cache:purge_expired()
+    return tonumber(_lib.cache_purge_expired(self._ptr))
+end
+
+function Cache:sync()
+    return _lib.cache_sync(self._ptr)
+end
+
+function Cache:close()
+    if self._ptr then
+        _lib.cache_close(self._ptr)
+        self._ptr = nil
+    end
+end
+
+function Cache:__tostring()
+    return string.format("Cache(count=%d, memory=%d/%d)",
+        self:count(), self:memory_used(), self:memory_max())
+end
+
+-- Properties
+function Cache:count()
+    return tonumber(_lib.cache_count(self._ptr))
+end
+
+function Cache:memory_used()
+    return tonumber(_lib.cache_memory_used(self._ptr))
+end
+
+function Cache:memory_max()
+    return tonumber(_lib.cache_memory_max(self._ptr))
+end
+
+-- ========================================================================
 -- 模块 API
+-- ========================================================================
+
 local mydb = {}
 
 function mydb.open(db_dir, pool_size)
@@ -435,6 +706,25 @@ function mydb.create(db_dir, schemas)
     end
     
     return db
+end
+
+-- KV Cache
+function mydb.open_cache(db_dir, max_memory)
+    db_dir = db_dir or "cache_data"
+    max_memory = max_memory or (100 * 1024 * 1024)
+    
+    local ptr = _lib.cache_open(db_dir, max_memory)
+    if ptr == nil then
+        error("Failed to open cache: " .. db_dir)
+    end
+    
+    return setmetatable({
+        _ptr = ptr,
+    }, Cache)
+end
+
+function mydb.cache_check(db_dir)
+    return _lib.cache_check(db_dir) == 0
 end
 
 return mydb
