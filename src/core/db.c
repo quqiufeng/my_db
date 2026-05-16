@@ -58,10 +58,9 @@ void db_close(db_t db) {
             pool_close(&inst->tables[i]->index_meta_pool);
             pool_close(&inst->tables[i]->index_pool);
             pool_close(&inst->tables[i]->data_pool);
-            for (size_t j = 0; j < inst->tables[i]->field_count; j++) {
-                free((void*)inst->tables[i]->fields[j].name);
-            }
-            free(inst->tables[i]->fields);
+            free_table_indexes(inst->tables[i]);
+            free_table_fields(inst->tables[i]);
+            free_list_destroy(inst->tables[i]);
             free(inst->tables[i]);
         }
     }

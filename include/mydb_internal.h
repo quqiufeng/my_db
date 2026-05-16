@@ -157,6 +157,9 @@ rowid_t* index_lookup(db_table_t* table, const char* field_name,
 
 // ====== 内存管理 ======
 void db_table_set_compact_threshold(table_t table, float threshold);
+void free_table_indexes(db_table_t* table);
+void free_table_fields(db_table_t* table);
+void free_list_destroy(db_table_t* table);
 
 // ====== JSON 序列化 ======
 char* json_row(db_table_t* table, void* row_ptr);

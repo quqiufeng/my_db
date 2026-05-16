@@ -209,7 +209,7 @@ int index_create(db_table_t* table, const char* field_name,
     db_index_t* index = (db_index_t*)calloc(1, sizeof(db_index_t));
     if (!index) return -1;
     
-    strncpy(index->name, field_name, MYDB_TABLE_NAME_LEN - 1);
+    snprintf(index->name, MYDB_TABLE_NAME_LEN, "%s", field_name);
     index->field_count = 1;
     index->field_offsets[0] = field_offset;
     index->field_types[0] = field_type;

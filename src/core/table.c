@@ -100,7 +100,7 @@ static void load_index_defs(db_table_t* t) {
         db_index_t* index = (db_index_t*)calloc(1, sizeof(db_index_t));
         if (!index) continue;
         
-        strncpy(index->name, name, MYDB_TABLE_NAME_LEN - 1);
+        snprintf(index->name, MYDB_TABLE_NAME_LEN, "%s", name);
         index->type = (index_type_t)type;
         index->field_count = (int)field_count;
         for (uint32_t j = 0; j < field_count && j < MYDB_MAX_INDEX_FIELDS; j++) {
@@ -155,7 +155,7 @@ static rowid_t free_list_pop(db_table_t* t) {
     return t->free_list[--t->free_count];
 }
 
-static void free_list_destroy(db_table_t* t) {
+void free_list_destroy(db_table_t* t) {
     if (t->free_list) {
         free(t->free_list);
         t->free_list = NULL;
@@ -312,7 +312,18 @@ table_t db_table(db_t db, const char* name) {
     return NULL;
 }
 
-static void free_table_fields(db_table_t* table) {
+void free_table_indexes(db_table_t* table) {
+    if (!table) return;
+    db_index_t* idx = table->indexes;
+    while (idx) {
+        db_index_t* next = idx->next;
+        free(idx);
+        idx = next;
+    }
+    table->indexes = NULL;
+}
+
+void free_table_fields(db_table_t* table) {
     if (!table || !table->fields) return;
     for (size_t i = 0; i < table->field_count; i++) {
         free((void*)table->fields[i].name);
@@ -332,6 +343,7 @@ int db_table_drop(db_t db, const char* name) {
             pool_close(&inst->tables[i]->index_meta_pool);
             pool_close(&inst->tables[i]->index_pool);
             pool_close(&inst->tables[i]->data_pool);
+            free_table_indexes(inst->tables[i]);
             free_table_fields(inst->tables[i]);
             free_list_destroy(inst->tables[i]);
             free(inst->tables[i]);
@@ -418,7 +430,40 @@ size_t db_table_compact(table_t table) {
         idx = idx->next;
     }
     
-    // 重新插入所有数据
+    // 重建 string_pool（清理已删除行的字符串）
+    if (t->string_pool.base) {
+        // 重置 string_pool：保留文件头，清空数据区
+        memset((char*)t->string_pool.base + 16, 0, t->string_pool.size - 16);
+        t->string_pool.used = 16;
+        *(size_t*)((char*)t->string_pool.base + 8) = 16;
+        
+        // 重新插入所有存活行的字符串
+        for (rowid_t id = 1; id <= t->max_rowid; id++) {
+            size_t offset = id * t->row_stride;
+            row_header_t* header = (row_header_t*)PTR(t->data_pool.base, offset);
+            if (header->flags & MYDB_DELETED_FLAG) continue;
+            
+            void* row_ptr = (char*)header + sizeof(row_header_t);
+            char* dst = (char*)row_ptr;
+            
+            for (size_t i = 0; i < t->field_count; i++) {
+                db_field_def_t* f = &t->fields[i];
+                if (f->type == DB_TYPE_VARSTRING) {
+                    db_string_ref_t* ref = (db_string_ref_t*)(dst + f->offset);
+                    if (ref->length > 0) {
+                        void* str_ptr = pool_alloc(&t->string_pool, ref->length + 1);
+                        if (str_ptr) {
+                            size_t old_offset = ref->offset;
+                            ref->offset = (size_t)((char*)str_ptr - (char*)t->string_pool.base);
+                            memcpy(str_ptr, (char*)t->string_pool.base + old_offset, ref->length + 1);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    // 重新插入所有数据到索引
     for (rowid_t id = 1; id <= t->max_rowid; id++) {
         size_t offset = id * t->row_stride;
         row_header_t* header = (row_header_t*)PTR(t->data_pool.base, offset);
@@ -430,6 +475,9 @@ size_t db_table_compact(table_t table) {
     if (t->data_pool.size > new_size * 2 && new_size >= 1024 * 1024) {
         pool_resize(&t->data_pool, new_size);
     }
+    
+    // 保存索引元数据
+    save_index_defs(t);
     
     return old_max_rowid - new_id;
 }
@@ -555,6 +603,7 @@ size_t db_batch_insert(table_t table, const void* rows, size_t row_size, size_t 
 }
 
 int db_update(table_t table, rowid_t id, const void* row, size_t row_size) {
+    (void)row_size;  // 参数保留用于API兼容性，实际通过字段列表计算大小
     if (!table || !row || id == 0) return DB_ERR_INVAL;
     db_table_t* t = (db_table_t*)table;
     
