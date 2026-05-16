@@ -11,4 +11,5 @@ tests/test_perf
 # Test data files
 *.bin
 *.index
+*.idx
 *.wal
