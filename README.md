@@ -58,6 +58,99 @@
 - **无锁设计**：类似 Redis，单线程/用户自行保证并发，简单高效
 - **极致性能**：单线程 50万+ 行/秒插入速度
 
+## KV Cache（AI Agent 记忆存储）
+
+专为 AI Agent 设计的**层级化记忆存储子系统**，支持 Namespace 组织、多维搜索和 TTL/LRU 管理。
+
+### 核心特性
+
+- **Namespace 层级**：`/` 分隔的路径式 key，如 `/coding/cpp/move-semantics`
+- **5 种搜索**：前缀、范围、正则、模糊（Levenshtein）、标签
+- **TTL + LRU**：自动过期 + 内存不足时淘汰最老条目
+- **零拷贝持久化**：复用 my_db mmap 架构，内存 = 磁盘
+- **Python FFI**：`mydb/cache.py` 提供类 dict 接口
+
+### 快速开始
+
+```python
+from mydb.cache import open_cache
+
+# 打开 cache
+cache = open_cache("./agent_memory", 100*1024*1024)
+
+# 基础 CRUD
+cache.set("/agent/personality", "友好、专业、简洁", ttl_ms=0)
+value = cache.get("/agent/personality")
+
+# Namespace 操作
+cache.set_ns("/coding/cpp", "move", "右值引用实现完美转发...")
+cpp_knowledge = cache.get_ns("/coding/cpp", "move")
+
+# 搜索
+results = cache.search_prefix("/coding/cpp")  # 前缀搜索
+results = cache.search_regex(".*async.*")      # 正则搜索
+results = cache.search_fuzzy("/coding/vect")   # 模糊搜索
+results = cache.search_tag("协程")              # 标签搜索
+
+# 迭代
+for key, value in cache.items():
+    print(f"{key}: {value}")
+
+# 统计
+print(f"Entries: {cache.count}, Memory: {cache.memory_used / 1024} KB")
+
+cache.close()
+```
+
+### CLI 工具
+
+```bash
+# 基础 CRUD
+cache set /coding/cpp/move "右值引用实现完美转发"
+cache get /coding/cpp/move
+cache del /coding/cpp/move
+cache list --prefix /coding
+
+# 搜索
+cache search --prefix /coding
+cache search --regex ".*async.*"
+cache search --fuzzy "vect"
+
+# 管理
+cache stats
+cache compact
+cache purge
+
+# 导入
+cache import-book ~/book.mobi /books/cpp
+cache import-github https://github.com/redis/redis
+```
+
+### 存储格式
+
+```
+cache_data/
+└── cache.bin          # mmap 零拷贝存储
+    # Entry: [header][key][\0][value][\0]
+    # Header: key_len, value_len, expire_at, access_time, flags
+```
+
+### 性能基准
+
+| 操作 | 性能 |
+|------|------|
+| Insert | ~6,757 ops/sec (5K entries, sorted array O(n)) |
+| Get | ~5,000,000 ops/sec (Hash 索引) |
+| Prefix Search | ~1,000,000 searches/sec |
+| Iterate | 遍历 5K 条目 < 1ms |
+
+*注：100K 条插入当前因 O(n) 排序数组较慢，Phase 10 将优化*
+
+### 导入工具
+
+- **电子书**：`tools/import_book.c` — 支持 MOBI/PDF/EPUB，按 ~4KB 分块
+- **GitHub 源码**：`tools/import_github.py` — ctags 提取符号 + 源码存储
+
 ## 架构设计
 
 ### 整体架构
