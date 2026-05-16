@@ -59,22 +59,46 @@ cache.bin (mmap pool)
 - 零拷贝：entry 通过 offset 访问，mmap 自动映射到文件
 - `cache_sync()` 调用 `msync(MS_SYNC)` 强制落盘
 
-### 2.2 双索引架构
+### 2.2 双索引架构（借鉴 code_bin）
+
+**为什么借鉴 code_bin？**
+
+`~/my-agi/code_bin` 是已完成的代码索引系统，做了优秀的索引格式设计：
+- **索引格式 V4**: 分层 Header + String Table + Symbol Table
+- **Hash 算法**: FNV-1a + 开放寻址/链地址法，自动扩容
+- **搜索策略**: 精确匹配、前缀、模糊(Levenshtein)、正则(PCRE2)
+- **内存对齐**: 64-byte 对齐，缓存友好
+
+**借鉴点**:
+
+| 特性 | code_bin 实现 | KV Cache 采用 |
+|------|---------------|---------------|
+| **Hash 算法** | FNV-1a, 开放寻址 | ✅ FNV-1a, 链地址法（更适合变长key） |
+| **内存对齐** | 64B 对齐 | ✅ 8B 对齐（my_db 标准） |
+| **搜索选项** | query_options_t | ✅ cache_search_options_t |
+| **返回格式** | query_result_t (score) | ✅ cache_result_t (score) |
+| **模糊搜索** | Levenshtein 距离 | ✅ 简化版 Levenshtein |
+| **正则** | PCRE2 | ❌ POSIX regexec（减少依赖） |
+| **迭代器** | hashmap_iter | ✅ cache_iter |
+
+**不借鉴点**: mempool（用 db_pool_t）、固定大小 entry（变长更灵活）、ctags 解析（不需要）
 
 **Hash 索引**: key_hash → entry_offset
 ```
 O(1) get/set/del/exists
-冲突处理：链地址法
+冲突处理：链地址法（借鉴 code_bin hashmap）
 自动扩容：负载因子 > 0.75 时 bucket 翻倍
+Hash 算法：FNV-1a（借鉴 code_bin）
 ```
 
 **排序数组**: 所有 key_offset 按字典序排列
 ```
 pool_alloc 分配连续数组
-二分查找：O(log n) 定位
+二分查找：O(log n) 定位（借鉴 code_bin 查询引擎）
 范围扫描：O(k) 返回 k 个结果
 前缀搜索：O(log n + k)
 正则搜索：O(log n + k) 定位起点 + 遍历匹配
+模糊搜索：O(n) 遍历 + Levenshtein 距离计算（借鉴 code_bin fuzzy_search）
 ```
 
 ### 2.3 Namespace 设计
