@@ -3,8 +3,6 @@
 // 零拷贝哈希表：所有数据分配在 mmap pool 中
 // 使用 offset 而非指针（因为 mmap 地址可能变化）
 
-#define POOL_PTR(pool, offset) ((void*)((char*)(pool)->base + (offset)))
-
 // Hash 表头（存储在 pool 中）
 typedef struct {
     size_t  bucket_count;
@@ -31,12 +29,6 @@ static uint64_t hash_fnv1a(const void* data, size_t len) {
 }
 
 // 从 pool 分配内存，返回 offset
-static size_t pool_alloc_offset(db_pool_t* pool, size_t size) {
-    void* ptr = pool_alloc(pool, size);
-    if (!ptr) return 0;
-    return (size_t)((char*)ptr - (char*)pool->base);
-}
-
 size_t hash_create(db_pool_t* pool) {
     if (!pool) return 0;
     

@@ -426,6 +426,9 @@ size_t db_table_compact(table_t table) {
         if (idx->type == INDEX_HASH) {
             hash_destroy(&t->index_pool, idx->data_offset);
             idx->data_offset = hash_create(&t->index_pool);
+        } else if (idx->type == INDEX_BTREE) {
+            btree_destroy(&t->index_pool, idx->data_offset);
+            idx->data_offset = btree_create(&t->index_pool, idx->field_sizes[0], idx->field_types[0]);
         }
         idx = idx->next;
     }
@@ -739,8 +742,8 @@ int db_table_add_index_composite(table_t table, db_field_def_t* fields, size_t f
         key_size += fields[i].size;
     }
     
-    // B+树暂时使用堆内存（后续可迁移到 pool）
-    index->data_offset = (size_t)btree_create(key_size, fields[0].type);
+    // B+树使用 pool 零拷贝
+    index->data_offset = btree_create(&table->index_pool, key_size, fields[0].type);
     if (!index->data_offset) {
         free(index);
         return DB_ERR_NOMEM;

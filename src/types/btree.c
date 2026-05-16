@@ -1,123 +1,175 @@
 #include "mydb_internal.h"
 
-// 简化版 B+树（用于范围查询和排序）
-// 每个节点存储多个键值对，使用数组实现
+// 零拷贝 B+树（基于 pool offset）
+// 所有节点和 key 数据从 pool_alloc 分配，使用 offset 寻址
 
-#define BTREE_ORDER 32  // 每个节点的最大键数
+#define BTREE_ORDER 32
 
-typedef struct btree_node {
-    int             is_leaf;
-    int             num_keys;
-    void*           keys[BTREE_ORDER];      // 键数组
-    rowid_t         values[BTREE_ORDER];    // 值数组
-    struct btree_node* children[BTREE_ORDER + 1]; // 子节点（非叶子节点）
-    struct btree_node* next;                // 叶子节点链表（用于范围扫描）
+// B+树头（存储在 pool 中）
+typedef struct {
+    size_t root_offset;   // 根节点 offset
+    size_t key_size;      // 键大小
+    int    key_type;      // 键类型
+} btree_header_t;
+
+// B+树节点（固定大小，存储在 pool 中）
+typedef struct {
+    int     is_leaf;
+    int     num_keys;
+    size_t  keys[BTREE_ORDER];        // key 数据在 pool 中的 offset
+    rowid_t values[BTREE_ORDER];      // 值数组
+    size_t  children[BTREE_ORDER + 1]; // 子节点 offset（0 表示无）
+    size_t  next;                     // 下一个叶子节点 offset
 } btree_node_t;
 
-typedef struct {
-    btree_node_t*   root;
-    size_t          key_size;
-    int             key_type;
-} btree_t;
+// 辅助宏：通过 offset 获取指针
+#define BTREE_HDR(pool, off) ((btree_header_t*)POOL_PTR(pool, off))
+#define BTREE_NODE(pool, off) ((btree_node_t*)POOL_PTR(pool, off))
 
-static int btree_compare(void* a, void* b, size_t size, int type) {
-    if (type == DB_TYPE_STRING) {
+static int btree_compare(db_pool_t* pool, size_t key_a_off, size_t key_b_off,
+                         size_t key_size, int key_type) {
+    void* a = POOL_PTR(pool, key_a_off);
+    void* b = POOL_PTR(pool, key_b_off);
+    
+    if (key_type == DB_TYPE_STRING || key_type == DB_TYPE_VARSTRING) {
         return strcmp((char*)a, (char*)b);
-    } else if (size == 4) {
+    } else if (key_size == 4) {
         int32_t va = *(int32_t*)a;
         int32_t vb = *(int32_t*)b;
         return (va > vb) - (va < vb);
-    } else if (size == 8) {
+    } else if (key_size == 8) {
         int64_t va = *(int64_t*)a;
         int64_t vb = *(int64_t*)b;
         return (va > vb) - (va < vb);
     }
-    return memcmp(a, b, size);
+    return memcmp(a, b, key_size);
 }
 
-static btree_node_t* btree_create_node(int is_leaf) {
-    btree_node_t* node = (btree_node_t*)calloc(1, sizeof(btree_node_t));
-    if (node) {
-        node->is_leaf = is_leaf;
+static int btree_compare_key(db_pool_t* pool, const void* key_a, size_t key_b_off,
+                             size_t key_size, int key_type) {
+    void* b = POOL_PTR(pool, key_b_off);
+    
+    if (key_type == DB_TYPE_STRING || key_type == DB_TYPE_VARSTRING) {
+        return strcmp((char*)key_a, (char*)b);
+    } else if (key_size == 4) {
+        int32_t va = *(int32_t*)key_a;
+        int32_t vb = *(int32_t*)b;
+        return (va > vb) - (va < vb);
+    } else if (key_size == 8) {
+        int64_t va = *(int64_t*)key_a;
+        int64_t vb = *(int64_t*)b;
+        return (va > vb) - (va < vb);
     }
-    return node;
+    return memcmp(key_a, b, key_size);
 }
 
-void* btree_create(size_t key_size, int key_type) {
-    btree_t* tree = (btree_t*)malloc(sizeof(btree_t));
-    if (!tree) return NULL;
+// 从 pool 分配一个节点
+static size_t btree_alloc_node(db_pool_t* pool, int is_leaf) {
+    size_t node_off = pool_alloc_offset(pool, sizeof(btree_node_t));
+    if (!node_off) return 0;
     
-    tree->root = btree_create_node(1);
-    tree->key_size = key_size;
-    tree->key_type = key_type;
-    
-    if (!tree->root) {
-        free(tree);
-        return NULL;
-    }
-    
-    return tree;
+    btree_node_t* node = BTREE_NODE(pool, node_off);
+    memset(node, 0, sizeof(btree_node_t));
+    node->is_leaf = is_leaf;
+    return node_off;
 }
 
-void btree_destroy_node(btree_node_t* node) {
-    if (!node) return;
+// 从 pool 分配 key 数据
+static size_t btree_alloc_key(db_pool_t* pool, const void* key, size_t key_size) {
+    size_t key_off = pool_alloc_offset(pool, key_size);
+    if (!key_off) return 0;
+    memcpy(POOL_PTR(pool, key_off), key, key_size);
+    return key_off;
+}
+
+size_t btree_create(db_pool_t* pool, size_t key_size, int key_type) {
+    if (!pool) return 0;
     
+    // 分配头
+    size_t hdr_off = pool_alloc_offset(pool, sizeof(btree_header_t));
+    if (!hdr_off) return 0;
+    
+    btree_header_t* hdr = BTREE_HDR(pool, hdr_off);
+    hdr->key_size = key_size;
+    hdr->key_type = key_type;
+    
+    // 分配根节点（叶子）
+    size_t root_off = btree_alloc_node(pool, 1);
+    if (!root_off) return 0;
+    hdr->root_offset = root_off;
+    
+    return hdr_off;
+}
+
+// 递归销毁节点（仅清空，不 free，因为 pool 统一管理）
+static void btree_destroy_node(db_pool_t* pool, size_t node_off) {
+    if (!node_off) return;
+    
+    btree_node_t* node = BTREE_NODE(pool, node_off);
     if (!node->is_leaf) {
         for (int i = 0; i <= node->num_keys; i++) {
-            btree_destroy_node(node->children[i]);
-        }
-    } else {
-        for (int i = 0; i < node->num_keys; i++) {
-            free(node->keys[i]);
+            btree_destroy_node(pool, node->children[i]);
         }
     }
-    
-    free(node);
+    // 注意：pool 空间不单独释放，由 pool_close 统一释放
 }
 
-void btree_destroy(void* tree) {
-    btree_t* t = (btree_t*)tree;
-    if (!t) return;
+void btree_destroy(db_pool_t* pool, size_t tree_offset) {
+    if (!pool || !tree_offset) return;
     
-    btree_destroy_node(t->root);
-    free(t);
+    btree_header_t* hdr = BTREE_HDR(pool, tree_offset);
+    btree_destroy_node(pool, hdr->root_offset);
+    // pool 空间由 pool_close 统一释放
 }
 
-static void btree_insert_non_full(btree_t* tree, btree_node_t* node, void* key, rowid_t value);
-static void btree_split_child(btree_t* tree, btree_node_t* parent, int idx);
+static void btree_split_child(db_pool_t* pool, size_t parent_off, int idx,
+                               size_t key_size);
+static void btree_insert_non_full(db_pool_t* pool, size_t node_off,
+                                   const void* key, rowid_t value,
+                                   size_t key_size, int key_type);
 
-int btree_insert(void* tree, void* key, rowid_t value) {
-    btree_t* t = (btree_t*)tree;
-    if (!t || !key) return -1;
+int btree_insert(db_pool_t* pool, size_t tree_offset, const void* key, rowid_t value) {
+    if (!pool || !tree_offset || !key) return -1;
     
-    btree_node_t* root = t->root;
+    btree_header_t* hdr = BTREE_HDR(pool, tree_offset);
+    size_t root_off = hdr->root_offset;
+    size_t key_size = hdr->key_size;
+    int key_type = hdr->key_type;
+    
+    btree_node_t* root = BTREE_NODE(pool, root_off);
     
     if (root->num_keys == BTREE_ORDER) {
-        btree_node_t* new_root = btree_create_node(0);
-        if (!new_root) return -1;
+        size_t new_root_off = btree_alloc_node(pool, 0);
+        if (!new_root_off) return -1;
         
-        new_root->children[0] = root;
-        btree_split_child(t, new_root, 0);
-        t->root = new_root;
+        btree_node_t* new_root = BTREE_NODE(pool, new_root_off);
+        new_root->children[0] = root_off;
+        btree_split_child(pool, new_root_off, 0, key_size);
+        hdr->root_offset = new_root_off;
         
         // 找到正确的子节点插入
         int i = 0;
-        if (btree_compare(key, new_root->keys[0], t->key_size, t->key_type) > 0) {
+        if (btree_compare_key(pool, key, new_root->keys[0], key_size, key_type) > 0) {
             i++;
         }
-        btree_insert_non_full(t, new_root->children[i], key, value);
+        btree_insert_non_full(pool, new_root->children[i], key, value, key_size, key_type);
     } else {
-        btree_insert_non_full(t, root, key, value);
+        btree_insert_non_full(pool, root_off, key, value, key_size, key_type);
     }
     
     return 0;
 }
 
-static void btree_split_child(btree_t* tree __attribute__((unused)), btree_node_t* parent, int idx) {
-    btree_node_t* child = parent->children[idx];
-    btree_node_t* new_child = btree_create_node(child->is_leaf);
-    if (!new_child) return;
+static void btree_split_child(db_pool_t* pool, size_t parent_off, int idx,
+                               size_t key_size) {
+    btree_node_t* parent = BTREE_NODE(pool, parent_off);
+    size_t child_off = parent->children[idx];
+    btree_node_t* child = BTREE_NODE(pool, child_off);
     
+    size_t new_child_off = btree_alloc_node(pool, child->is_leaf);
+    if (!new_child_off) return;
+    
+    btree_node_t* new_child = BTREE_NODE(pool, new_child_off);
     int mid = BTREE_ORDER / 2;
     new_child->num_keys = child->num_keys - mid - 1;
     
@@ -132,7 +184,7 @@ static void btree_split_child(btree_t* tree __attribute__((unused)), btree_node_
         }
     } else {
         new_child->next = child->next;
-        child->next = new_child;
+        child->next = new_child_off;
     }
     
     child->num_keys = mid;
@@ -140,7 +192,7 @@ static void btree_split_child(btree_t* tree __attribute__((unused)), btree_node_
     for (int i = parent->num_keys; i >= idx + 1; i--) {
         parent->children[i + 1] = parent->children[i];
     }
-    parent->children[idx + 1] = new_child;
+    parent->children[idx + 1] = new_child_off;
     
     for (int i = parent->num_keys - 1; i >= idx; i--) {
         parent->keys[i + 1] = parent->keys[i];
@@ -152,49 +204,57 @@ static void btree_split_child(btree_t* tree __attribute__((unused)), btree_node_
     parent->num_keys++;
 }
 
-static void btree_insert_non_full(btree_t* tree, btree_node_t* node, void* key, rowid_t value) {
+static void btree_insert_non_full(db_pool_t* pool, size_t node_off,
+                                   const void* key, rowid_t value,
+                                   size_t key_size, int key_type) {
+    btree_node_t* node = BTREE_NODE(pool, node_off);
     int i = node->num_keys - 1;
     
     if (node->is_leaf) {
-        void* key_copy = malloc(tree->key_size);
-        if (!key_copy) return;
-        memcpy(key_copy, key, tree->key_size);
+        size_t key_off = btree_alloc_key(pool, key, key_size);
+        if (!key_off) return;
         
-        while (i >= 0 && btree_compare(key, node->keys[i], tree->key_size, tree->key_type) < 0) {
+        while (i >= 0 && btree_compare_key(pool, key, node->keys[i], key_size, key_type) < 0) {
             node->keys[i + 1] = node->keys[i];
             node->values[i + 1] = node->values[i];
             i--;
         }
         
-        node->keys[i + 1] = key_copy;
+        node->keys[i + 1] = key_off;
         node->values[i + 1] = value;
         node->num_keys++;
     } else {
-        while (i >= 0 && btree_compare(key, node->keys[i], tree->key_size, tree->key_type) < 0) {
+        while (i >= 0 && btree_compare_key(pool, key, node->keys[i], key_size, key_type) < 0) {
             i--;
         }
         i++;
         
-        if (node->children[i]->num_keys == BTREE_ORDER) {
-            btree_split_child(tree, node, i);
-            if (btree_compare(key, node->keys[i], tree->key_size, tree->key_type) > 0) {
+        btree_node_t* child = BTREE_NODE(pool, node->children[i]);
+        if (child->num_keys == BTREE_ORDER) {
+            btree_split_child(pool, node_off, i, key_size);
+            if (btree_compare_key(pool, key, node->keys[i], key_size, key_type) > 0) {
                 i++;
             }
         }
-        btree_insert_non_full(tree, node->children[i], key, value);
+        btree_insert_non_full(pool, node->children[i], key, value, key_size, key_type);
     }
 }
 
-rowid_t* btree_range(void* tree, void* min_key, void* max_key, size_t* count) {
-    btree_t* t = (btree_t*)tree;
-    if (!t || !count) return NULL;
+rowid_t* btree_range(db_pool_t* pool, size_t tree_offset,
+                      const void* min_key, const void* max_key, size_t* count) {
+    if (!pool || !tree_offset || !count) return NULL;
     *count = 0;
     
-    // 简化实现：遍历所有叶子节点
+    btree_header_t* hdr = BTREE_HDR(pool, tree_offset);
+    size_t key_size = hdr->key_size;
+    int key_type = hdr->key_type;
+    
     // 找到起始叶子节点
-    btree_node_t* node = t->root;
+    size_t node_off = hdr->root_offset;
+    btree_node_t* node = BTREE_NODE(pool, node_off);
     while (node && !node->is_leaf) {
-        node = node->children[0];
+        node_off = node->children[0];
+        node = BTREE_NODE(pool, node_off);
     }
     
     // 收集范围内的值
@@ -202,16 +262,17 @@ rowid_t* btree_range(void* tree, void* min_key, void* max_key, size_t* count) {
     rowid_t* result = (rowid_t*)malloc(sizeof(rowid_t) * capacity);
     if (!result) return NULL;
     
-    while (node) {
+    while (node_off) {
+        node = BTREE_NODE(pool, node_off);
         for (int i = 0; i < node->num_keys; i++) {
             int after_min = 1;
             int before_max = 1;
             
             if (min_key) {
-                after_min = btree_compare(node->keys[i], min_key, t->key_size, t->key_type) >= 0;
+                after_min = btree_compare_key(pool, min_key, node->keys[i], key_size, key_type) <= 0;
             }
             if (max_key) {
-                before_max = btree_compare(node->keys[i], max_key, t->key_size, t->key_type) <= 0;
+                before_max = btree_compare_key(pool, max_key, node->keys[i], key_size, key_type) >= 0;
             }
             
             if (after_min && before_max) {
@@ -227,7 +288,7 @@ rowid_t* btree_range(void* tree, void* min_key, void* max_key, size_t* count) {
                 result[(*count)++] = node->values[i];
             }
         }
-        node = node->next;
+        node_off = node->next;
     }
     
     return result;

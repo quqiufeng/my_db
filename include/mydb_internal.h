@@ -124,6 +124,16 @@ int pool_sync(db_pool_t* pool);
 void* pool_alloc(db_pool_t* pool, size_t size);
 int pool_resize(db_pool_t* pool, size_t new_size);
 
+// 辅助宏：通过 offset 获取 pool 中的指针
+#define POOL_PTR(pool, offset) ((void*)((char*)(pool)->base + (offset)))
+
+// 从 pool 分配内存，返回 offset
+static inline size_t pool_alloc_offset(db_pool_t* pool, size_t size) {
+    void* ptr = pool_alloc(pool, size);
+    if (!ptr) return 0;
+    return (size_t)((char*)ptr - (char*)pool->base);
+}
+
 // ====== WAL 操作 ======
 int wal_init(db_wal_t* wal, const char* path);
 void wal_close(db_wal_t* wal);
@@ -140,11 +150,12 @@ int hash_insert(db_pool_t* pool, size_t table_offset, const void* key, size_t ke
 rowid_t hash_lookup(db_pool_t* pool, size_t table_offset, const void* key, size_t key_len);
 int hash_delete(db_pool_t* pool, size_t table_offset, const void* key, size_t key_len);
 
-// ====== B+树操作 ======
-void* btree_create(size_t key_size, int key_type);
-void btree_destroy(void* tree);
-int btree_insert(void* tree, void* key, rowid_t value);
-rowid_t* btree_range(void* tree, void* min_key, void* max_key, size_t* count);
+// ====== B+树操作（零拷贝，基于 pool offset） ======
+size_t btree_create(db_pool_t* pool, size_t key_size, int key_type);
+void btree_destroy(db_pool_t* pool, size_t tree_offset);
+int btree_insert(db_pool_t* pool, size_t tree_offset, const void* key, rowid_t value);
+rowid_t* btree_range(db_pool_t* pool, size_t tree_offset,
+                      const void* min_key, const void* max_key, size_t* count);
 
 // ====== 索引操作 ======
 int index_create(db_table_t* table, const char* field_name,
