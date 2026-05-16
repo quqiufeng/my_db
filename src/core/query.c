@@ -24,7 +24,12 @@ static void* build_index_key(db_index_t* index, const db_condition_t* conditions
     // 计算需要的键大小
     size_t total_size = 0;
     for (int i = 0; i < index->field_count && (size_t)i < condition_count; i++) {
-        total_size += index->field_sizes[i];
+        if (index->field_types[i] == DB_TYPE_VARSTRING) {
+            char* str = *(char**)conditions[i].value;
+            total_size += str ? strlen(str) : 0;
+        } else {
+            total_size += index->field_sizes[i];
+        }
     }
     
     if (total_size == 0) return NULL;
@@ -34,9 +39,17 @@ static void* build_index_key(db_index_t* index, const db_condition_t* conditions
     
     size_t offset = 0;
     for (int i = 0; i < index->field_count && (size_t)i < condition_count; i++) {
-        size_t sz = index->field_sizes[i];
-        memcpy((char*)key + offset, conditions[i].value, sz);
-        offset += sz;
+        if (index->field_types[i] == DB_TYPE_VARSTRING) {
+            // 变长字符串：conditions[i].value 是 char* 指针
+            char* str = *(char**)conditions[i].value;
+            size_t str_len = str ? strlen(str) : 0;
+            memcpy((char*)key + offset, str, str_len);
+            offset += str_len;
+        } else {
+            size_t sz = index->field_sizes[i];
+            memcpy((char*)key + offset, conditions[i].value, sz);
+            offset += sz;
+        }
     }
     
     *key_len = offset;
@@ -57,11 +70,13 @@ static rowid_t* query_with_index(db_table_t* table, db_index_t* index,
         
         if (index->field_types[0] == DB_TYPE_STRING && index->field_count == 1) {
             key_len = strlen((char*)cond->value);
+        } else if (index->field_types[0] == DB_TYPE_VARSTRING && index->field_count == 1) {
+            key_len = strlen(*(char**)cond->value);
         } else if (index->field_count == 1) {
             key_len = sizeof(uint64_t);
         }
         
-        rowid_t rowid = hash_lookup(index->data, key, key_len);
+        rowid_t rowid = hash_lookup(&table->index_pool, index->data_offset, key, key_len);
         free(key);
         
         if (rowid > 0) {
@@ -86,35 +101,58 @@ bool row_match(db_table_t* table, void* row_ptr,
         const db_condition_t* cond = &conditions[i];
         void* field_ptr = (char*)row_ptr + cond->field_offset;
         
+        // 查找字段类型
+        int field_type = -1;
+        for (size_t fi = 0; fi < table->field_count; fi++) {
+            if (table->fields[fi].offset == cond->field_offset) {
+                field_type = table->fields[fi].type;
+                break;
+            }
+        }
+        
         int cmp = 0;
-        switch (cond->field_size) {
-            case 1:
-                cmp = *(int8_t*)field_ptr - *(int8_t*)cond->value;
-                break;
-            case 2:
-                cmp = *(int16_t*)field_ptr - *(int16_t*)cond->value;
-                break;
-            case 4:
-                if (cond->op == 1 || cond->op == 2) {
-                    // 数值比较
-                    cmp = (*(int32_t*)field_ptr > *(int32_t*)cond->value) ? 1 :
-                          (*(int32_t*)field_ptr < *(int32_t*)cond->value) ? -1 : 0;
-                } else {
-                    cmp = *(int32_t*)field_ptr - *(int32_t*)cond->value;
+        if (field_type == DB_TYPE_STRING) {
+            cmp = strcmp((char*)field_ptr, (char*)cond->value);
+        } else if (field_type == DB_TYPE_VARSTRING) {
+            db_string_ref_t* ref = (db_string_ref_t*)field_ptr;
+            if (ref->length == 0 || ref->offset == 0) {
+                cmp = -1;
+            } else {
+                char* str = (char*)table->string_pool.base + ref->offset;
+                cmp = strncmp(str, (char*)cond->value, ref->length);
+                if (cmp == 0 && strlen((char*)cond->value) != ref->length) {
+                    cmp = (ref->length > strlen((char*)cond->value)) ? 1 : -1;
                 }
-                break;
-            case 8:
-                if (cond->op == 1 || cond->op == 2) {
-                    cmp = (*(int64_t*)field_ptr > *(int64_t*)cond->value) ? 1 :
-                          (*(int64_t*)field_ptr < *(int64_t*)cond->value) ? -1 : 0;
-                } else {
-                    cmp = (*(int64_t*)field_ptr > *(int64_t*)cond->value) ? 1 :
-                          (*(int64_t*)field_ptr < *(int64_t*)cond->value) ? -1 : 0;
-                }
-                break;
-            default:
-                cmp = memcmp(field_ptr, cond->value, cond->field_size);
-                break;
+            }
+        } else {
+            switch (cond->field_size) {
+                case 1:
+                    cmp = *(int8_t*)field_ptr - *(int8_t*)cond->value;
+                    break;
+                case 2:
+                    cmp = *(int16_t*)field_ptr - *(int16_t*)cond->value;
+                    break;
+                case 4:
+                    if (cond->op == 1 || cond->op == 2) {
+                        cmp = (*(int32_t*)field_ptr > *(int32_t*)cond->value) ? 1 :
+                              (*(int32_t*)field_ptr < *(int32_t*)cond->value) ? -1 : 0;
+                    } else {
+                        cmp = *(int32_t*)field_ptr - *(int32_t*)cond->value;
+                    }
+                    break;
+                case 8:
+                    if (cond->op == 1 || cond->op == 2) {
+                        cmp = (*(int64_t*)field_ptr > *(int64_t*)cond->value) ? 1 :
+                              (*(int64_t*)field_ptr < *(int64_t*)cond->value) ? -1 : 0;
+                    } else {
+                        cmp = (*(int64_t*)field_ptr > *(int64_t*)cond->value) ? 1 :
+                              (*(int64_t*)field_ptr < *(int64_t*)cond->value) ? -1 : 0;
+                    }
+                    break;
+                default:
+                    cmp = memcmp(field_ptr, cond->value, cond->field_size);
+                    break;
+            }
         }
         
         bool match = false;
@@ -351,158 +389,164 @@ const char* db_select_json(table_t table,
     return json;
 }
 
+// 辅助函数：确保 buffer 有足够空间
+static void join_ensure_capacity(char** buf, size_t* offset, size_t* capacity, size_t needed) {
+    if (*offset + needed >= *capacity) {
+        *capacity = (*capacity + needed + 1) * 2;
+        *buf = realloc(*buf, *capacity);
+    }
+}
+
+// 辅助函数：将单个字段追加到 JSON buffer
+static void join_append_field(char** buf, size_t* offset, size_t* capacity,
+                               db_table_t* table, db_field_def_t* f, void* fp) {
+    join_ensure_capacity(buf, offset, capacity, 256);
+    *offset += sprintf(*buf + *offset, "\"%s.%s\":", table->name, f->name);
+    
+    switch (f->type) {
+        case DB_TYPE_INT32:
+            *offset += sprintf(*buf + *offset, "%d", *(int32_t*)fp);
+            break;
+        case DB_TYPE_UINT64:
+            *offset += sprintf(*buf + *offset, "%lu", (unsigned long)*(uint64_t*)fp);
+            break;
+        case DB_TYPE_STRING: {
+            size_t slen = f->size;
+            while (slen > 0 && ((char*)fp)[slen-1] == '\0') slen--;
+            if (slen == 0) {
+                *offset += sprintf(*buf + *offset, "\"\"");
+            } else {
+                *offset += sprintf(*buf + *offset, "\"");
+                for (size_t k = 0; k < slen; k++) {
+                    if (((char*)fp)[k] == '"' || ((char*)fp)[k] == '\\') {
+                        *offset += sprintf(*buf + *offset, "\\");
+                    }
+                    *offset += sprintf(*buf + *offset, "%c", ((char*)fp)[k]);
+                }
+                *offset += sprintf(*buf + *offset, "\"");
+            }
+            break;
+        }
+        case DB_TYPE_DOUBLE:
+            *offset += sprintf(*buf + *offset, "%.6f", *(double*)fp);
+            break;
+        default:
+            *offset += sprintf(*buf + *offset, "null");
+    }
+}
+
+// 辅助函数：输出一行 JOIN 结果
+static void join_output_row(char** buf, size_t* offset, size_t* capacity,
+                             bool* first,
+                             db_table_t* left, void* lrow,
+                             db_table_t* right, void* rrow) {
+    join_ensure_capacity(buf, offset, capacity, 8);
+    if (!*first) *offset += sprintf(*buf + *offset, ",");
+    *first = false;
+    
+    join_ensure_capacity(buf, offset, capacity, 4);
+    *offset += sprintf(*buf + *offset, "{");
+    
+    // 左表字段
+    for (size_t i = 0; i < left->field_count; i++) {
+        if (i > 0) {
+            join_ensure_capacity(buf, offset, capacity, 4);
+            *offset += sprintf(*buf + *offset, ",");
+        }
+        db_field_def_t* f = &left->fields[i];
+        void* fp = (char*)lrow + f->offset;
+        join_append_field(buf, offset, capacity, left, f, fp);
+    }
+    
+    // 右表字段
+    for (size_t i = 0; i < right->field_count; i++) {
+        join_ensure_capacity(buf, offset, capacity, 4);
+        *offset += sprintf(*buf + *offset, ",");
+        db_field_def_t* f = &right->fields[i];
+        void* fp = (char*)rrow + f->offset;
+        join_append_field(buf, offset, capacity, right, f, fp);
+    }
+    
+    join_ensure_capacity(buf, offset, capacity, 4);
+    *offset += sprintf(*buf + *offset, "}");
+}
+
 const char* db_join_json(table_t left_table, size_t left_field_offset,
                           table_t right_table, size_t right_field_offset,
                           size_t field_size) {
-    // 嵌套循环等值 JOIN
     if (!left_table || !right_table) return NULL;
     
     db_table_t* left = (db_table_t*)left_table;
     db_table_t* right = (db_table_t*)right_table;
     
-    // 预估结果大小
-    size_t est_size = 2; // []
-    size_t join_count = 0;
+    // 检查右表是否有索引
+    db_index_t* idx = find_index(right, right_field_offset);
+    bool use_hash_join = (idx && idx->type == INDEX_HASH);
     
-    // 先计算大小
-    for (rowid_t lid = 1; lid <= left->max_rowid; lid++) {
-        size_t loff = lid * left->row_stride;
-        row_header_t* lheader = (row_header_t*)PTR(left->data_pool.base, loff);
-        if (lheader->flags & MYDB_DELETED_FLAG) continue;
-        
-        void* lval = (char*)lheader + sizeof(row_header_t) + left_field_offset;
-        
-        for (rowid_t rid = 1; rid <= right->max_rowid; rid++) {
-            size_t roff = rid * right->row_stride;
-            row_header_t* rheader = (row_header_t*)PTR(right->data_pool.base, roff);
-            if (rheader->flags & MYDB_DELETED_FLAG) continue;
-            
-            void* rval = (char*)rheader + sizeof(row_header_t) + right_field_offset;
-            
-            if (memcmp(lval, rval, field_size) == 0) {
-                join_count++;
-                est_size += 1024; // 预估每行大小
-            }
-        }
-    }
-    
-    if (join_count == 0) return strdup("[]");
-    
-    char* buf = (char*)malloc(est_size);
+    // 分配初始 buffer（1MB，会根据需要动态扩容）
+    size_t capacity = 1024 * 1024;
+    char* buf = (char*)malloc(capacity);
     if (!buf) return strdup("[]");
     
     size_t offset = 0;
+    join_ensure_capacity(&buf, &offset, &capacity, 8);
     offset += sprintf(buf + offset, "[");
-    
     bool first = true;
-    for (rowid_t lid = 1; lid <= left->max_rowid; lid++) {
-        size_t loff = lid * left->row_stride;
-        row_header_t* lheader = (row_header_t*)PTR(left->data_pool.base, loff);
-        if (lheader->flags & MYDB_DELETED_FLAG) continue;
-        
-        void* lval = (char*)lheader + sizeof(row_header_t) + left_field_offset;
-        void* lrow = (char*)lheader + sizeof(row_header_t);
-        
-        for (rowid_t rid = 1; rid <= right->max_rowid; rid++) {
-            size_t roff = rid * right->row_stride;
-            row_header_t* rheader = (row_header_t*)PTR(right->data_pool.base, roff);
-            if (rheader->flags & MYDB_DELETED_FLAG) continue;
+    
+    if (use_hash_join) {
+        // ====== Hash Join ======
+        for (rowid_t lid = 1; lid <= left->max_rowid; lid++) {
+            size_t loff = lid * left->row_stride;
+            row_header_t* lheader = (row_header_t*)PTR(left->data_pool.base, loff);
+            if (lheader->flags & MYDB_DELETED_FLAG) continue;
             
-            void* rval = (char*)rheader + sizeof(row_header_t) + right_field_offset;
+            void* lval = (char*)lheader + sizeof(row_header_t) + left_field_offset;
+            void* lrow = (char*)lheader + sizeof(row_header_t);
             
-            if (memcmp(lval, rval, field_size) == 0) {
-                if (!first) offset += sprintf(buf + offset, ",");
-                first = false;
-                
-                void* rrow = (char*)rheader + sizeof(row_header_t);
-                
-                offset += sprintf(buf + offset, "{");
-                
-                // 左表字段
-                for (size_t i = 0; i < left->field_count; i++) {
-                    if (i > 0) offset += sprintf(buf + offset, ",");
-                    db_field_def_t* f = &left->fields[i];
-                    void* fp = (char*)lrow + f->offset;
-                    
-                    offset += sprintf(buf + offset, "\"%s.%s\":", left->name, f->name);
-                    
-                    switch (f->type) {
-                        case DB_TYPE_INT32:
-                            offset += sprintf(buf + offset, "%d", *(int32_t*)fp);
-                            break;
-                        case DB_TYPE_UINT64:
-                            offset += sprintf(buf + offset, "%lu", (unsigned long)*(uint64_t*)fp);
-                            break;
-                        case DB_TYPE_STRING: {
-                            size_t slen = f->size;
-                            while (slen > 0 && ((char*)fp)[slen-1] == '\0') slen--;
-                            if (slen == 0) {
-                                offset += sprintf(buf + offset, "\"\"");
-                            } else {
-                                offset += sprintf(buf + offset, "\"");
-                                for (size_t k = 0; k < slen; k++) {
-                                    if (((char*)fp)[k] == '"' || ((char*)fp)[k] == '\\') {
-                                        offset += sprintf(buf + offset, "\\");
-                                    }
-                                    offset += sprintf(buf + offset, "%c", ((char*)fp)[k]);
-                                }
-                                offset += sprintf(buf + offset, "\"");
-                            }
-                            break;
-                        }
-                        case DB_TYPE_DOUBLE:
-                            offset += sprintf(buf + offset, "%.6f", *(double*)fp);
-                            break;
-                        default:
-                            offset += sprintf(buf + offset, "null");
-                    }
+            // 用 hash 索引查找右表匹配行
+            size_t key_len = field_size;
+            if (idx->field_types[0] == DB_TYPE_STRING) {
+                key_len = strlen((char*)lval);
+            }
+            
+            rowid_t rid = hash_lookup(&right->index_pool, idx->data_offset, lval, key_len);
+            if (rid > 0) {
+                size_t roff = rid * right->row_stride;
+                row_header_t* rheader = (row_header_t*)PTR(right->data_pool.base, roff);
+                if (!(rheader->flags & MYDB_DELETED_FLAG)) {
+                    void* rrow = (char*)rheader + sizeof(row_header_t);
+                    join_output_row(&buf, &offset, &capacity, &first,
+                                    left, lrow, right, rrow);
                 }
+            }
+        }
+    } else {
+        // ====== Nested Loop Join ======
+        for (rowid_t lid = 1; lid <= left->max_rowid; lid++) {
+            size_t loff = lid * left->row_stride;
+            row_header_t* lheader = (row_header_t*)PTR(left->data_pool.base, loff);
+            if (lheader->flags & MYDB_DELETED_FLAG) continue;
+            
+            void* lval = (char*)lheader + sizeof(row_header_t) + left_field_offset;
+            void* lrow = (char*)lheader + sizeof(row_header_t);
+            
+            for (rowid_t rid = 1; rid <= right->max_rowid; rid++) {
+                size_t roff = rid * right->row_stride;
+                row_header_t* rheader = (row_header_t*)PTR(right->data_pool.base, roff);
+                if (rheader->flags & MYDB_DELETED_FLAG) continue;
                 
-                // 右表字段
-                for (size_t i = 0; i < right->field_count; i++) {
-                    offset += sprintf(buf + offset, ",");
-                    db_field_def_t* f = &right->fields[i];
-                    void* fp = (char*)rrow + f->offset;
-                    
-                    offset += sprintf(buf + offset, "\"%s.%s\":", right->name, f->name);
-                    
-                    switch (f->type) {
-                        case DB_TYPE_INT32:
-                            offset += sprintf(buf + offset, "%d", *(int32_t*)fp);
-                            break;
-                        case DB_TYPE_UINT64:
-                            offset += sprintf(buf + offset, "%lu", (unsigned long)*(uint64_t*)fp);
-                            break;
-                        case DB_TYPE_STRING: {
-                            size_t slen = f->size;
-                            while (slen > 0 && ((char*)fp)[slen-1] == '\0') slen--;
-                            if (slen == 0) {
-                                offset += sprintf(buf + offset, "\"\"");
-                            } else {
-                                offset += sprintf(buf + offset, "\"");
-                                for (size_t k = 0; k < slen; k++) {
-                                    if (((char*)fp)[k] == '"' || ((char*)fp)[k] == '\\') {
-                                        offset += sprintf(buf + offset, "\\");
-                                    }
-                                    offset += sprintf(buf + offset, "%c", ((char*)fp)[k]);
-                                }
-                                offset += sprintf(buf + offset, "\"");
-                            }
-                            break;
-                        }
-                        case DB_TYPE_DOUBLE:
-                            offset += sprintf(buf + offset, "%.6f", *(double*)fp);
-                            break;
-                        default:
-                            offset += sprintf(buf + offset, "null");
-                    }
+                void* rval = (char*)rheader + sizeof(row_header_t) + right_field_offset;
+                
+                if (memcmp(lval, rval, field_size) == 0) {
+                    void* rrow = (char*)rheader + sizeof(row_header_t);
+                    join_output_row(&buf, &offset, &capacity, &first,
+                                    left, lrow, right, rrow);
                 }
-                
-                offset += sprintf(buf + offset, "}");
             }
         }
     }
     
+    join_ensure_capacity(&buf, &offset, &capacity, 8);
     offset += sprintf(buf + offset, "]");
     
     return buf;

@@ -99,6 +99,20 @@ char* json_row(db_table_t* table, void* row_ptr) {
                 }
                 break;
             }
+            case DB_TYPE_VARSTRING: {
+                db_string_ref_t* ref = (db_string_ref_t*)field_ptr;
+                if (ref->length == 0 || ref->offset == 0) {
+                    offset += sprintf(buf + offset, "\"\"");
+                } else {
+                    char* str = (char*)table->string_pool.base + ref->offset;
+                    char* escaped = json_escape_string(str, ref->length);
+                    if (escaped) {
+                        offset += sprintf(buf + offset, "%s", escaped);
+                        free(escaped);
+                    }
+                }
+                break;
+            }
             default:
                 offset += sprintf(buf + offset, "null");
                 break;

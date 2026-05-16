@@ -68,9 +68,15 @@ typedef struct db_index {
     size_t          field_sizes[MYDB_MAX_INDEX_FIELDS];
     int             field_types[MYDB_MAX_INDEX_FIELDS];
     index_type_t    type;
-    void*           data;       // 哈希表或 B+树指针
+    size_t          data_offset; // 索引数据在 index_pool 中的偏移（零拷贝）
     struct db_index* next;
 } db_index_t;
+
+// 变长字符串引用（存储在行中）
+typedef struct {
+    size_t offset;   // 在 string_pool 中的偏移
+    size_t length;   // 字符串长度（不含 \0）
+} db_string_ref_t;
 
 // ====== 表结构 ======
 typedef struct db_table {
@@ -84,7 +90,16 @@ typedef struct db_table {
     db_index_t*     indexes;        // 索引链表
     db_pool_t       data_pool;      // 数据文件 mmap（独立文件）
     db_pool_t       index_pool;     // 索引文件 mmap（独立文件）
+    db_pool_t       index_meta_pool;// 索引元数据文件 mmap（独立文件）
+    db_pool_t       string_pool;    // 字符串池 mmap（独立文件）
     struct db_instance* db;         // 指向数据库实例（用于访问配置）
+    
+    // Free list：空闲行复用
+    rowid_t*        free_list;      // 空闲 rowid 数组
+    size_t          free_count;     // 空闲数量
+    size_t          free_capacity;  // 空闲数组容量
+    size_t          deleted_count;  // 累计删除数（用于触发 compact）
+    float           compact_threshold; // 自动 compact 阈值（默认 0.3 = 30%）
 } db_table_t;
 
 // ====== 数据库实例 ======
@@ -118,12 +133,12 @@ int wal_replay(db_wal_t* wal, db_instance_t* db);
 int wal_fsync(db_wal_t* wal);
 int wal_checkpoint(db_wal_t* wal);
 
-// ====== 哈希表操作 ======
-void* hash_create(void);
-void hash_destroy(void* hash);
-int hash_insert(void* hash, const void* key, size_t key_len, rowid_t value);
-rowid_t hash_lookup(void* hash, const void* key, size_t key_len);
-int hash_delete(void* hash, const void* key, size_t key_len);
+// ====== 哈希表操作（零拷贝，基于 pool offset） ======
+size_t hash_create(db_pool_t* pool);
+void hash_destroy(db_pool_t* pool, size_t table_offset);
+int hash_insert(db_pool_t* pool, size_t table_offset, const void* key, size_t key_len, rowid_t value);
+rowid_t hash_lookup(db_pool_t* pool, size_t table_offset, const void* key, size_t key_len);
+int hash_delete(db_pool_t* pool, size_t table_offset, const void* key, size_t key_len);
 
 // ====== B+树操作 ======
 void* btree_create(size_t key_size, int key_type);
@@ -134,10 +149,14 @@ rowid_t* btree_range(void* tree, void* min_key, void* max_key, size_t* count);
 // ====== 索引操作 ======
 int index_create(db_table_t* table, const char* field_name,
                  size_t field_offset, int field_type);
+void save_index_defs(db_table_t* t);
 void index_insert(db_table_t* table, rowid_t rowid, void* row_ptr);
 void index_delete(db_table_t* table, rowid_t rowid, void* row_ptr);
 rowid_t* index_lookup(db_table_t* table, const char* field_name,
                       const void* value, size_t* count);
+
+// ====== 内存管理 ======
+void db_table_set_compact_threshold(table_t table, float threshold);
 
 // ====== JSON 序列化 ======
 char* json_row(db_table_t* table, void* row_ptr);

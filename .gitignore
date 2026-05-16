@@ -12,8 +12,15 @@ tests/test_composite
 tests/test_wal
 examples/example_c
 
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
 # Test data files
 *.bin
 *.index
 *.idx
+*.idxmeta
+*.strings
 *.wal

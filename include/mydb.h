@@ -35,6 +35,7 @@ enum db_field_type {
     DB_TYPE_FLOAT,
     DB_TYPE_DOUBLE,
     DB_TYPE_STRING,
+    DB_TYPE_VARSTRING,
     DB_TYPE_BOOL,
 };
 

@@ -18,6 +18,7 @@ static void build_path(char* out, size_t out_size, const char* dir, const char* 
 }
 
 db_t db_open(const char* db_dir, size_t pool_size) {
+    (void)pool_size;
     if (!db_dir) return NULL;
     
     db_instance_t* db = (db_instance_t*)calloc(1, sizeof(db_instance_t));
@@ -52,6 +53,9 @@ void db_close(db_t db) {
     // 关闭每张表的独立文件
     for (size_t i = 0; i < inst->table_count; i++) {
         if (inst->tables[i]) {
+            save_index_defs(inst->tables[i]);
+            pool_close(&inst->tables[i]->string_pool);
+            pool_close(&inst->tables[i]->index_meta_pool);
             pool_close(&inst->tables[i]->index_pool);
             pool_close(&inst->tables[i]->data_pool);
             for (size_t j = 0; j < inst->tables[i]->field_count; j++) {
@@ -76,6 +80,7 @@ int db_sync(db_t db) {
         if (inst->tables[i]) {
             if (pool_sync(&inst->tables[i]->data_pool) < 0) ret = -1;
             if (pool_sync(&inst->tables[i]->index_pool) < 0) ret = -1;
+            if (pool_sync(&inst->tables[i]->index_meta_pool) < 0) ret = -1;
         }
     }
     

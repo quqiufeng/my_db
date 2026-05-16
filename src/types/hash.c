@@ -1,21 +1,24 @@
 #include "mydb_internal.h"
 
-// 简单的开链法哈希表
-// key: uint64_t 或任意二进制数据
-// value: rowid_t
+// 零拷贝哈希表：所有数据分配在 mmap pool 中
+// 使用 offset 而非指针（因为 mmap 地址可能变化）
 
-typedef struct hash_node {
-    void*           key;
-    size_t          key_len;
-    rowid_t         value;
-    struct hash_node* next;
-} hash_node_t;
+#define POOL_PTR(pool, offset) ((void*)((char*)(pool)->base + (offset)))
 
+// Hash 表头（存储在 pool 中）
 typedef struct {
-    hash_node_t**   buckets;
-    size_t          bucket_count;
-    size_t          size;
-} hash_table_t;
+    size_t  bucket_count;
+    size_t  size;
+    size_t  buckets_offset;  // bucket 数组的 offset
+} hash_header_t;
+
+// Hash 节点（存储在 pool 中）
+typedef struct {
+    size_t  key_offset;      // key 数据的 offset
+    size_t  key_len;
+    rowid_t value;
+    size_t  next_offset;     // 下一个节点的 offset（0 表示无）
+} hash_node_t;
 
 static uint64_t hash_fnv1a(const void* data, size_t len) {
     const uint8_t* bytes = (const uint8_t*)data;
@@ -27,118 +30,137 @@ static uint64_t hash_fnv1a(const void* data, size_t len) {
     return hash;
 }
 
-void* hash_create(void) {
-    hash_table_t* ht = (hash_table_t*)calloc(1, sizeof(hash_table_t));
-    if (!ht) return NULL;
-    
-    ht->bucket_count = 64;
-    ht->buckets = (hash_node_t**)calloc(ht->bucket_count, sizeof(hash_node_t*));
-    if (!ht->buckets) {
-        free(ht);
-        return NULL;
-    }
-    
-    return ht;
+// 从 pool 分配内存，返回 offset
+static size_t pool_alloc_offset(db_pool_t* pool, size_t size) {
+    void* ptr = pool_alloc(pool, size);
+    if (!ptr) return 0;
+    return (size_t)((char*)ptr - (char*)pool->base);
 }
 
-void hash_destroy(void* hash) {
-    hash_table_t* ht = (hash_table_t*)hash;
-    if (!ht) return;
+size_t hash_create(db_pool_t* pool) {
+    if (!pool) return 0;
     
-    for (size_t i = 0; i < ht->bucket_count; i++) {
-        hash_node_t* node = ht->buckets[i];
-        while (node) {
-            hash_node_t* next = node->next;
-            free(node->key);
-            free(node);
-            node = next;
-        }
-    }
+    size_t header_off = pool_alloc_offset(pool, sizeof(hash_header_t));
+    if (!header_off) return 0;
     
-    free(ht->buckets);
-    free(ht);
+    hash_header_t* header = (hash_header_t*)POOL_PTR(pool, header_off);
+    header->bucket_count = 64;
+    header->size = 0;
+    
+    size_t buckets_size = sizeof(size_t) * 64;
+    size_t buckets_off = pool_alloc_offset(pool, buckets_size);
+    if (!buckets_off) return 0;
+    
+    memset(POOL_PTR(pool, buckets_off), 0, buckets_size);
+    header->buckets_offset = buckets_off;
+    
+    return header_off;
 }
 
-int hash_insert(void* hash, const void* key, size_t key_len, rowid_t value) {
-    hash_table_t* ht = (hash_table_t*)hash;
-    if (!ht || !key || key_len == 0) return -1;
+void hash_destroy(db_pool_t* pool, size_t table_offset) {
+    if (!pool || !table_offset) return;
+    // 零拷贝：无需释放，pool_close 时统一释放 mmap
+    (void)table_offset;
+}
+
+int hash_insert(db_pool_t* pool, size_t table_offset, const void* key, size_t key_len, rowid_t value) {
+    if (!pool || !table_offset || !key || key_len == 0) return -1;
+    
+    hash_header_t* header = (hash_header_t*)POOL_PTR(pool, table_offset);
+    size_t* buckets = (size_t*)POOL_PTR(pool, header->buckets_offset);
     
     uint64_t h = hash_fnv1a(key, key_len);
-    size_t idx = h % ht->bucket_count;
+    size_t idx = h % header->bucket_count;
     
     // 检查是否已存在
-    hash_node_t* node = ht->buckets[idx];
-    while (node) {
-        if (node->key_len == key_len && memcmp(node->key, key, key_len) == 0) {
-            node->value = value; // 更新
-            return 0;
+    size_t node_off = buckets[idx];
+    while (node_off) {
+        hash_node_t* node = (hash_node_t*)POOL_PTR(pool, node_off);
+        if (node->key_len == key_len) {
+            void* node_key = POOL_PTR(pool, node->key_offset);
+            if (memcmp(node_key, key, key_len) == 0) {
+                node->value = value;
+                return 0;
+            }
         }
-        node = node->next;
+        node_off = node->next_offset;
     }
     
-    // 插入新节点
-    hash_node_t* new_node = (hash_node_t*)malloc(sizeof(hash_node_t));
-    if (!new_node) return -1;
+    // 分配新节点
+    size_t key_off = pool_alloc_offset(pool, key_len);
+    if (!key_off) return -1;
+    memcpy(POOL_PTR(pool, key_off), key, key_len);
     
-    new_node->key = malloc(key_len);
-    if (!new_node->key) {
-        free(new_node);
-        return -1;
-    }
-    memcpy(new_node->key, key, key_len);
+    size_t new_node_off = pool_alloc_offset(pool, sizeof(hash_node_t));
+    if (!new_node_off) return -1;
+    
+    hash_node_t* new_node = (hash_node_t*)POOL_PTR(pool, new_node_off);
+    new_node->key_offset = key_off;
     new_node->key_len = key_len;
     new_node->value = value;
-    new_node->next = ht->buckets[idx];
-    ht->buckets[idx] = new_node;
-    ht->size++;
+    new_node->next_offset = buckets[idx];
+    
+    buckets[idx] = new_node_off;
+    header->size++;
     
     return 0;
 }
 
-rowid_t hash_lookup(void* hash, const void* key, size_t key_len) {
-    hash_table_t* ht = (hash_table_t*)hash;
-    if (!ht || !key || key_len == 0) return 0;
+rowid_t hash_lookup(db_pool_t* pool, size_t table_offset, const void* key, size_t key_len) {
+    if (!pool || !table_offset || !key || key_len == 0) return 0;
+    
+    hash_header_t* header = (hash_header_t*)POOL_PTR(pool, table_offset);
+    size_t* buckets = (size_t*)POOL_PTR(pool, header->buckets_offset);
     
     uint64_t h = hash_fnv1a(key, key_len);
-    size_t idx = h % ht->bucket_count;
+    size_t idx = h % header->bucket_count;
     
-    hash_node_t* node = ht->buckets[idx];
-    while (node) {
-        if (node->key_len == key_len && memcmp(node->key, key, key_len) == 0) {
-            return node->value;
+    size_t node_off = buckets[idx];
+    while (node_off) {
+        hash_node_t* node = (hash_node_t*)POOL_PTR(pool, node_off);
+        if (node->key_len == key_len) {
+            void* node_key = POOL_PTR(pool, node->key_offset);
+            if (memcmp(node_key, key, key_len) == 0) {
+                return node->value;
+            }
         }
-        node = node->next;
+        node_off = node->next_offset;
     }
     
     return 0;
 }
 
-int hash_delete(void* hash, const void* key, size_t key_len) {
-    hash_table_t* ht = (hash_table_t*)hash;
-    if (!ht || !key || key_len == 0) return -1;
+int hash_delete(db_pool_t* pool, size_t table_offset, const void* key, size_t key_len) {
+    if (!pool || !table_offset || !key || key_len == 0) return -1;
+    
+    hash_header_t* header = (hash_header_t*)POOL_PTR(pool, table_offset);
+    size_t* buckets = (size_t*)POOL_PTR(pool, header->buckets_offset);
     
     uint64_t h = hash_fnv1a(key, key_len);
-    size_t idx = h % ht->bucket_count;
+    size_t idx = h % header->bucket_count;
     
-    hash_node_t** pp = &ht->buckets[idx];
-    hash_node_t* node = ht->buckets[idx];
-    while (node) {
-        if (node->key_len == key_len && memcmp(node->key, key, key_len) == 0) {
-            *pp = node->next;
-            free(node->key);
-            free(node);
-            ht->size--;
-            return 0;
+    size_t* pp = &buckets[idx];
+    size_t node_off = buckets[idx];
+    
+    while (node_off) {
+        hash_node_t* node = (hash_node_t*)POOL_PTR(pool, node_off);
+        if (node->key_len == key_len) {
+            void* node_key = POOL_PTR(pool, node->key_offset);
+            if (memcmp(node_key, key, key_len) == 0) {
+                *pp = node->next_offset;
+                header->size--;
+                return 0;
+            }
         }
-        pp = &node->next;
-        node = node->next;
+        pp = &node->next_offset;
+        node_off = node->next_offset;
     }
     
     return -1;
 }
 
 // 构建索引键（支持复合索引）
-static void* build_key_from_row(db_index_t* index, void* row_ptr, size_t* key_len) {
+static void* build_key_from_row(db_table_t* table, db_index_t* index, void* row_ptr, size_t* key_len) {
     if (!index || !row_ptr || !key_len) return NULL;
     
     size_t total_size = 0;
@@ -157,10 +179,18 @@ static void* build_key_from_row(db_index_t* index, void* row_ptr, size_t* key_le
         size_t sz = index->field_sizes[i];
         
         if (index->field_types[i] == DB_TYPE_STRING) {
-            // 字符串字段只复制实际长度
             size_t str_len = 0;
             while (str_len < sz && ((char*)field_ptr)[str_len] != '\0') str_len++;
             sz = str_len;
+        } else if (index->field_types[i] == DB_TYPE_VARSTRING) {
+            db_string_ref_t* ref = (db_string_ref_t*)field_ptr;
+            if (ref->length > 0 && ref->offset > 0 && table) {
+                char* str = (char*)table->string_pool.base + ref->offset;
+                memcpy((char*)key + offset, str, ref->length);
+                offset += ref->length;
+                continue;
+            }
+            sz = 0;
         }
         
         memcpy((char*)key + offset, field_ptr, sz);
@@ -184,7 +214,6 @@ int index_create(db_table_t* table, const char* field_name,
     index->field_offsets[0] = field_offset;
     index->field_types[0] = field_type;
     
-    // 查找字段大小
     for (size_t i = 0; i < table->field_count; i++) {
         if (table->fields[i].offset == field_offset) {
             index->field_sizes[0] = table->fields[i].size;
@@ -192,19 +221,19 @@ int index_create(db_table_t* table, const char* field_name,
         }
     }
     
-    if (field_type == DB_TYPE_STRING) {
+    if (field_type == DB_TYPE_STRING || field_type == DB_TYPE_VARSTRING) {
         index->type = INDEX_HASH;
     } else {
         index->type = INDEX_BTREE;
     }
     
-    index->data = hash_create();
-    if (!index->data) {
+    // 从零拷贝 pool 创建 hash 表
+    index->data_offset = hash_create(&table->index_pool);
+    if (!index->data_offset) {
         free(index);
         return -1;
     }
     
-    // 添加到索引链表
     index->next = table->indexes;
     table->indexes = index;
     
@@ -217,9 +246,12 @@ void index_insert(db_table_t* table, rowid_t rowid, void* row_ptr) {
     db_index_t* index = table->indexes;
     while (index) {
         size_t key_len = 0;
-        void* key = build_key_from_row(index, row_ptr, &key_len);
+        void* key = build_key_from_row(table, index, row_ptr, &key_len);
         if (key) {
-            hash_insert(index->data, key, key_len, rowid);
+            if (index->type == INDEX_HASH) {
+                hash_insert(&table->index_pool, index->data_offset, key, key_len, rowid);
+            }
+            // B+树索引后续实现
             free(key);
         }
         index = index->next;
@@ -233,9 +265,11 @@ void index_delete(db_table_t* table, rowid_t rowid, void* row_ptr) {
     db_index_t* index = table->indexes;
     while (index) {
         size_t key_len = 0;
-        void* key = build_key_from_row(index, row_ptr, &key_len);
+        void* key = build_key_from_row(table, index, row_ptr, &key_len);
         if (key) {
-            hash_delete(index->data, key, key_len);
+            if (index->type == INDEX_HASH) {
+                hash_delete(&table->index_pool, index->data_offset, key, key_len);
+            }
             free(key);
         }
         index = index->next;
@@ -257,7 +291,11 @@ rowid_t* index_lookup(db_table_t* table, const char* field_name,
                 key_len = sizeof(uint64_t);
             }
             
-            rowid_t rowid = hash_lookup(index->data, value, key_len);
+            rowid_t rowid = 0;
+            if (index->type == INDEX_HASH) {
+                rowid = hash_lookup(&table->index_pool, index->data_offset, value, key_len);
+            }
+            
             if (rowid > 0) {
                 rowid_t* result = (rowid_t*)malloc(sizeof(rowid_t));
                 if (result) {
