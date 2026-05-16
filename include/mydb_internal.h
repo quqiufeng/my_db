@@ -58,12 +58,15 @@ typedef enum {
     INDEX_BTREE,
 } index_type_t;
 
+#define MYDB_MAX_INDEX_FIELDS   4
+
 // ====== 索引项 ======
 typedef struct db_index {
     char            name[MYDB_TABLE_NAME_LEN];
-    size_t          field_offset;
-    size_t          field_size;
-    int             field_type;
+    int             field_count;                    // 字段数量（1=单列，>1=复合）
+    size_t          field_offsets[MYDB_MAX_INDEX_FIELDS];
+    size_t          field_sizes[MYDB_MAX_INDEX_FIELDS];
+    int             field_types[MYDB_MAX_INDEX_FIELDS];
     index_type_t    type;
     void*           data;       // 哈希表或 B+树指针
     struct db_index* next;

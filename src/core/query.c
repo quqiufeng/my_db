@@ -8,12 +8,39 @@ static db_index_t* find_index(db_table_t* table, size_t field_offset) {
     
     db_index_t* index = table->indexes;
     while (index) {
-        if (index->field_offset == field_offset) {
+        if (index->field_count >= 1 && index->field_offsets[0] == field_offset) {
             return index;
         }
         index = index->next;
     }
     return NULL;
+}
+
+// 构建索引键（支持复合索引）
+static void* build_index_key(db_index_t* index, const db_condition_t* conditions,
+                             size_t condition_count, size_t* key_len) {
+    if (!index || !conditions || condition_count == 0 || !key_len) return NULL;
+    
+    // 计算需要的键大小
+    size_t total_size = 0;
+    for (int i = 0; i < index->field_count && (size_t)i < condition_count; i++) {
+        total_size += index->field_sizes[i];
+    }
+    
+    if (total_size == 0) return NULL;
+    
+    void* key = malloc(total_size);
+    if (!key) return NULL;
+    
+    size_t offset = 0;
+    for (int i = 0; i < index->field_count && (size_t)i < condition_count; i++) {
+        size_t sz = index->field_sizes[i];
+        memcpy((char*)key + offset, conditions[i].value, sz);
+        offset += sz;
+    }
+    
+    *key_len = offset;
+    return key;
 }
 
 // 使用索引查找
@@ -24,14 +51,19 @@ static rowid_t* query_with_index(db_table_t* table, db_index_t* index,
     
     if (index->type == INDEX_HASH && cond->op == 0) {
         // 哈希索引只支持等值查询
-        size_t key_len = index->field_size;
-        if (index->field_type == DB_TYPE_STRING) {
+        size_t key_len = 0;
+        void* key = build_index_key(index, cond, 1, &key_len);
+        if (!key) return NULL;
+        
+        if (index->field_types[0] == DB_TYPE_STRING && index->field_count == 1) {
             key_len = strlen((char*)cond->value);
-        } else {
+        } else if (index->field_count == 1) {
             key_len = sizeof(uint64_t);
         }
         
-        rowid_t rowid = hash_lookup(index->data, cond->value, key_len);
+        rowid_t rowid = hash_lookup(index->data, key, key_len);
+        free(key);
+        
         if (rowid > 0) {
             rowid_t* result = (rowid_t*)malloc(sizeof(rowid_t));
             if (result) {

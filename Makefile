@@ -20,10 +20,11 @@ TEST_BASIC = $(TEST_DIR)/test_basic
 TEST_JOIN = $(TEST_DIR)/test_join
 TEST_PERF = $(TEST_DIR)/test_perf
 TEST_EDGE = $(TEST_DIR)/test_edge
+TEST_COMPOSITE = $(TEST_DIR)/test_composite
 
-.PHONY: all clean test test_join test_perf test_edge
+.PHONY: all clean test test_join test_perf test_edge test_composite
 
-all: $(LIB) $(TEST_BASIC) $(TEST_JOIN) $(TEST_PERF) $(TEST_EDGE)
+all: $(LIB) $(TEST_BASIC) $(TEST_JOIN) $(TEST_PERF) $(TEST_EDGE) $(TEST_COMPOSITE)
 
 $(LIB): $(OBJECTS)
 	$(CC) $(LDFLAGS) -o $@ $^
@@ -44,6 +45,9 @@ $(TEST_PERF): $(TEST_DIR)/test_perf.c $(LIB)
 $(TEST_EDGE): $(TEST_DIR)/test_edge.c $(LIB)
 	$(CC) $(CFLAGS) -o $@ $< -L. -lmydb -Wl,-rpath,.
 
+$(TEST_COMPOSITE): $(TEST_DIR)/test_composite.c $(LIB)
+	$(CC) $(CFLAGS) -o $@ $< -L. -lmydb -Wl,-rpath,.
+
 test: $(TEST_BASIC)
 	@rm -f test_data.bin test_index.index test_wal.bin
 	LD_LIBRARY_PATH=. ./$(TEST_BASIC)
@@ -60,5 +64,9 @@ test_edge: $(TEST_EDGE)
 	@rm -f edge_data.bin edge_index.index edge_wal.bin
 	LD_LIBRARY_PATH=. ./$(TEST_EDGE)
 
+test_composite: $(TEST_COMPOSITE)
+	@rm -f composite_data.bin composite_index.index composite_wal.bin
+	LD_LIBRARY_PATH=. ./$(TEST_COMPOSITE)
+
 clean:
-	rm -rf $(OBJ_DIR) $(LIB) $(TEST_BASIC) $(TEST_JOIN) $(TEST_PERF) $(TEST_EDGE) *.bin *.index
+	rm -rf $(OBJ_DIR) $(LIB) $(TEST_BASIC) $(TEST_JOIN) $(TEST_PERF) $(TEST_EDGE) $(TEST_COMPOSITE) *.bin *.index

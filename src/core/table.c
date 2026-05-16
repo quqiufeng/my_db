@@ -152,8 +152,9 @@ rowid_t db_insert(table_t table, const void* row, size_t row_size) {
         t->data_pool->used = need_offset;
     }
     
-    // 写 WAL
-    // 简化版：暂不记录 WAL
+    // 更新索引
+    void* row_ptr = (char*)ptr + sizeof(row_header_t);
+    index_insert(t, id, row_ptr);
     
     return id;
 }
@@ -184,8 +185,16 @@ int db_update(table_t table, rowid_t id, const void* row, size_t row_size) {
     
     if (header->flags & MYDB_DELETED_FLAG) return DB_ERR_NOENT;
     
+    void* old_row = (char*)header + sizeof(row_header_t);
+    
+    // 删除旧索引
+    index_delete(t, id, old_row);
+    
     // 更新数据
-    memcpy((char*)header + sizeof(row_header_t), row, row_size);
+    memcpy(old_row, row, row_size);
+    
+    // 插入新索引
+    index_insert(t, id, old_row);
     
     return DB_OK;
 }
@@ -201,6 +210,10 @@ int db_delete(table_t table, rowid_t id) {
     
     if (header->flags & MYDB_DELETED_FLAG) return DB_ERR_NOENT;
     
+    // 删除索引
+    void* row_ptr = (char*)header + sizeof(row_header_t);
+    index_delete(t, id, row_ptr);
+    
     header->flags |= MYDB_DELETED_FLAG;
     t->row_count--;
     
@@ -208,13 +221,72 @@ int db_delete(table_t table, rowid_t id) {
 }
 
 int db_table_add_index(table_t table, const char* field_name, size_t field_offset, int field_type) {
-    (void)table; (void)field_name; (void)field_offset; (void)field_type;
-    // 简化实现：暂不实现索引
-    return DB_OK;
+    if (!table || !field_name) return DB_ERR_INVAL;
+    return index_create((db_table_t*)table, field_name, field_offset, field_type);
 }
 
 int db_table_add_index_composite(table_t table, db_field_def_t* fields, size_t field_count) {
-    (void)table; (void)fields; (void)field_count;
-    // 简化实现：暂不实现复合索引
+    if (!table || !fields || field_count == 0 || field_count > MYDB_MAX_INDEX_FIELDS) {
+        return DB_ERR_INVAL;
+    }
+    
+    db_table_t* t = (db_table_t*)table;
+    
+    db_index_t* index = (db_index_t*)calloc(1, sizeof(db_index_t));
+    if (!index) return DB_ERR_NOMEM;
+    
+    // 生成索引名: field1_field2_...
+    char name[MYDB_TABLE_NAME_LEN] = {0};
+    size_t name_len = 0;
+    for (size_t i = 0; i < field_count && name_len < MYDB_TABLE_NAME_LEN - 1; i++) {
+        if (i > 0 && name_len < MYDB_TABLE_NAME_LEN - 1) {
+            name[name_len++] = '_';
+        }
+        size_t flen = strlen(fields[i].name);
+        if (name_len + flen >= MYDB_TABLE_NAME_LEN) {
+            flen = MYDB_TABLE_NAME_LEN - name_len - 1;
+        }
+        memcpy(name + name_len, fields[i].name, flen);
+        name_len += flen;
+    }
+    name[name_len] = '\0';
+    memcpy(index->name, name, name_len + 1);
+    
+    index->field_count = (int)field_count;
+    for (size_t i = 0; i < field_count && i < MYDB_MAX_INDEX_FIELDS; i++) {
+        index->field_offsets[i] = fields[i].offset;
+        index->field_sizes[i] = fields[i].size;
+        index->field_types[i] = fields[i].type;
+    }
+    
+    // 复合索引用 B+树（支持范围查询和排序）
+    index->type = INDEX_BTREE;
+    
+    // 计算复合键的最大大小
+    size_t key_size = 0;
+    for (size_t i = 0; i < field_count && i < MYDB_MAX_INDEX_FIELDS; i++) {
+        key_size += fields[i].size;
+    }
+    
+    index->data = btree_create(key_size, fields[0].type);
+    if (!index->data) {
+        free(index);
+        return DB_ERR_NOMEM;
+    }
+    
+    // 添加到索引链表
+    index->next = t->indexes;
+    t->indexes = index;
+    
+    // 为已有数据建立索引
+    for (rowid_t id = 1; id <= t->max_rowid; id++) {
+        size_t offset = t->data_offset + (id - 1) * t->row_stride;
+        row_header_t* header = (row_header_t*)PTR(t->data_pool->base, offset);
+        if (header->flags & MYDB_DELETED_FLAG) continue;
+        
+        void* row_ptr = (char*)header + sizeof(row_header_t);
+        index_insert(t, id, row_ptr);
+    }
+    
     return DB_OK;
 }
