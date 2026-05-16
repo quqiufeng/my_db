@@ -10,6 +10,14 @@ table_t db_table_register(db_t db, const char* name, size_t row_size,
         return NULL;
     }
     
+    // 检查表名是否已存在
+    for (size_t i = 0; i < inst->table_count; i++) {
+        if (inst->tables[i] && strcmp(inst->tables[i]->name, name) == 0) {
+            db_set_error(inst, DB_ERR_EXIST, "table '%s' already exists", name);
+            return NULL;
+        }
+    }
+    
     db_table_t* table = (db_table_t*)calloc(1, sizeof(db_table_t));
     if (!table) {
         db_set_error(inst, DB_ERR_NOMEM, "out of memory");

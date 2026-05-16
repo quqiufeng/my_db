@@ -66,6 +66,9 @@ const char* db_errstr(db_t db);
 // ====== 配置 ======
 void db_config_max_rows(db_t db, size_t max_rows);
 
+// ====== WAL 恢复 ======
+int db_wal_replay(db_t db);
+
 // ====== Schema 注册（编译时宏自动生成调用）=====
 table_t db_table_register(db_t db, const char* name, size_t row_size,
                           const db_field_def_t* fields, size_t field_count);

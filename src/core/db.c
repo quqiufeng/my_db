@@ -27,6 +27,13 @@ db_t db_open(const char* data_path, const char* index_path, const char* wal_path
         return NULL;
     }
     
+    // 检测 WAL 文件是否非空
+    struct stat st;
+    if (fstat(db->wal.fd, &st) == 0 && st.st_size > 0) {
+        // 不自动回放：需要等所有表结构注册完成后才能回放
+        // 用户应在 db_register_all_schemas(db) 后调用 db_wal_replay(db)
+    }
+    
     return db;
 }
 
@@ -80,6 +87,12 @@ int db_rollback(db_t db) {
     (void)db;
     // 简化实现：复杂事务需要保存点机制
     return DB_OK;
+}
+
+int db_wal_replay(db_t db) {
+    if (!db) return DB_ERR_INVAL;
+    db_instance_t* inst = (db_instance_t*)db;
+    return wal_replay(&inst->wal, inst);
 }
 
 size_t db_compact(db_t db) {

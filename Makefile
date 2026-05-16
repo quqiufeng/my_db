@@ -19,10 +19,11 @@ LIB = libmydb.so
 TEST_BASIC = $(TEST_DIR)/test_basic
 TEST_JOIN = $(TEST_DIR)/test_join
 TEST_PERF = $(TEST_DIR)/test_perf
+TEST_EDGE = $(TEST_DIR)/test_edge
 
-.PHONY: all clean test test_join test_perf
+.PHONY: all clean test test_join test_perf test_edge
 
-all: $(LIB) $(TEST_BASIC) $(TEST_JOIN) $(TEST_PERF)
+all: $(LIB) $(TEST_BASIC) $(TEST_JOIN) $(TEST_PERF) $(TEST_EDGE)
 
 $(LIB): $(OBJECTS)
 	$(CC) $(LDFLAGS) -o $@ $^
@@ -40,6 +41,9 @@ $(TEST_JOIN): $(TEST_DIR)/test_join.c $(LIB)
 $(TEST_PERF): $(TEST_DIR)/test_perf.c $(LIB)
 	$(CC) $(CFLAGS) -o $@ $< -L. -lmydb -Wl,-rpath,.
 
+$(TEST_EDGE): $(TEST_DIR)/test_edge.c $(LIB)
+	$(CC) $(CFLAGS) -o $@ $< -L. -lmydb -Wl,-rpath,.
+
 test: $(TEST_BASIC)
 	@rm -f test_data.bin test_index.index test_wal.bin
 	LD_LIBRARY_PATH=. ./$(TEST_BASIC)
@@ -52,5 +56,9 @@ test_perf: $(TEST_PERF)
 	@rm -f perf_data.bin perf_index.index perf_wal.bin
 	LD_LIBRARY_PATH=. ./$(TEST_PERF)
 
+test_edge: $(TEST_EDGE)
+	@rm -f edge_data.bin edge_index.index edge_wal.bin
+	LD_LIBRARY_PATH=. ./$(TEST_EDGE)
+
 clean:
-	rm -rf $(OBJ_DIR) $(LIB) $(TEST_BASIC) $(TEST_JOIN) $(TEST_PERF) *.bin *.index
+	rm -rf $(OBJ_DIR) $(LIB) $(TEST_BASIC) $(TEST_JOIN) $(TEST_PERF) $(TEST_EDGE) *.bin *.index
