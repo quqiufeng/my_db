@@ -364,13 +364,14 @@
   - [x] cache_del_ns() — 在 namespace 内删除
 
 ### 9.6 搜索实现
-- [ ] 9.6.1 创建 `src/cache/search.c`
-  - [ ] cache_search_prefix() — 前缀搜索
-  - [ ] cache_search_range() — 范围搜索
-  - [ ] cache_search_regex() — 正则搜索（POSIX regexec）
-  - [ ] cache_search_fuzzy() — 模糊搜索（Levenshtein 距离）
-  - [ ] cache_search_tag() — 标签搜索（遍历 JSON 提取 tags）
-  - [ ] 结果排序：按相关性 score 排序
+- [x] 9.6.1 创建 `src/cache/search.c`
+  - [x] cache_search_prefix() — 前缀搜索（基于排序数组 lower/upper bound）
+  - [x] cache_search_range() — 范围搜索（基于排序数组二分查找）
+  - [x] cache_search_regex() — 正则搜索（POSIX regexec，支持大小写控制）
+  - [x] cache_search_fuzzy() — 模糊搜索（Levenshtein 距离，带 score 阈值）
+  - [x] cache_search_tag() — 标签搜索（遍历 value 关键词匹配）
+  - [x] cache_results_free() — 释放搜索结果
+  - [x] namespace 过滤支持
 
 ### 9.7 TTL 和 LRU
 - [ ] 9.7.1 生命周期管理

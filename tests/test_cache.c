@@ -67,6 +67,63 @@ int main() {
     
     cache_close(cache);
     
+    printf("\n=== 搜索测试 ===\n");
+    
+    // 重新打开并添加更多测试数据
+    cache = cache_open("test_cache_dir", 10 * 1024 * 1024);
+    cache_set(cache, "/coding/cpp/template", "模板元编程...", 0);
+    cache_set(cache, "/coding/cpp/vector", "STL vector 动态数组...", 0);
+    cache_set(cache, "/coding/python/decorator", "装饰器模式...", 0);
+    cache_set(cache, "/knowledge/architecture/microservice", "微服务架构...", 0);
+    
+    // 12. 前缀搜索
+    cache_search_options_t opts = cache_search_options_default();
+    cache_result_t* results = NULL;
+    size_t count = 0;
+    
+    ret = cache_search_prefix(cache, "/coding/cpp", &opts, &results, &count);
+    assert(ret == CACHE_OK);
+    printf("[OK] 前缀搜索 '/coding/cpp': %zu 条\n", count);
+    for (size_t i = 0; i < count; i++) {
+        printf("    - %s: %s\n", results[i].key, results[i].value);
+    }
+    cache_results_free(results);
+    
+    // 13. 范围搜索
+    ret = cache_search_range(cache, "/coding/cpp/", "/coding/cpp0", &opts, &results, &count);
+    assert(ret == CACHE_OK);
+    printf("[OK] 范围搜索 ['/coding/cpp/', '/coding/cpp0'): %zu 条\n", count);
+    cache_results_free(results);
+    
+    // 14. 正则搜索
+    ret = cache_search_regex(cache, "/coding/.*/async", &opts, &results, &count);
+    assert(ret == CACHE_OK);
+    printf("[OK] 正则搜索 '/coding/.*/async': %zu 条\n", count);
+    for (size_t i = 0; i < count; i++) {
+        printf("    - %s\n", results[i].key);
+    }
+    cache_results_free(results);
+    
+    // 15. 模糊搜索
+    ret = cache_search_fuzzy(cache, "/coding/cpp/vect", &opts, &results, &count);
+    assert(ret == CACHE_OK);
+    printf("[OK] 模糊搜索 '/coding/cpp/vect': %zu 条\n", count);
+    for (size_t i = 0; i < count; i++) {
+        printf("    - %s (score: %.2f)\n", results[i].key, results[i].score);
+    }
+    cache_results_free(results);
+    
+    // 16. 标签搜索（value 中包含关键词）
+    ret = cache_search_tag(cache, "协程", &opts, &results, &count);
+    assert(ret == CACHE_OK);
+    printf("[OK] 标签搜索 '协程': %zu 条\n", count);
+    for (size_t i = 0; i < count; i++) {
+        printf("    - %s: %s\n", results[i].key, results[i].value);
+    }
+    cache_results_free(results);
+    
+    cache_close(cache);
+    
     printf("\n=== 所有测试通过 ===\n");
     return 0;
 }
