@@ -296,6 +296,91 @@ db_select_all_stream(users, callback, NULL);
 - `db_table_compact(table)` — 单表重建，回收已删除空间
 - `db_compact(db)` — 全盘重建，回收所有已删除空间
 
+## 动态脚本调用（LuaJIT / Python）
+
+my_db 提供高级封装层，让 LuaJIT 和 Python 无需预定义 C struct，纯动态注册 Schema：
+
+### LuaJIT 动态 Schema
+
+```lua
+local mydb = require("mydb")
+
+-- 打开数据库
+local db = mydb.open("app_data.bin")
+
+-- 动态注册表（无需 C struct，纯 Lua 表定义）
+local users = db:register("users", {
+    {name = "id",    type = "uint64"},     -- 第一字段必须是 uint64 id
+    {name = "name",  type = "string", size = 32},
+    {name = "age",   type = "int32"},
+    {name = "score", type = "double"},
+})
+
+-- 创建索引
+users:create_index("name")
+
+-- 插入（Lua 表自动序列化）
+local id1 = users:insert({name = "Alice", age = 25, score = 95.5})
+local id2 = users:insert({name = "Bob",   age = 30, score = 88.0})
+
+-- 查询
+local row = users:find(id1)              -- 主键查询
+local all = users:select()               -- 全表查询
+local adults = users:where({
+    {field = "age", op = 1, value = 25}  -- age > 25
+})
+
+-- 更新/删除
+users:update(id1, {name = "Alice Updated", age = 26, score = 96.0})
+users:delete(id2)
+
+-- Checkpoint 和关闭
+db:checkpoint()
+db:close()
+```
+
+### Python 动态 Schema
+
+```python
+from mydb import create
+
+# 创建数据库并注册表（支持 with 语句自动关闭）
+with create("app_data.bin", schemas={
+    "users": [
+        {"name": "id",    "type": "uint64"},
+        {"name": "name",  "type": "string", "size": 32},
+        {"name": "age",   "type": "int32"},
+        {"name": "score", "type": "double"},
+    ]
+}) as db:
+    users = db.table("users")
+    
+    # 创建索引
+    users.create_index("name")
+    
+    # 插入（Python dict 自动序列化）
+    id1 = users.insert({"name": "Alice", "age": 25, "score": 95.5})
+    id2 = users.insert({"name": "Bob",   "age": 30, "score": 88.0})
+    
+    # 查询
+    row = users.find(id1)              # 主键查询，返回 dict
+    all_rows = users.select()          # 全表查询，返回 [dict]
+    adults = users.where(age__gt=25)   # WHERE age > 25
+    
+    # 更新/删除
+    users.update(id1, {"name": "Alice Updated", "age": 26, "score": 96.0})
+    users.delete(id2)
+    
+    # Checkpoint
+    db.checkpoint()
+```
+
+**核心优势**：
+- **零 C 代码**：脚本层完全控制 Schema，无需编译 C struct
+- **自动序列化**：Lua 表/Python dict ↔ C 内存自动转换
+- **自动偏移计算**：封装层自动处理字段对齐和偏移
+- **JSON 反序列化**：查询结果自动解析为原生数据类型
+
 ## 性能
 
 | 操作 | 性能 |
