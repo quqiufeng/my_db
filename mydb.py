@@ -420,6 +420,10 @@ class DB:
         
         return Table(ptr, layout, name)
     
+    def sync(self):
+        """强制刷盘（同步写入磁盘）"""
+        return _lib.db_sync(self._ptr)
+    
     def checkpoint(self):
         """执行 Checkpoint"""
         return _lib.db_checkpoint(self._ptr)

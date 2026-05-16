@@ -267,7 +267,7 @@ db_select_all_stream(users, callback, NULL);
 ### 数据库生命周期
 - `db_open(data_path, index_path, wal_path, pool_size)` → db_t
 - `db_close(db)`
-- `db_sync(db)` — 强制刷盘
+- `db_sync(db)` — 强制刷盘（同步等待写入完成，数据真正落盘）
 - `db_config_max_rows(db, max_rows)` — 配置最大返回行数（默认 10000）
 
 ### Schema 注册（编译时）

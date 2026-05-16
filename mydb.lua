@@ -351,6 +351,10 @@ function DB:table(name)
     }, Table)
 end
 
+function DB:sync()
+    return _lib.db_sync(self._ptr)
+end
+
 function DB:checkpoint()
     return _lib.db_checkpoint(self._ptr)
 end

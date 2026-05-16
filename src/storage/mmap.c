@@ -80,7 +80,8 @@ void pool_close(db_pool_t* pool) {
 
 int pool_sync(db_pool_t* pool) {
     if (!pool || !pool->base) return -1;
-    return msync(pool->base, pool->size, MS_ASYNC);
+    // MS_SYNC: 等待数据真正写入磁盘（同步刷盘）
+    return msync(pool->base, pool->size, MS_SYNC);
 }
 
 void* pool_alloc(db_pool_t* pool, size_t size) {
