@@ -512,3 +512,33 @@ int cache_del_ns(cache_t* cache, const char* ns, const char* key) {
     free(full_key);
     return ret;
 }
+
+int cache_expire(cache_t* cache, const char* key) {
+    if (!cache || !key) return CACHE_ERR_INVAL;
+    
+    cache_entry_t* entry = cache_find_entry(cache, key);
+    if (!entry) return CACHE_ERR_NOENT;
+    
+    cache_entry_header_t* header = (cache_entry_header_t*)CACHE_PTR(cache, entry->offset);
+    header->expire_at = 1;  // 设置为一个已经过去的时间点
+    header->flags |= CACHE_ENTRY_DELETED;
+    
+    cache->entry_count--;
+    cache->deleted_count++;
+    
+    free(entry);
+    return CACHE_OK;
+}
+
+int cache_touch(cache_t* cache, const char* key) {
+    if (!cache || !key) return CACHE_ERR_INVAL;
+    
+    cache_entry_t* entry = cache_find_entry(cache, key);
+    if (!entry) return CACHE_ERR_NOENT;
+    
+    cache_entry_header_t* header = (cache_entry_header_t*)CACHE_PTR(cache, entry->offset);
+    header->access_time = cache_now_ms();
+    
+    free(entry);
+    return CACHE_OK;
+}

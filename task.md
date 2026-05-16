@@ -389,12 +389,12 @@
   - [x] cache_iter_reset() — 重置迭代器位置
 
 ### 9.9 导入工具
-- [ ] 9.9.1 电子书导入（Python）
-  - [ ] tools/import_book.py — 复用 WordCard 解析库
-  - [ ] 分章逻辑（split_into_chapters）
-  - [ ] LLM 生成摘要
-  - [ ] 生成 tags
-  - [ ] 存入 KV Cache
+- [x] 9.9.1 电子书导入（C 工具）
+  - [x] tools/import_book.c — 复用 WordCard wrapper 库
+  - [x] 分块逻辑（split_into_chunks，按大小分块）
+  - [x] 存入 KV Cache（JSON 格式）
+  - [ ] LLM 生成摘要（Phase 10）
+  - [ ] 生成 tags（Phase 10）
 - [ ] 9.9.2 GitHub 源码导入（Python）
   - [ ] tools/import_github.py
   - [ ] 克隆仓库
@@ -404,10 +404,10 @@
   - [ ] 存入 KV Cache
 
 ### 9.10 CLI 工具
-- [ ] 9.10.1 命令行接口
+- [x] 9.10.1 命令行接口（import_book CLI）
+  - [x] cache import-book <file> [namespace]
   - [ ] cache set/get/del/list
   - [ ] cache search --prefix/--regex/--fuzzy
-  - [ ] cache import-book/import-github
   - [ ] cache stats/compact/purge/check
 
 ### 9.11 FFI 绑定
