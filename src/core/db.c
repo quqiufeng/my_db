@@ -48,6 +48,9 @@ void db_close(db_t db) {
     // 释放表结构
     for (size_t i = 0; i < inst->table_count; i++) {
         if (inst->tables[i]) {
+            for (size_t j = 0; j < inst->tables[i]->field_count; j++) {
+                free((void*)inst->tables[i]->fields[j].name);
+            }
             free(inst->tables[i]->fields);
             free(inst->tables[i]);
         }

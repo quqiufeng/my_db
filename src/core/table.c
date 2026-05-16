@@ -30,13 +30,30 @@ table_t db_table_register(db_t db, const char* name, size_t row_size,
     table->data_pool = &inst->data_pool;
     table->db = inst;
     
-    // 复制字段定义
+    // 复制字段定义（深拷贝字段名）
     table->fields = (db_field_def_t*)malloc(sizeof(db_field_def_t) * field_count);
     if (!table->fields) {
         free(table);
         return NULL;
     }
-    memcpy(table->fields, fields, sizeof(db_field_def_t) * field_count);
+    for (size_t i = 0; i < field_count; i++) {
+        table->fields[i] = fields[i];
+        // 深拷贝字段名
+        if (fields[i].name) {
+            size_t name_len = strlen(fields[i].name) + 1;
+            table->fields[i].name = (char*)malloc(name_len);
+            if (!table->fields[i].name) {
+                // 清理已分配的内存
+                for (size_t j = 0; j < i; j++) {
+                    free((void*)table->fields[j].name);
+                }
+                free(table->fields);
+                free(table);
+                return NULL;
+            }
+            memcpy((char*)table->fields[i].name, fields[i].name, name_len);
+        }
+    }
     table->field_count = field_count;
     
     // 分配数据区（每张表独立区域）
@@ -73,13 +90,22 @@ table_t db_table(db_t db, const char* name) {
     return NULL;
 }
 
+static void free_table_fields(db_table_t* table) {
+    if (!table || !table->fields) return;
+    for (size_t i = 0; i < table->field_count; i++) {
+        free((void*)table->fields[i].name);
+    }
+    free(table->fields);
+    table->fields = NULL;
+}
+
 int db_table_drop(db_t db, const char* name) {
     if (!db || !name) return -1;
     db_instance_t* inst = (db_instance_t*)db;
     
     for (size_t i = 0; i < inst->table_count; i++) {
         if (inst->tables[i] && strcmp(inst->tables[i]->name, name) == 0) {
-            free(inst->tables[i]->fields);
+            free_table_fields(inst->tables[i]);
             free(inst->tables[i]);
             // 移动后续表
             for (size_t j = i; j < inst->table_count - 1; j++) {
