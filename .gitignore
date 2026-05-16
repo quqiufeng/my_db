@@ -7,6 +7,10 @@ libmydb.so
 tests/test_basic
 tests/test_join
 tests/test_perf
+tests/test_edge
+tests/test_composite
+tests/test_wal
+examples/example_c
 
 # Test data files
 *.bin
