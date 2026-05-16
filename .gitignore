@@ -24,3 +24,6 @@ __pycache__/
 *.idxmeta
 *.strings
 *.wal
+
+# Importer libs (compiled locally)
+src/importer/libs/*.so
