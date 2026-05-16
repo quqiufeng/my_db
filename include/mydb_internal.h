@@ -73,6 +73,7 @@ typedef struct db_index {
 typedef struct db_table {
     char            name[MYDB_TABLE_NAME_LEN];
     size_t          row_size;
+    size_t          row_stride;     // 对齐后的行大小（包含 header）
     size_t          row_count;
     size_t          max_rowid;
     size_t          data_offset;    // 数据区起始偏移

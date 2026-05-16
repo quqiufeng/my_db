@@ -18,6 +18,7 @@ table_t db_table_register(db_t db, const char* name, size_t row_size,
     
     strncpy(table->name, name, MYDB_TABLE_NAME_LEN - 1);
     table->row_size = row_size;
+    table->row_stride = ((sizeof(row_header_t) + row_size + MYDB_ALIGN - 1) / MYDB_ALIGN) * MYDB_ALIGN;
     table->data_pool = &inst->data_pool;
     
     // 复制字段定义
@@ -29,8 +30,16 @@ table_t db_table_register(db_t db, const char* name, size_t row_size,
     memcpy(table->fields, fields, sizeof(db_field_def_t) * field_count);
     table->field_count = field_count;
     
-    // 分配数据区
-    table->data_offset = inst->data_pool.used;
+    // 分配数据区（每张表独立区域）
+    size_t initial_rows = 16;
+    size_t reserve_size = initial_rows * table->row_stride;
+    void* reserved = pool_alloc(&inst->data_pool, reserve_size);
+    if (!reserved) {
+        free(table->fields);
+        free(table);
+        return NULL;
+    }
+    table->data_offset = OFF(inst->data_pool.base, reserved);
     
     inst->tables[inst->table_count++] = table;
     return table;
@@ -82,7 +91,7 @@ size_t db_table_compact(table_t table) {
     // 简化实现：统计已删除行数
     size_t deleted = 0;
     for (size_t i = 0; i < t->max_rowid; i++) {
-        row_header_t* header = (row_header_t*)PTR(t->data_pool->base, t->data_offset + i * (sizeof(row_header_t) + t->row_size));
+        row_header_t* header = (row_header_t*)PTR(t->data_pool->base, t->data_offset + i * t->row_stride);
         if (header->flags & MYDB_DELETED_FLAG) {
             deleted++;
         }
@@ -102,10 +111,17 @@ rowid_t db_insert(table_t table, const void* row, size_t row_size) {
     
     rowid_t id = ++t->max_rowid;
     
-    // 分配内存：row_header + 行数据
-    size_t alloc_size = sizeof(row_header_t) + row_size;
-    void* ptr = pool_alloc(t->data_pool, alloc_size);
-    if (!ptr) return 0;
+    // 确保数据区足够大
+    size_t need_offset = t->data_offset + id * t->row_stride;
+    if (need_offset > t->data_pool->size) {
+        if (pool_resize(t->data_pool, need_offset + (1024 * 1024)) < 0) {
+            return 0;
+        }
+    }
+    
+    // 计算行位置
+    size_t row_offset = t->data_offset + (id - 1) * t->row_stride;
+    void* ptr = (char*)t->data_pool->base + row_offset;
     
     // 写入 header
     row_header_t* header = (row_header_t*)ptr;
@@ -122,6 +138,11 @@ rowid_t db_insert(table_t table, const void* row, size_t row_size) {
     
     // 更新计数
     t->row_count++;
+    
+    // 更新池已用大小
+    if (need_offset > t->data_pool->used) {
+        t->data_pool->used = need_offset;
+    }
     
     // 写 WAL
     // 简化版：暂不记录 WAL
@@ -150,7 +171,7 @@ int db_update(table_t table, rowid_t id, const void* row, size_t row_size) {
     
     if (id > t->max_rowid) return DB_ERR_NOENT;
     
-    size_t offset = t->data_offset + (id - 1) * (sizeof(row_header_t) + t->row_size);
+    size_t offset = t->data_offset + (id - 1) * t->row_stride;
     row_header_t* header = (row_header_t*)PTR(t->data_pool->base, offset);
     
     if (header->flags & MYDB_DELETED_FLAG) return DB_ERR_NOENT;
@@ -167,7 +188,7 @@ int db_delete(table_t table, rowid_t id) {
     
     if (id > t->max_rowid) return DB_ERR_NOENT;
     
-    size_t offset = t->data_offset + (id - 1) * (sizeof(row_header_t) + t->row_size);
+    size_t offset = t->data_offset + (id - 1) * t->row_stride;
     row_header_t* header = (row_header_t*)PTR(t->data_pool->base, offset);
     
     if (header->flags & MYDB_DELETED_FLAG) return DB_ERR_NOENT;

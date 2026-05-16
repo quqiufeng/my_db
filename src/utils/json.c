@@ -85,9 +85,9 @@ char* json_row(db_table_t* table, void* row_ptr) {
                 offset += sprintf(buf + offset, "%s", *(uint8_t*)field_ptr ? "true" : "false");
                 break;
             case DB_TYPE_STRING: {
-                // 找到字符串实际长度（处理定长字符串中的空字符）
-                size_t str_len = field->size;
-                while (str_len > 0 && ((char*)field_ptr)[str_len - 1] == '\0') str_len--;
+                // 找到实际字符串长度（第一个 \0 之前）
+                size_t str_len = 0;
+                while (str_len < field->size && ((char*)field_ptr)[str_len] != '\0') str_len++;
                 if (str_len == 0) {
                     offset += sprintf(buf + offset, "\"\"");
                 } else {

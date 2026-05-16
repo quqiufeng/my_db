@@ -169,7 +169,7 @@ const char* db_select_by_pk_json(table_t table, rowid_t id) {
     
     if (id > t->max_rowid) return NULL;
     
-    size_t offset = t->data_offset + (id - 1) * (sizeof(row_header_t) + t->row_size);
+    size_t offset = t->data_offset + (id - 1) * t->row_stride;
     row_header_t* header = (row_header_t*)PTR(t->data_pool->base, offset);
     
     if (header->flags & MYDB_DELETED_FLAG) return NULL;
@@ -227,15 +227,158 @@ const char* db_select_json(table_t table,
 const char* db_join_json(table_t left_table, size_t left_field_offset,
                           table_t right_table, size_t right_field_offset,
                           size_t field_size) {
-    // 简化实现：嵌套循环 JOIN
+    // 嵌套循环等值 JOIN
     if (!left_table || !right_table) return NULL;
     
     db_table_t* left = (db_table_t*)left_table;
     db_table_t* right = (db_table_t*)right_table;
     
-    // 收集结果
-    // 简化：返回空数组
-    return strdup("[]");
+    // 预估结果大小
+    size_t est_size = 2; // []
+    size_t join_count = 0;
+    
+    // 先计算大小
+    for (rowid_t lid = 1; lid <= left->max_rowid; lid++) {
+        size_t loff = left->data_offset + (lid - 1) * (sizeof(row_header_t) + left->row_size);
+        row_header_t* lheader = (row_header_t*)PTR(left->data_pool->base, loff);
+        if (lheader->flags & MYDB_DELETED_FLAG) continue;
+        
+        void* lval = (char*)lheader + sizeof(row_header_t) + left_field_offset;
+        
+        for (rowid_t rid = 1; rid <= right->max_rowid; rid++) {
+            size_t roff = right->data_offset + (rid - 1) * (sizeof(row_header_t) + right->row_size);
+            row_header_t* rheader = (row_header_t*)PTR(right->data_pool->base, roff);
+            if (rheader->flags & MYDB_DELETED_FLAG) continue;
+            
+            void* rval = (char*)rheader + sizeof(row_header_t) + right_field_offset;
+            
+            if (memcmp(lval, rval, field_size) == 0) {
+                join_count++;
+                est_size += 1024; // 预估每行大小
+            }
+        }
+    }
+    
+    if (join_count == 0) return strdup("[]");
+    
+    char* buf = (char*)malloc(est_size);
+    if (!buf) return strdup("[]");
+    
+    size_t offset = 0;
+    offset += sprintf(buf + offset, "[");
+    
+    bool first = true;
+    for (rowid_t lid = 1; lid <= left->max_rowid; lid++) {
+        size_t loff = left->data_offset + (lid - 1) * (sizeof(row_header_t) + left->row_size);
+        row_header_t* lheader = (row_header_t*)PTR(left->data_pool->base, loff);
+        if (lheader->flags & MYDB_DELETED_FLAG) continue;
+        
+        void* lval = (char*)lheader + sizeof(row_header_t) + left_field_offset;
+        void* lrow = (char*)lheader + sizeof(row_header_t);
+        
+        for (rowid_t rid = 1; rid <= right->max_rowid; rid++) {
+            size_t roff = right->data_offset + (rid - 1) * (sizeof(row_header_t) + right->row_size);
+            row_header_t* rheader = (row_header_t*)PTR(right->data_pool->base, roff);
+            if (rheader->flags & MYDB_DELETED_FLAG) continue;
+            
+            void* rval = (char*)rheader + sizeof(row_header_t) + right_field_offset;
+            
+            if (memcmp(lval, rval, field_size) == 0) {
+                if (!first) offset += sprintf(buf + offset, ",");
+                first = false;
+                
+                void* rrow = (char*)rheader + sizeof(row_header_t);
+                
+                offset += sprintf(buf + offset, "{");
+                
+                // 左表字段
+                for (size_t i = 0; i < left->field_count; i++) {
+                    if (i > 0) offset += sprintf(buf + offset, ",");
+                    db_field_def_t* f = &left->fields[i];
+                    void* fp = (char*)lrow + f->offset;
+                    
+                    offset += sprintf(buf + offset, "\"%s.%s\":", left->name, f->name);
+                    
+                    switch (f->type) {
+                        case DB_TYPE_INT32:
+                            offset += sprintf(buf + offset, "%d", *(int32_t*)fp);
+                            break;
+                        case DB_TYPE_UINT64:
+                            offset += sprintf(buf + offset, "%lu", (unsigned long)*(uint64_t*)fp);
+                            break;
+                        case DB_TYPE_STRING: {
+                            size_t slen = f->size;
+                            while (slen > 0 && ((char*)fp)[slen-1] == '\0') slen--;
+                            if (slen == 0) {
+                                offset += sprintf(buf + offset, "\"\"");
+                            } else {
+                                offset += sprintf(buf + offset, "\"");
+                                for (size_t k = 0; k < slen; k++) {
+                                    if (((char*)fp)[k] == '"' || ((char*)fp)[k] == '\\') {
+                                        offset += sprintf(buf + offset, "\\");
+                                    }
+                                    offset += sprintf(buf + offset, "%c", ((char*)fp)[k]);
+                                }
+                                offset += sprintf(buf + offset, "\"");
+                            }
+                            break;
+                        }
+                        case DB_TYPE_DOUBLE:
+                            offset += sprintf(buf + offset, "%.6f", *(double*)fp);
+                            break;
+                        default:
+                            offset += sprintf(buf + offset, "null");
+                    }
+                }
+                
+                // 右表字段
+                for (size_t i = 0; i < right->field_count; i++) {
+                    offset += sprintf(buf + offset, ",");
+                    db_field_def_t* f = &right->fields[i];
+                    void* fp = (char*)rrow + f->offset;
+                    
+                    offset += sprintf(buf + offset, "\"%s.%s\":", right->name, f->name);
+                    
+                    switch (f->type) {
+                        case DB_TYPE_INT32:
+                            offset += sprintf(buf + offset, "%d", *(int32_t*)fp);
+                            break;
+                        case DB_TYPE_UINT64:
+                            offset += sprintf(buf + offset, "%lu", (unsigned long)*(uint64_t*)fp);
+                            break;
+                        case DB_TYPE_STRING: {
+                            size_t slen = f->size;
+                            while (slen > 0 && ((char*)fp)[slen-1] == '\0') slen--;
+                            if (slen == 0) {
+                                offset += sprintf(buf + offset, "\"\"");
+                            } else {
+                                offset += sprintf(buf + offset, "\"");
+                                for (size_t k = 0; k < slen; k++) {
+                                    if (((char*)fp)[k] == '"' || ((char*)fp)[k] == '\\') {
+                                        offset += sprintf(buf + offset, "\\");
+                                    }
+                                    offset += sprintf(buf + offset, "%c", ((char*)fp)[k]);
+                                }
+                                offset += sprintf(buf + offset, "\"");
+                            }
+                            break;
+                        }
+                        case DB_TYPE_DOUBLE:
+                            offset += sprintf(buf + offset, "%.6f", *(double*)fp);
+                            break;
+                        default:
+                            offset += sprintf(buf + offset, "null");
+                    }
+                }
+                
+                offset += sprintf(buf + offset, "}");
+            }
+        }
+    }
+    
+    offset += sprintf(buf + offset, "]");
+    
+    return buf;
 }
 
 void db_json_free(const char* json) {
@@ -247,7 +390,7 @@ int db_select_all_stream(table_t table, db_row_cb_t cb, void* user_data) {
     db_table_t* t = (db_table_t*)table;
     
     for (rowid_t id = 1; id <= t->max_rowid; id++) {
-        size_t offset = t->data_offset + (id - 1) * (sizeof(row_header_t) + t->row_size);
+        size_t offset = t->data_offset + (id - 1) * t->row_stride;
         row_header_t* header = (row_header_t*)PTR(t->data_pool->base, offset);
         
         if (header->flags & MYDB_DELETED_FLAG) continue;
@@ -271,7 +414,7 @@ int db_select_where_stream(table_t table,
     db_table_t* t = (db_table_t*)table;
     
     for (rowid_t id = 1; id <= t->max_rowid; id++) {
-        size_t offset = t->data_offset + (id - 1) * (sizeof(row_header_t) + t->row_size);
+        size_t offset = t->data_offset + (id - 1) * t->row_stride;
         row_header_t* header = (row_header_t*)PTR(t->data_pool->base, offset);
         
         if (header->flags & MYDB_DELETED_FLAG) continue;
@@ -307,7 +450,7 @@ int db_select_stream(table_t table,
     
     db_table_t* t = (db_table_t*)table;
     for (size_t i = 0; i < count; i++) {
-        size_t offset = t->data_offset + (results[i] - 1) * (sizeof(row_header_t) + t->row_size);
+        size_t offset = t->data_offset + (results[i] - 1) * t->row_stride;
         row_header_t* header = (row_header_t*)PTR(t->data_pool->base, offset);
         void* row_ptr = (char*)header + sizeof(row_header_t);
         
