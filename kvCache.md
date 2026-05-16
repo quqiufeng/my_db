@@ -662,19 +662,335 @@ for r in results:
 
 ---
 
-## 12. 未来扩展
+## 12. GitHub 源码项目扫描设计
+
+### 12.1 为什么需要源码扫描？
+
+**AI Agent Coding 场景的核心痛点**:
+- Agent 开发大项目时，需要参考优秀的第三方库
+- 但 Agent 的上下文窗口有限，无法塞入整个项目源码
+- **解决方案**: 扫描项目 → 提取精华 → 生成记忆 → 按需搜索召回
+
+**典型使用场景**:
+```
+1. Agent 要写一个 HTTP server
+   → 搜索 cache: "如何写高性能 HTTP server"
+   → 召回: /github/valyala/fasthttp/src/server.go 摘要
+
+2. Agent 遇到内存泄漏问题
+   → 搜索 cache: "C++ 内存管理最佳实践"
+   → 召回: /github/facebook/folly/src/memory 相关记忆
+
+3. Agent 要学习设计模式
+   → 搜索 cache: "工厂模式实现"
+   → 召回: /github/golang/go/src/fmt 中的工厂模式用法
+```
+
+### 12.2 Namespace 设计
+
+```
+/github/{owner}/{repo}/                    # 项目根
+├── _meta/                                 # 元数据（系统保留）
+│   ├── readme                             # README 摘要
+│   ├── structure                          # 目录结构
+│   ├── dependencies                       # 依赖关系
+│   └── language                           # 编程语言
+│
+├── src/{relative/path/to/file}            # 源文件分析
+│   ├── src/src/core/db.c                  # 文件级摘要
+│   ├── src/include/cache.h                # 头文件分析
+│   └── src/src/types/hash.c               # 关键算法分析
+│
+└── docs/{docname}                         # 文档（如果有 docs/ 目录）
+    ├── docs/architecture                  # 架构文档摘要
+    └── docs/api-reference                 # API 文档摘要
+```
+
+**示例**:
+```
+/github/quqiufeng/my_db/
+├── _meta/readme           → "my_db: 基于 C 的嵌入式零拷贝存储引擎..."
+├── _meta/structure        → "目录结构: src/core/, src/types/, tests/..."
+├── src/src/core/db.c      → "数据库生命周期管理: db_open/db_close/db_sync..."
+├── src/src/types/hash.c   → "零拷贝哈希表实现，支持自动扩容..."
+└── src/include/mydb.h     → "公共 API 头文件，FFI 友好..."
+```
+
+### 12.3 扫描流程
+
+```python
+# tools/import_github.py
+
+def import_github_project(cache_dir: str, repo_url: str, namespace: str = None):
+    """扫描 GitHub 项目并生成记忆"""
+    
+    # 1. 克隆/下载仓库
+    repo_path = clone_or_download(repo_url)  # git clone 或下载 zip
+    
+    # 2. 分析项目元数据
+    owner, repo = parse_repo_url(repo_url)
+    if not namespace:
+        namespace = f"/github/{owner}/{repo}"
+    
+    # 3. 提取 README（项目概述）
+    readme = extract_readme(repo_path)
+    readme_summary = call_llm(f"总结以下项目 README 的核心内容（200字内）：\n{readme}")
+    cache_set(cache, f"{namespace}/_meta/readme", readme_summary, TTL_PERMANENT)
+    
+    # 4. 扫描目录结构
+    structure = scan_directory_structure(repo_path)
+    cache_set(cache, f"{namespace}/_meta/structure", structure, TTL_PERMANENT)
+    
+    # 5. 识别编程语言
+    languages = detect_languages(repo_path)
+    cache_set(cache, f"{namespace}/_meta/language", json.dumps(languages), TTL_PERMANENT)
+    
+    # 6. 遍历关键源文件
+    for file_path in find_key_files(repo_path):
+        relative_path = os.path.relpath(file_path, repo_path)
+        
+        # 6.1 读取文件内容（限制大小，跳过二进制）
+        content = read_source_file(file_path, max_lines=500)
+        if not content:
+            continue
+        
+        # 6.2 提取函数/类签名 + 关键注释
+        signatures = extract_signatures(content, languages)
+        
+        # 6.3 调用 LLM 生成文件级摘要
+        summary = call_llm(f"""
+分析以下源码文件，提取核心要点：
+1. 这个文件的主要功能
+2. 关键函数/类及其作用
+3. 设计亮点或算法
+4. 使用场景
+
+文件路径: {relative_path}
+源码内容:
+{content[:3000]}  # 截断到 3000 字符
+        """)
+        
+        # 6.4 生成 tags
+        tags = call_llm(f"从以下代码摘要提取 3-5 个技术标签（逗号分隔）：\n{summary}")
+        
+        # 6.5 构建 KV entry
+        key = f"{namespace}/src/{relative_path}"
+        value = json.dumps({
+            "t": "source-code",
+            "c": summary,
+            "s": repo_url,                    # 源仓库 URL
+            "p": relative_path,               # 文件路径
+            "i": 4,
+            "tags": tags.split(","),
+            "signatures": signatures,         # 函数签名列表
+            "language": languages[0] if languages else "unknown"
+        })
+        
+        cache_set(cache, key, value, TTL_PERMANENT)
+    
+    # 7. 提取依赖关系
+    dependencies = extract_dependencies(repo_path, languages)
+    cache_set(cache, f"{namespace}/_meta/dependencies", json.dumps(dependencies), TTL_PERMANENT)
+    
+    # 8. 生成项目级索引（跨文件关系）
+    cross_file_analysis = analyze_cross_file_relationships(repo_path)
+    if cross_file_analysis:
+        cache_set(cache, f"{namespace}/_meta/cross-file", cross_file_analysis, TTL_PERMANENT)
+    
+    cache_sync(cache)
+```
+
+### 12.4 文件筛选策略
+
+**扫描哪些文件？**
+```python
+# 包含的文件模式
+INCLUDE_PATTERNS = [
+    "*.c", "*.h", "*.cpp", "*.hpp",      # C/C++
+    "*.py", "*.pyi",                      # Python
+    "*.go",                               # Go
+    "*.rs",                               # Rust
+    "*.js", "*.ts",                       # JavaScript/TypeScript
+    "*.java",                             # Java
+    "*.rb",                               # Ruby
+    "README*", "CONTRIBUTING*",           # 文档
+    "docs/**/*.md", "docs/**/*.rst",      # 文档目录
+]
+
+# 排除的文件模式
+EXCLUDE_PATTERNS = [
+    "**/test/**", "**/tests/**",          # 测试目录
+    "**/vendor/**", "**/third_party/**",  # 第三方代码
+    "**/.git/**", "**/__pycache__/**",    # 版本控制/缓存
+    "**/node_modules/**", "**/target/**", # 构建产物
+    "*.min.js", "*.bundle.js",            # 压缩文件
+    "*.lock", "*.sum",                    # 锁定文件
+]
+
+# 文件大小限制
+MAX_FILE_SIZE = 100 * 1024  # 100KB，超过则跳过
+```
+
+**优先级排序**:
+1. README / CONTRIBUTING（项目概述）
+2. 核心源文件（src/ 目录下的非测试文件）
+3. 公共 API 头文件（include/ 或 public/）
+4. 关键算法实现文件
+5. 文档文件（docs/）
+
+### 12.5 签名提取
+
+**不需要 LLM，用正则提取函数签名**:
+```python
+def extract_signatures(content: str, language: str) -> list:
+    """提取函数/类/结构体签名"""
+    signatures = []
+    
+    if language == "c" or language == "cpp":
+        # 匹配函数定义: return_type func_name(args)
+        pattern = r'^(\w+[\s\*]+)+(\w+)\s*\([^)]*\)\s*\{'
+        for match in re.finditer(pattern, content, re.MULTILINE):
+            signatures.append(match.group(0))
+    
+    elif language == "python":
+        # 匹配函数定义: def func_name(args):
+        pattern = r'^def\s+(\w+)\s*\([^)]*\):'
+        for match in re.finditer(pattern, content, re.MULTILINE):
+            signatures.append(match.group(0))
+    
+    elif language == "go":
+        # 匹配函数定义: func FuncName(args) return_type
+        pattern = r'^func\s+(\w+)\s*\([^)]*\)'
+        for match in re.finditer(pattern, content, re.MULTILINE):
+            signatures.append(match.group(0))
+    
+    return signatures[:20]  # 最多保留 20 个签名
+```
+
+### 12.6 跨文件关系分析
+
+**高级功能：分析模块间依赖**:
+```python
+def analyze_cross_file_relationships(repo_path: str) -> str:
+    """分析跨文件关系，生成项目架构摘要"""
+    
+    # 1. 提取 include/import 关系
+    includes = extract_includes(repo_path)
+    
+    # 2. 提取模块划分
+    modules = identify_modules(repo_path)
+    
+    # 3. 调用 LLM 生成架构分析
+    prompt = f"""
+基于以下信息，分析项目架构：
+
+目录结构:
+{get_directory_tree(repo_path, max_depth=3)}
+
+模块划分:
+{json.dumps(modules, indent=2)}
+
+关键依赖关系:
+{json.dumps(includes[:50], indent=2)}  # 前 50 个依赖
+
+请生成项目架构摘要，包括：
+1. 项目整体架构（分层、模块划分）
+2. 核心组件及其职责
+3. 数据流或控制流
+4. 关键设计模式
+    """
+    
+    return call_llm(prompt)
+```
+
+### 12.7 使用示例
+
+```bash
+# 扫描 Redis 源码
+python tools/import_github.py \
+  --repo "https://github.com/redis/redis" \
+  --cache-dir "./agent-memory" \
+  --namespace "/github/redis/redis" \
+  --llm-url "http://localhost:11434" \
+  --max-files 100  # 最多处理 100 个文件
+
+# 扫描后搜索
+python -c "
+from mydb import Cache
+cache = Cache.open('agent-memory')
+
+# 搜索 Redis 的内存管理
+results = cache.regex('/github/redis/redis/.*memory.*')
+for r in results:
+    print(f'{r.key}: {r.value}')
+
+# 搜索所有 C 项目的网络相关代码
+results = cache.regex('/github/.*/.*network.*')
+for r in results:
+    print(f'{r.key}: {r.value["c"][:100]}...')
+"
+```
+
+### 12.8 与电子书导入的对比
+
+| | 电子书导入 | GitHub 源码扫描 |
+|--|-----------|----------------|
+| **目标** | 技术知识学习 | 代码参考、架构学习 |
+| **输入** | PDF/MOBI/EPUB | Git 仓库（在线/本地） |
+| **内容** | 章节、段落、概念 | 源文件、函数、架构 |
+| **提取方式** | 分章 + 关键段落 | 文件树 + 签名提取 |
+| **LLM 任务** | 生成摘要、提取 tags | 分析代码、提取架构 |
+| **Namespace** | `/books/{title}/` | `/github/{owner}/{repo}/` |
+| **搜索场景** | "什么是 move semantics" | "Redis 怎么实现内存池" |
+
+### 12.9 增量更新
+
+**问题**: 源码项目会更新，如何增量同步？
+
+**方案**:
+```python
+def update_github_project(cache, repo_url: str):
+    """增量更新项目记忆"""
+    
+    # 1. 获取仓库最新 commit hash
+    latest_commit = get_latest_commit(repo_url)
+    
+    # 2. 检查缓存中的 commit hash
+    namespace = f"/github/{owner}/{repo}"
+    cached_commit = cache_get(cache, f"{namespace}/_meta/commit")
+    
+    if cached_commit == latest_commit:
+        print("项目未更新，跳过")
+        return
+    
+    # 3. 只扫描变更的文件
+    changed_files = get_changed_files(repo_url, cached_commit, latest_commit)
+    for file_path in changed_files:
+        # 重新提取该文件摘要
+        update_file_summary(cache, namespace, file_path)
+    
+    # 4. 更新 commit hash
+    cache_set(cache, f"{namespace}/_meta/commit", latest_commit, TTL_PERMANENT)
+    cache_sync(cache)
+```
+
+---
+
+## 13. 未来扩展
 
 ### Phase 2
 - [ ] 向量搜索：集成 HNSW，支持语义相似度搜索（"找和 move semantics 相关的知识点"）
 - [ ] 标签索引：维护 tag → [offsets] 反向索引，加速标签搜索
 - [ ] 跳表升级：数据量 > 100万时，排序数组升级为跳表
+- [ ] 源码语义分析：集成 tree-sitter，精确提取 AST 信息
 
 ### Phase 3
 - [ ] 分布式：多 Agent 共享知识库
 - [ ] 快照：定期快照备份
+- [ ] 增量同步：GitHub webhook 自动更新项目记忆
 
 ---
 
-*文档版本: 1.1*  
+*文档版本: 1.2*  
 *更新日期: 2026-05-16*  
-*状态: 搜索设计完成，索引方案确定（排序数组）*
+*状态: 设计完成，包含电子书导入 + GitHub 源码扫描*
