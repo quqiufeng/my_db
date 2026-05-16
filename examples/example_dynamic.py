@@ -2,6 +2,8 @@
 """使用 mydb.py 封装层的动态 Schema 示例"""
 
 import sys
+import os
+
 sys.path.insert(0, '.')
 
 from mydb import create
@@ -9,6 +11,8 @@ from mydb import create
 print("=== mydb.py 多文件存储示例 ===\n")
 
 # 创建数据库目录并注册表（支持 with 语句自动关闭）
+# 第三个参数 indexes 支持内联创建索引：
+#   字符串 = 单列索引，列表 = 复合索引
 with create("game_db", schemas={
     "users": [
         {"name": "id",    "type": "uint64"},
@@ -21,6 +25,14 @@ with create("game_db", schemas={
         {"name": "user_id", "type": "uint64"},
         {"name": "amount",  "type": "double"},
     ]
+}, indexes={
+    "users": [
+        "name",                  # 单列索引
+        ["name", "age"],         # 复合索引
+    ],
+    "orders": [
+        "user_id",               # 单列索引
+    ]
 }) as db:
     print("1. 数据库目录创建成功")
     print("   目录结构: game_db/")
@@ -32,11 +44,7 @@ with create("game_db", schemas={
     
     users = db.table("users")
     orders = db.table("orders")
-    
-    # 创建索引
-    users.create_index("name")
-    orders.create_index("user_id")
-    print("2. 索引创建成功")
+    print("2. 表注册成功（含索引）")
     
     # 插入数据
     id1 = users.insert({"name": "Alice", "age": 25, "score": 95.5})
@@ -89,7 +97,6 @@ print("13. 数据库自动关闭")
 
 print("\n=== 示例完成 ===")
 
-import os
 print("\n文件结构:")
 for f in sorted(os.listdir("game_db")):
     path = os.path.join("game_db", f)

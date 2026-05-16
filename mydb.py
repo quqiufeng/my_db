@@ -495,15 +495,17 @@ def open(db_dir="mydb_data", pool_size=100*1024*1024):
     return DB(ptr)
 
 
-def create(db_dir, schemas=None):
+def create(db_dir, schemas=None, indexes=None):
     """创建数据库并注册表
     
     schemas: {table_name: [field_def, ...], ...}
+    indexes: {table_name: ["field", ["field1", "field2"], ...], ...} — 可选
     """
     db = open(db_dir)
     
     if schemas:
         for name, schema in schemas.items():
-            db.register(name, schema)
+            table_indexes = indexes.get(name) if indexes else None
+            db.register(name, schema, table_indexes)
     
     return db
