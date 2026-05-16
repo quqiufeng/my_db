@@ -319,6 +319,113 @@ int cache_set(cache_t* cache, const char* key, const char* value, uint64_t ttl_m
     return CACHE_OK;
 }
 
+// 批量设置（性能优化：先批量写入 pool，最后统一排序数组 qsort）
+int cache_batch_set(cache_t* cache, const cache_batch_item_t* items, size_t count) {
+    if (!cache || !items || count == 0) return CACHE_ERR_INVAL;
+    
+    // 预分配 offset 数组
+    size_t* offsets = malloc(sizeof(size_t) * count);
+    if (!offsets) return CACHE_ERR_NOMEM;
+    
+    uint64_t now = cache_now_ms();
+    size_t total_aligned = 0;
+    
+    // 第一遍：计算总大小并检查内存
+    for (size_t i = 0; i < count; i++) {
+        size_t key_len = strlen(items[i].key);
+        size_t value_len = strlen(items[i].value);
+        size_t entry_size = sizeof(cache_entry_header_t) + key_len + 1 + value_len + 1;
+        size_t aligned_size = (entry_size + MYDB_ALIGN - 1) & ~(MYDB_ALIGN - 1);
+        total_aligned += aligned_size;
+    }
+    
+    // 检查内存限制（简单检查，不考虑 LRU 淘汰）
+    if (cache->memory_used + total_aligned > cache->memory_max) {
+        free(offsets);
+        return CACHE_ERR_NOMEM;
+    }
+    
+    // 第二遍：批量写入 pool
+    for (size_t i = 0; i < count; i++) {
+        const char* key = items[i].key;
+        const char* value = items[i].value;
+        size_t key_len = strlen(key);
+        size_t value_len = strlen(value);
+        uint64_t ttl_ms = items[i].ttl_ms;
+        
+        size_t entry_size = sizeof(cache_entry_header_t) + key_len + 1 + value_len + 1;
+        size_t aligned_size = (entry_size + MYDB_ALIGN - 1) & ~(MYDB_ALIGN - 1);
+        
+        size_t offset = cache_pool_alloc(cache, aligned_size);
+        if (!offset) {
+            free(offsets);
+            return CACHE_ERR_NOMEM;
+        }
+        
+        // 写入 header
+        cache_entry_header_t* header = (cache_entry_header_t*)CACHE_PTR(cache, offset);
+        header->key_len = key_len;
+        header->value_len = value_len;
+        header->expire_at = ttl_ms > 0 ? now + ttl_ms : 0;
+        header->access_time = now;
+        header->flags = ttl_ms == 0 ? CACHE_ENTRY_PERMANENT : 0;
+        header->reserved = 0;
+        
+        // 写入 key 和 value
+        char* key_ptr = (char*)CACHE_PTR(cache, offset + sizeof(cache_entry_header_t));
+        memcpy(key_ptr, key, key_len);
+        key_ptr[key_len] = '\0';
+        
+        char* value_ptr = key_ptr + key_len + 1;
+        memcpy(value_ptr, value, value_len);
+        value_ptr[value_len] = '\0';
+        
+        offsets[i] = offset;
+        cache->entry_count++;
+        cache->memory_used += aligned_size;
+    }
+    
+    // 第三遍：批量更新 hash 索引
+    for (size_t i = 0; i < count; i++) {
+        const char* key = items[i].key;
+        size_t key_len = strlen(key);
+        cache_hash_insert(cache, offsets[i], key, key_len);
+    }
+    
+    // 第四遍：批量更新 namespace 索引
+    for (size_t i = 0; i < count; i++) {
+        cache_ns_add(cache, items[i].key, offsets[i]);
+    }
+    
+    // 第五遍：排序数组优化——直接追加到末尾，最后统一 qsort
+    cache_sorted_array_t* sorted = &cache->sorted;
+    size_t new_count = sorted->count + count;
+    
+    if (new_count > sorted->capacity) {
+        size_t new_cap = sorted->capacity * 2;
+        if (new_cap < new_count) new_cap = new_count;
+        if (new_cap < 16) new_cap = 16;
+        
+        size_t* new_offsets = realloc(sorted->offsets, sizeof(size_t) * new_cap);
+        if (!new_offsets) {
+            free(offsets);
+            return CACHE_ERR_NOMEM;
+        }
+        sorted->offsets = new_offsets;
+        sorted->capacity = new_cap;
+    }
+    
+    // 复制新 offsets 到数组末尾
+    memcpy(&sorted->offsets[sorted->count], offsets, sizeof(size_t) * count);
+    sorted->count = new_count;
+    free(offsets);
+    
+    // 统一排序（使用 cache_sorted_rebuild，O(N log N) 一次排序）
+    cache_sorted_rebuild(cache);
+    
+    return CACHE_OK;
+}
+
 const char* cache_get(cache_t* cache, const char* key) {
     if (!cache || !key) return NULL;
     

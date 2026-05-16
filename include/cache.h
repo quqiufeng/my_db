@@ -60,6 +60,16 @@ const char* cache_get(cache_t* cache, const char* key);  // 返回指针，不�
 int cache_del(cache_t* cache, const char* key);
 int cache_exists(cache_t* cache, const char* key);
 
+// ====== 批量操作 ======
+typedef struct {
+    const char* key;
+    const char* value;
+    uint64_t ttl_ms;
+} cache_batch_item_t;
+
+// 批量设置（性能优化：避免排序数组 O(n) 多次移动）
+int cache_batch_set(cache_t* cache, const cache_batch_item_t* items, size_t count);
+
 // ====== 统计信息 ======
 size_t cache_count(cache_t* cache);
 size_t cache_memory_used(cache_t* cache);

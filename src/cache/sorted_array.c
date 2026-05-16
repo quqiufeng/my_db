@@ -160,6 +160,37 @@ size_t cache_sorted_get(cache_t* cache, size_t index) {
     return cache->sorted.offsets[index];
 }
 
+// qsort 比较函数（需要 cache 指针，通过全局 TLS 传递）
+static __thread cache_t* g_compare_cache = NULL;
+
+static int compare_entries_qsort(const void* a, const void* b) {
+    cache_t* cache = g_compare_cache;
+    if (!cache) return 0;
+    
+    size_t offset_a = *(const size_t*)a;
+    size_t offset_b = *(const size_t*)b;
+    
+    cache_entry_header_t* ha = (cache_entry_header_t*)CACHE_PTR(cache, offset_a);
+    cache_entry_header_t* hb = (cache_entry_header_t*)CACHE_PTR(cache, offset_b);
+    
+    const char* key_a = (const char*)CACHE_PTR(cache, offset_a + sizeof(cache_entry_header_t));
+    const char* key_b = (const char*)CACHE_PTR(cache, offset_b + sizeof(cache_entry_header_t));
+    
+    size_t min_len = ha->key_len < hb->key_len ? ha->key_len : hb->key_len;
+    int cmp = memcmp(key_a, key_b, min_len);
+    if (cmp != 0) return cmp;
+    return (int)(ha->key_len - hb->key_len);
+}
+
+// 重建排序数组（全量 qsort，用于 batch insert 后）
+void cache_sorted_rebuild(cache_t* cache) {
+    if (!cache || cache->sorted.count <= 1) return;
+    
+    g_compare_cache = cache;
+    qsort(cache->sorted.offsets, cache->sorted.count, sizeof(size_t), compare_entries_qsort);
+    g_compare_cache = NULL;
+}
+
 // 释放排序数组内存
 void cache_sorted_destroy(cache_t* cache) {
     if (!cache) return;

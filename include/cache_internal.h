@@ -117,6 +117,7 @@ size_t cache_sorted_find_lower_bound(cache_t* cache, const char* key, size_t key
 size_t cache_sorted_find_upper_bound(cache_t* cache, const char* key, size_t key_len);
 size_t cache_sorted_get(cache_t* cache, size_t index);
 void cache_sorted_destroy(cache_t* cache);
+void cache_sorted_rebuild(cache_t* cache);
 
 // Namespace 操作
 int cache_ns_init(cache_t* cache);
