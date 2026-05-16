@@ -43,7 +43,7 @@
 - **完整 CRUD**：INSERT / SELECT / UPDATE / DELETE，齐全的程序化 API
 - **JOIN 关联**：等值关联查询，填补嵌入式零拷贝领域的空白
 - **零拷贝持久化**：内存布局 = 磁盘布局，mmap 直接映射
-- **编译时 Schema**：`DB_TABLE` / `DB_FIELD` 宏自动计算 offset/size，无需运行时注册
+- **动态 Schema**：LuaJIT/Python 纯动态注册，无需预定义 C struct
 - **双文件架构**：数据（.bin）和索引（.index）分离，独立管理
 - **WAL 日志**：同步写入保证不丢失，异步刷盘保证性能
 - **JSON 查询结果**：SELECT 自动返回 JSON，无需 FFI 侧定义 struct
@@ -58,8 +58,8 @@
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                     FFI 客户端                               │
-│  LuaJIT FFI / Python ctypes / 其他语言                       │
+│                     LuaJIT FFI 客户端                         │
+│  纯 Lua 脚本控制 Schema + CRUD + JOIN + 索引                   │
 └──────────────────────┬──────────────────────────────────────┘
                        │
                        ▼
@@ -99,7 +99,7 @@ data.bin          data.index           wal.bin
 
 ```
 ┌──────────────────────────────────────────┐
-│  表 "users" (row_size = sizeof(struct user))
+│  表 "users" (row_size = 56 字节)          │
 │                                          │
 │  ┌────────┬────────┬────────┬────────┐  │
 │  │ user[0]│ user[1]│ user[2]│ user[3]│  │  ← 连续存储
@@ -127,64 +127,153 @@ data.bin          data.index           wal.bin
 4. 启动后台刷盘线程
 5. 清空/归档已确认落盘的 WAL
 
-## 快速开始
+## 快速开始（LuaJIT）
 
-### 1. 定义数据结构
+### 1. 加载封装层
 
-```c
-#include "mydb.h"
-
-// ⚠️ 第一个字段必须是 uint64_t id（数据库自动填充）
-struct user {
-    uint64_t id;
-    char     name[32];
-    int32_t  age;
-    double   score;
-};
+```lua
+local mydb = require("mydb")
 ```
 
-### 2. 编译时注册 Schema
+### 2. 打开数据库
 
-```c
-// 一行宏自动注册（编译时展开）
-DB_TABLE(user, "users",
-    DB_FIELD(user, id,    DB_TYPE_UINT64),
-    DB_FIELD(user, name,  DB_TYPE_STRING),
-    DB_FIELD(user, age,   DB_TYPE_INT32),
-    DB_FIELD(user, score, DB_TYPE_DOUBLE)
+```lua
+local db = mydb.open("game_data.bin")
+```
+
+### 3. 注册表（纯 Lua 动态定义 Schema）
+
+```lua
+local users = db:register("users", {
+    {name = "id",    type = "uint64"},
+    {name = "name",  type = "string", size = 32},
+    {name = "age",   type = "int32"},
+    {name = "score", type = "double"},
+})
+```
+
+**无需 C struct**：封装层自动计算偏移和对齐
+
+### 4. 完整生命周期示例
+
+```lua
+local mydb = require("mydb")
+
+-- ═══════════════════════════════════════════════════════
+-- 1. 打开数据库
+-- ═══════════════════════════════════════════════════════
+local db = mydb.open("game_data.bin")
+
+-- ═══════════════════════════════════════════════════════
+-- 2. 注册 Schema（纯 Lua 动态定义，无需 C struct）
+-- ═══════════════════════════════════════════════════════
+local users = db:register("users", {
+    {name = "id",     type = "uint64"},        -- 第一字段必须是 uint64 id
+    {name = "name",   type = "string", size = 32},
+    {name = "age",    type = "int32"},
+    {name = "score",  type = "double"},
+})
+
+local orders = db:register("orders", {
+    {name = "id",      type = "uint64"},
+    {name = "user_id", type = "uint64"},       -- 外键，关联 users.id
+    {name = "amount",  type = "double"},
+})
+
+-- ═══════════════════════════════════════════════════════
+-- 3. 创建索引
+-- ═══════════════════════════════════════════════════════
+users:create_index("name")   -- 单列索引（name 字段）
+orders:create_index("user_id")
+
+-- ═══════════════════════════════════════════════════════
+-- 4. 插入数据（Lua 表自动序列化为 C 内存）
+-- ═══════════════════════════════════════════════════════
+local alice_id = users:insert({name = "Alice", age = 25, score = 95.5})
+local bob_id   = users:insert({name = "Bob",   age = 30, score = 88.0})
+local carol_id = users:insert({name = "Carol", age = 28, score = 92.0})
+
+print("插入用户: Alice(id=" .. alice_id .. "), Bob(id=" .. bob_id .. ")")
+
+-- 插入订单（user_id 关联到用户）
+orders:insert({user_id = alice_id, amount = 100.0})
+orders:insert({user_id = alice_id, amount = 250.0})
+orders:insert({user_id = bob_id,   amount = 50.0})
+
+-- ═══════════════════════════════════════════════════════
+-- 5. 查询（JSON 结果自动反序列化为 Lua 表）
+-- ═══════════════════════════════════════════════════════
+
+-- 5.1 主键查询
+local alice = users:find(alice_id)
+print("主键查询: " .. alice.name .. ", age=" .. alice.age)
+
+-- 5.2 全表查询
+local all_users = users:select()
+print("全表共 " .. #all_users .. " 人")
+for _, u in ipairs(all_users) do
+    print("  " .. u.name .. ", age=" .. u.age)
+end
+
+-- 5.3 WHERE 条件查询
+local adults = users:where({
+    {field = "age", op = 1, value = 25}   -- age > 25
+})
+print("成年人（age>25）:")
+for _, u in ipairs(adults) do
+    print("  " .. u.name)
+end
+
+-- 5.4 JOIN 关联查询（用户 JOIN 订单）
+local ffi = require("ffi")
+local user_orders = db:join_json(
+    users,  ffi.offsetof("struct _", "id"),
+    orders, ffi.offsetof("struct _", "user_id"),
+    8   -- uint64 大小
 )
-```
+-- 结果自动解析为 Lua 表数组
+print("Alice 的订单:")
+for _, row in ipairs(user_orders) do
+    if row["users.name"] == "Alice" then
+        print("  金额: " .. row["orders.amount"])
+    end
+end
 
-**编译时完成**：
-- `DB_FIELD(user, name, DB_TYPE_STRING)` → `{"name", 8, 32, DB_TYPE_STRING}`（offset 和 size 由编译器自动计算）
-- 生成 `db_register_user()` 静态函数
-- 零运行时开销
+-- ═══════════════════════════════════════════════════════
+-- 6. 更新数据
+-- ═══════════════════════════════════════════════════════
+users:update(alice_id, {name = "Alice Updated", age = 26, score = 96.0})
+print("更新 Alice 成功")
 
-### 3. 使用数据库
+-- ═══════════════════════════════════════════════════════
+-- 7. 删除数据（软删除）
+-- ═══════════════════════════════════════════════════════
+users:delete(carol_id)
+print("删除 Carol 后，剩余 " .. users:count() .. " 人")
 
-```c
-int main() {
-    // 打开数据库（数据文件 + 索引文件 + WAL）
-    db_t db = db_open("data.bin", "data.index", "wal.bin", 1024*1024*100);
-    
-    // 注册表（调用编译时生成的函数）
-    db_register_user(db);
-    
-    // 获取表句柄
-    table_t users = db_table(db, "users");
-    
-    // 插入数据（传入 C struct）
-    struct user u = {0, "Alice", 25, 95.5};
-    rowid_t id = db_insert(users, &u, sizeof(u));
-    
-    // 查询返回 JSON
-    const char* json = db_select_by_pk_json(users, id);
-    printf("%s\n", json);  // {"id":1,"name":"Alice","age":25,"score":95.5}
-    db_json_free(json);
-    
-    db_close(db);
-    return 0;
-}
+-- ═══════════════════════════════════════════════════════
+-- 8. 持久化（确保数据落盘）
+-- ═══════════════════════════════════════════════════════
+
+-- 8.1 强制刷盘（同步等待写入完成）
+db:sync()
+print("数据已强制刷盘")
+
+-- 8.2 Checkpoint（刷盘 + 清空 WAL）
+db:checkpoint()
+print("Checkpoint 完成，WAL 已清空")
+
+-- ═══════════════════════════════════════════════════════
+-- 9. 内存回收（Compact）
+-- ═══════════════════════════════════════════════════════
+local deleted_count = users:compact()
+print("回收已删除空间: " .. deleted_count .. " 行")
+
+-- ═══════════════════════════════════════════════════════
+-- 10. 关闭数据库
+-- ═══════════════════════════════════════════════════════
+db:close()
+print("数据库已安全关闭")
 ```
 
 ## 构建
@@ -194,192 +283,113 @@ make              # 编译 libmydb.so
 make test         # 运行基础测试
 make test_join    # 运行 JOIN 测试
 make test_perf    # 运行性能测试（100万行）
+make test_wal     # 运行 WAL + Checkpoint 测试
+make example      # 编译 C 示例
+make install      # 安装到 /usr/local
 ```
 
-## 完整示例
-
-### JOIN 关联查询
-
-```c
-struct user {
-    uint64_t id;
-    char     name[32];
-};
-
-struct order {
-    uint64_t id;
-    uint64_t user_id;   // 外键，关联 users.id
-    double   amount;
-};
-
-DB_TABLE(user, "users",
-    DB_FIELD(user, id,   DB_TYPE_UINT64),
-    DB_FIELD(user, name, DB_TYPE_STRING)
-)
-
-DB_TABLE(order, "orders",
-    DB_FIELD(order, id,      DB_TYPE_UINT64),
-    DB_FIELD(order, user_id, DB_TYPE_UINT64),
-    DB_FIELD(order, amount,  DB_TYPE_DOUBLE)
-)
-
-// JOIN 查询
-const char* result = db_join_json(
-    users, offsetof(struct user, id),      // 左表关联字段
-    orders, offsetof(struct order, user_id), // 右表关联字段
-    sizeof(uint64_t)                        // 字段大小
-);
-// 结果：[{"users.id":1,"users.name":"Alice","orders.id":1,"orders.user_id":1,"orders.amount":100.0}]
-```
-
-### WHERE + ORDER BY + LIMIT
-
-```c
-// WHERE age > 18
-int32_t age = 18;
-db_condition_t cond = {offsetof(struct user, age), sizeof(int32_t), &age, 1};
-const char* result = db_select_where_json(users, &cond, 1);
-
-// WHERE + ORDER BY + LIMIT
-const char* result2 = db_select_json(
-    users,
-    &cond, 1,                    // WHERE 条件
-    offsetof(struct user, age),  // ORDER BY 字段
-    1,                           // 升序
-    0, 10                        // LIMIT 0, 10
-);
-```
-
-### 流式查询（大数据量）
-
-```c
-// 逐行回调，不生成完整 JSON，内存占用恒定
-int callback(const char* json, void* user_data) {
-    printf("%s\n", json);
-    return 0;  // 返回 0 继续，非 0 停止
-}
-
-db_select_all_stream(users, callback, NULL);
-```
-
-## API 概览
+## LuaJIT API 参考
 
 ### 数据库生命周期
-- `db_open(data_path, index_path, wal_path, pool_size)` → db_t
-- `db_close(db)`
-- `db_sync(db)` — 强制刷盘（同步等待写入完成，数据真正落盘）
-- `db_config_max_rows(db, max_rows)` — 配置最大返回行数（默认 10000）
-
-### Schema 注册（编译时）
-- `DB_TABLE(struct_name, table_name, DB_FIELD(struct, field, type), ...)` — 定义表
-- `db_register_struct_name(db)` — 注册表（编译时生成的函数）
-- `db_table(db, "table_name")` → table_t — 按名称获取表句柄
-
-### CRUD
-- `db_insert(table, row, size)` → rowid — 插入行，返回自增主键
-- `db_update(table, id, row, size)` — 按主键更新
-- `db_delete(table, id)` — 按主键删除（软删除）
-
-### 查询（JSON 模式）
-- `db_select_by_pk_json(table, id)` → `{"id":1,"name":"Alice",...}`
-- `db_select_all_json(table)` → `[{...},{...}]`
-- `db_select_where_json(table, conditions, count)` → `[{...}]`
-- `db_select_json(table, conds, count, order_offset, asc, limit_offset, limit_count)` → `[{...}]`
-- `db_join_json(left, left_offset, right, right_offset, field_size)` → `[{"left.field":...,"right.field":...}]`
-- `db_json_free(json)` — 释放 JSON 字符串
-
-### 流式查询
-- `db_select_all_stream(table, callback, userdata)` — 全表流式
-- `db_select_where_stream(table, conds, count, callback, userdata)` — 条件流式
-
-### 内存回收
-- `db_table_compact(table)` — 单表重建，回收已删除空间
-- `db_compact(db)` — 全盘重建，回收所有已删除空间
-
-## 动态脚本调用（LuaJIT / Python）
-
-my_db 提供高级封装层，让 LuaJIT 和 Python 无需预定义 C struct，纯动态注册 Schema：
-
-### LuaJIT 动态 Schema
 
 ```lua
-local mydb = require("mydb")
+local db = mydb.open("data.bin")              -- 打开（自动生成 .index 和 .wal）
+db:sync()                                      -- 强制刷盘（同步等待落盘）
+db:checkpoint()                                -- 刷盘 + 清空 WAL
+db:close()                                     -- 关闭数据库
+db:max_rows(50000)                             -- 设置最大返回行数（默认 10000）
+```
 
--- 打开数据库
-local db = mydb.open("app_data.bin")
+### Schema 注册（动态）
 
--- 动态注册表（无需 C struct，纯 Lua 表定义）
+```lua
 local users = db:register("users", {
-    {name = "id",    type = "uint64"},     -- 第一字段必须是 uint64 id
+    {name = "id",    type = "uint64"},        -- 第一字段必须是 uint64 id
     {name = "name",  type = "string", size = 32},
     {name = "age",   type = "int32"},
     {name = "score", type = "double"},
 })
 
--- 创建索引
-users:create_index("name")
+-- 支持的类型：int32, int64, uint64, float, double, string, bool
+-- string 需指定 size（最大长度）
+```
 
--- 插入（Lua 表自动序列化）
-local id1 = users:insert({name = "Alice", age = 25, score = 95.5})
-local id2 = users:insert({name = "Bob",   age = 30, score = 88.0})
+### 索引
 
--- 查询
-local row = users:find(id1)              -- 主键查询
-local all = users:select()               -- 全表查询
+```lua
+users:create_index("name")           -- 单列索引
+users:create_index("age")            -- 数值索引（自动用 B+树）
+
+-- 复合索引（name + age）
+orders:create_index_composite({
+    {name = "user_id", type = "uint64"},
+    {name = "amount",  type = "double"},
+})
+```
+
+### CRUD
+
+```lua
+-- 插入（id 自动填充，返回自增主键）
+local id = users:insert({name = "Alice", age = 25, score = 95.5})
+
+-- 主键查询（返回 Lua 表）
+local row = users:find(id)
+-- row = {id = 1, name = "Alice", age = 25, score = 95.5}
+
+-- 全表查询（返回 Lua 表数组）
+local all = users:select()
+-- all = {{id = 1, ...}, {id = 2, ...}}
+
+-- WHERE 条件查询
 local adults = users:where({
-    {field = "age", op = 1, value = 25}  -- age > 25
+    {field = "age", op = 1, value = 25}   -- op: 0=等于, 1=大于, 2=小于
 })
 
--- 更新/删除
-users:update(id1, {name = "Alice Updated", age = 26, score = 96.0})
-users:delete(id2)
+-- 更新
+users:update(id, {name = "Alice Updated", age = 26, score = 96.0})
 
--- Checkpoint 和关闭
-db:checkpoint()
-db:close()
+-- 删除（软删除）
+users:delete(id)
+
+-- 获取行数
+local count = users:count()
 ```
 
-### Python 动态 Schema
+### JOIN 查询
 
-```python
-from mydb import create
+```lua
+local ffi = require("ffi")
 
-# 创建数据库并注册表（支持 with 语句自动关闭）
-with create("app_data.bin", schemas={
-    "users": [
-        {"name": "id",    "type": "uint64"},
-        {"name": "name",  "type": "string", "size": 32},
-        {"name": "age",   "type": "int32"},
-        {"name": "score", "type": "double"},
-    ]
-}) as db:
-    users = db.table("users")
-    
-    # 创建索引
-    users.create_index("name")
-    
-    # 插入（Python dict 自动序列化）
-    id1 = users.insert({"name": "Alice", "age": 25, "score": 95.5})
-    id2 = users.insert({"name": "Bob",   "age": 30, "score": 88.0})
-    
-    # 查询
-    row = users.find(id1)              # 主键查询，返回 dict
-    all_rows = users.select()          # 全表查询，返回 [dict]
-    adults = users.where(age__gt=25)   # WHERE age > 25
-    
-    # 更新/删除
-    users.update(id1, {"name": "Alice Updated", "age": 26, "score": 96.0})
-    users.delete(id2)
-    
-    # Checkpoint
-    db.checkpoint()
+-- users.id = orders.user_id
+local results = db:join_json(
+    users,  0,      -- users.id 的偏移（id 在 offset 0）
+    orders, 8,      -- orders.user_id 的偏移
+    8               -- uint64 大小
+)
+-- 结果自动解析为 Lua 表数组：
+-- {{"users.id" = 1, "users.name" = "Alice", "orders.amount" = 100.0}, ...}
 ```
 
-**核心优势**：
-- **零 C 代码**：脚本层完全控制 Schema，无需编译 C struct
-- **自动序列化**：Lua 表/Python dict ↔ C 内存自动转换
-- **自动偏移计算**：封装层自动处理字段对齐和偏移
-- **JSON 反序列化**：查询结果自动解析为原生数据类型
+### 流式查询（大数据量）
+
+```lua
+-- 逐行回调，不生成完整 JSON，内存占用恒定
+users:stream(function(row)
+    print(row.name)
+    return 0   -- 返回 0 继续，非 0 停止
+end)
+```
+
+### 内存回收
+
+```lua
+-- 单表重建，回收已删除空间
+local deleted = users:compact()
+
+-- 全盘重建，回收所有已删除空间
+local total = db:compact()
+```
 
 ## 性能
 
@@ -395,12 +405,12 @@ with create("app_data.bin", schemas={
 | 决策项 | 选择 | 理由 |
 |--------|------|------|
 | **定位** | 零拷贝嵌入式存储引擎 | 内存数据库，直接操作 struct，无网络、无序列化 |
-| Schema 定义 | **编译时宏自动生成** | `DB_TABLE` / `DB_FIELD` 宏自动计算 offset/size，无需运行时注册 |
+| Schema 定义 | **动态 Lua 注册** | 无需编译 C struct，脚本层完全控制 |
 | 持久化机制 | mmap + 异步 msync | 零拷贝，内存布局 = 磁盘布局 |
 | 数据安全 | WAL 同步写入 | 每次写先 fsync WAL，再改内存 |
 | 主键 | 自增 uint64_t | 简单高效，FFI 兼容 |
-| 读取方式 | SELECT 返回 JSON 字符串 | 无需 FFI 侧定义 struct，直接解析 JSON |
-| 写入方式 | 传入 C struct 直接写入 | `db_insert()` / `db_update()` 零拷贝写入 |
+| 读取方式 | SELECT 返回 JSON 字符串 | 无需 FFI 侧定义 struct，自动解析为 Lua 表 |
+| 写入方式 | Lua 表自动序列化 | `insert({...})` 自动转换为 C 内存 |
 | 删除 | 软删除（标记位） | 避免内存碎片，定期 compact |
 | 索引 | 主键哈希 + 单列/复合 B+树 + 哈希 | 复合索引第一版即支持，简单高效 |
 | 内存分配 | Bump Allocator | 顺序分配，先不实现复杂回收 |
@@ -415,15 +425,9 @@ with create("app_data.bin", schemas={
 - **多线程读**：如果数据不修改，多个线程可同时读
 - **多线程写**：用户需在外层自行加锁
 
-```c
-// 用户自行加锁示例
-pthread_mutex_t db_mutex;
-
-void thread_safe_insert(table_t t, void* row) {
-    pthread_mutex_lock(&db_mutex);
-    db_insert(t, row, sizeof(row));
-    pthread_mutex_unlock(&db_mutex);
-}
+```lua
+-- LuaJIT 中无多线程，天然单线程安全
+-- 如需多线程，在写入前自行加锁
 ```
 
 ## 内存管理
@@ -434,12 +438,12 @@ Bump Allocator + 软删除 = 内存只增不减
 
 ### 解决方案：Compact
 
-```c
-// 单表重建，回收已删除空间
-size_t deleted = db_table_compact(table);
+```lua
+-- 单表重建，回收已删除空间
+local deleted = users:compact()
 
-// 全盘重建，回收所有已删除空间
-size_t total = db_compact(db);
+-- 全盘重建，回收所有已删除空间
+local total = db:compact()
 ```
 
 **使用建议**：
@@ -450,12 +454,12 @@ size_t total = db_compact(db);
 
 | 模式 | API | 适用场景 | 内存占用 |
 |------|-----|---------|---------|
-| **完整 JSON** | `db_select_*_json()` | 结果 < 1000 行 | 与结果集成正比 |
-| **流式查询** | `db_select_*_stream()` | 结果任意大小 | 恒定（单行 JSON） |
+| **完整 JSON** | `users:select()` / `users:where(...)` | 结果 < 1000 行 | 与结果集成正比 |
+| **流式查询** | `users:stream(callback)` | 结果任意大小 | 恒定（单行 JSON） |
 
 **保护措施**：
 - 默认 `max_rows = 10000`，超过返回错误
-- 可配置：`db_config_max_rows(db, 50000)`
+- 可配置：`db:max_rows(50000)`
 
 ## 市场空白
 
@@ -473,30 +477,37 @@ size_t total = db_compact(db);
 
 ```
 my_db/
-├── design.md           # 设计方案
-├── README.md           # 本文件
-├── task.md             # 开发任务列表
+├── design.md              # 设计方案
+├── README.md              # 本文件
+├── task.md                # 开发任务列表
 ├── LICENSE
 ├── Makefile
+├── mydb.lua               # LuaJIT FFI 高级封装（推荐）
+├── mydb.py                # Python ctypes 高级封装
 ├── include/
-│   ├── mydb.h          # 公共头文件（FFI 依赖）
-│   └── mydb_internal.h # 内部头文件
+│   ├── mydb.h             # 公共头文件（FFI 依赖）
+│   └── mydb_internal.h    # 内部头文件
 ├── src/
 │   ├── core/
-│   │   ├── db.c        # 数据库生命周期
-│   │   ├── table.c     # 表操作
-│   │   └── query.c     # 查询引擎
+│   │   ├── db.c           # 数据库生命周期
+│   │   ├── table.c        # 表操作
+│   │   └── query.c        # 查询引擎
 │   ├── storage/
-│   │   ├── wal.c       # WAL 日志
-│   │   └── mmap.c      # mmap 封装
+│   │   ├── wal.c          # WAL 日志
+│   │   └── mmap.c         # mmap 封装
 │   └── utils/
-│       ├── crc32.c     # 校验和
-│       ├── error.c     # 错误处理
-│       └── json.c      # JSON 序列化
+│       ├── crc32.c        # 校验和
+│       ├── error.c        # 错误处理
+│       └── json.c         # JSON 序列化
+├── examples/
+│   ├── example_dynamic.lua  # LuaJIT 动态示例（推荐）
+│   └── example_dynamic.py   # Python 动态示例
 └── tests/
-    ├── test_basic.c    # 基础功能测试
-    ├── test_join.c     # JOIN 测试
-    └── test_perf.c     # 性能测试
+    ├── test_basic.c       # 基础功能测试
+    ├── test_join.c        # JOIN 测试
+    ├── test_perf.c        # 性能测试
+    ├── test_composite.c   # 复合索引测试
+    └── test_wal.c         # WAL + Checkpoint 测试
 ```
 
 ## 许可证
