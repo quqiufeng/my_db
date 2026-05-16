@@ -160,12 +160,12 @@ cache_t* cache_open(const char* db_dir, size_t max_memory) {
     }
     
     // 初始化索引
-    if (cache_hash_init(cache) < 0) {
+    if (cache_hash_init(cache) < 0 || cache_sorted_init(cache) < 0 || cache_ns_init(cache) < 0) {
         pool_close(&cache->pool);
         free(cache);
         return NULL;
     }
-    
+
     if (!is_new) {
         // 已有文件：重建 hash 索引
         // 扫描所有 entry（通过 key_len 识别有效的 entry）
@@ -188,6 +188,8 @@ cache_t* cache_open(const char* db_dir, size_t max_memory) {
             if (!(header->flags & CACHE_ENTRY_DELETED)) {
                 char* key = (char*)CACHE_PTR(cache, offset + sizeof(cache_entry_header_t));
                 cache_hash_insert(cache, offset, key, header->key_len);
+                cache_sorted_insert(cache, offset);
+                cache_ns_add(cache, key, offset);
                 valid_count++;
             }
             
@@ -209,10 +211,11 @@ void cache_close(cache_t* cache) {
     pool_sync(&cache->pool);
     pool_close(&cache->pool);
     
-    // 释放索引内存（后续实现）
-    // cache_hash_destroy(cache);
-    // cache_sorted_destroy(cache);
-    // cache_ns_destroy(cache);
+    // 释放排序数组内存
+    cache_sorted_destroy(cache);
+    
+    // 释放 namespace 索引
+    cache_ns_destroy(cache);
     
     free(cache);
 }
@@ -265,8 +268,8 @@ int cache_set(cache_t* cache, const char* key, const char* value, uint64_t ttl_m
     
     // 更新索引
     cache_hash_insert(cache, offset, key, key_len);
-    // cache_sorted_insert(cache, offset);
-    // cache_ns_add(cache, key, offset);
+    cache_sorted_insert(cache, offset);
+    cache_ns_add(cache, key, offset);
     
     return CACHE_OK;
 }
@@ -301,8 +304,8 @@ int cache_del(cache_t* cache, const char* key) {
     
     // 更新索引
     cache_hash_remove(cache, key, strlen(key));
-    // cache_sorted_remove(cache, key, strlen(key));
-    // cache_ns_remove(cache, key);
+    cache_sorted_remove(cache, key, strlen(key));
+    cache_ns_remove(cache, key);
     
     free(entry);
     return CACHE_OK;
@@ -383,4 +386,88 @@ int cache_check(const char* db_dir) {
     
     close(fd);
     return CACHE_OK;
+}
+
+// ====== Namespace 便捷操作 ======
+
+int cache_set_ns(cache_t* cache, const char* ns, const char* key, 
+                 const char* value, uint64_t ttl_ms) {
+    if (!cache || !ns || !key || !value) return CACHE_ERR_INVAL;
+    
+    // 构建完整 key: ns + "/" + key
+    size_t ns_len = strlen(ns);
+    size_t key_len = strlen(key);
+    
+    // 移除 ns 末尾的 '/'（如果有）
+    while (ns_len > 0 && ns[ns_len - 1] == '/') ns_len--;
+    
+    // 分配完整 key 的内存
+    char* full_key = malloc(ns_len + 1 + key_len + 1);
+    if (!full_key) return CACHE_ERR_NOMEM;
+    
+    if (ns_len > 0) {
+        memcpy(full_key, ns, ns_len);
+        full_key[ns_len] = '/';
+        memcpy(full_key + ns_len + 1, key, key_len);
+        full_key[ns_len + 1 + key_len] = '\0';
+    } else {
+        memcpy(full_key, key, key_len);
+        full_key[key_len] = '\0';
+    }
+    
+    int ret = cache_set(cache, full_key, value, ttl_ms);
+    free(full_key);
+    return ret;
+}
+
+const char* cache_get_ns(cache_t* cache, const char* ns, const char* key) {
+    if (!cache || !ns || !key) return NULL;
+    
+    size_t ns_len = strlen(ns);
+    size_t key_len = strlen(key);
+    
+    while (ns_len > 0 && ns[ns_len - 1] == '/') ns_len--;
+    
+    char* full_key = malloc(ns_len + 1 + key_len + 1);
+    if (!full_key) return NULL;
+    
+    if (ns_len > 0) {
+        memcpy(full_key, ns, ns_len);
+        full_key[ns_len] = '/';
+        memcpy(full_key + ns_len + 1, key, key_len);
+        full_key[ns_len + 1 + key_len] = '\0';
+    } else {
+        memcpy(full_key, key, key_len);
+        full_key[key_len] = '\0';
+    }
+    
+    const char* value = cache_get(cache, full_key);
+    free(full_key);
+    return value;
+}
+
+int cache_del_ns(cache_t* cache, const char* ns, const char* key) {
+    if (!cache || !ns || !key) return CACHE_ERR_INVAL;
+    
+    size_t ns_len = strlen(ns);
+    size_t key_len = strlen(key);
+    
+    while (ns_len > 0 && ns[ns_len - 1] == '/') ns_len--;
+    
+    char* full_key = malloc(ns_len + 1 + key_len + 1);
+    if (!full_key) return CACHE_ERR_NOMEM;
+    
+    if (ns_len > 0) {
+        memcpy(full_key, ns, ns_len);
+        full_key[ns_len] = '/';
+        memcpy(full_key + ns_len + 1, key, key_len);
+        full_key[ns_len + 1 + key_len] = '\0';
+    } else {
+        memcpy(full_key, key, key_len);
+        full_key[key_len] = '\0';
+    }
+    
+    int ret = cache_del(cache, full_key);
+    free(full_key);
+    return ret;
 }

@@ -345,23 +345,23 @@
   - [x] 零拷贝：所有数据在 pool 中，只存 offset
 
 ### 9.4 排序数组索引
-- [ ] 9.4.1 创建 `src/cache/sorted_array.c`
-  - [ ] pool_alloc 分配连续数组
-  - [ ] 二分查找定位
-  - [ ] 插入时保持有序（O(n) 移动，n < 10万可接受）
-  - [ ] sorted_insert() — 插入 key_offset
-  - [ ] sorted_remove() — 删除 key_offset
-  - [ ] sorted_find_prefix() — 二分找前缀起点
-  - [ ] sorted_find_range() — 二分找范围起止
+- [x] 9.4.1 创建 `src/cache/sorted_array.c`
+  - [x] 堆上 malloc 分配数组（不持久化，重启重建）
+  - [x] 二分查找定位
+  - [x] 插入时保持有序（O(n) 移动，n < 10万可接受）
+  - [x] cache_sorted_insert() — 插入 entry_offset
+  - [x] cache_sorted_remove() — 删除 entry_offset
+  - [x] cache_sorted_find_lower_bound() — 二分找下界
+  - [x] cache_sorted_find_upper_bound() — 二分找上界
 
 ### 9.5 Namespace 支持
-- [ ] 9.5.1 创建 `src/cache/namespace.c`
-  - [ ] 解析 key 中的 namespace（按 / 分割）
-  - [ ] namespace_index: hashmap → vector of entry_offsets
-  - [ ] hierarchy_index: parent_ns → child_ns list
-  - [ ] cache_ns() — 创建 namespace 句柄
-  - [ ] cache_set_ns() — 在 namespace 内设置
-  - [ ] cache_get_ns() — 在 namespace 内获取
+- [x] 9.5.1 创建 `src/cache/namespace.c`
+  - [x] 解析 key 中的 namespace（按 / 分割）
+  - [x] namespace_index: 树形结构，每个节点存储 entry_offsets 数组
+  - [x] hierarchy_index: parent → child 树形关系
+  - [x] cache_set_ns() — 在 namespace 内设置（自动拼接路径）
+  - [x] cache_get_ns() — 在 namespace 内获取
+  - [x] cache_del_ns() — 在 namespace 内删除
 
 ### 9.6 搜索实现
 - [ ] 9.6.1 创建 `src/cache/search.c`

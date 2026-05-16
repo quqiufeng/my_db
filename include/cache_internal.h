@@ -107,12 +107,15 @@ int cache_sorted_insert(cache_t* cache, size_t entry_offset);
 int cache_sorted_remove(cache_t* cache, const char* key, size_t key_len);
 size_t cache_sorted_find_lower_bound(cache_t* cache, const char* key, size_t key_len);
 size_t cache_sorted_find_upper_bound(cache_t* cache, const char* key, size_t key_len);
+size_t cache_sorted_get(cache_t* cache, size_t index);
+void cache_sorted_destroy(cache_t* cache);
 
 // Namespace 操作
 int cache_ns_init(cache_t* cache);
 int cache_ns_add(cache_t* cache, const char* key, size_t entry_offset);
 int cache_ns_remove(cache_t* cache, const char* key);
 cache_ns_node_t* cache_ns_find(cache_t* cache, const char* ns_path);
+void cache_ns_destroy(cache_t* cache);
 
 // 工具函数
 uint64_t cache_now_ms(void);
