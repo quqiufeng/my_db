@@ -335,14 +335,14 @@
   - [x] cache_sync() — msync 刷盘
 
 ### 9.3 Hash 索引（借鉴 code_bin）
-- [ ] 9.3.1 创建 `src/cache/hash_index.c`
-  - [ ] FNV-1a hash 算法
-  - [ ] 链地址法冲突处理
-  - [ ] 自动扩容（负载因子 > 0.75）
-  - [ ] hash_insert() — 插入 key → entry_offset
-  - [ ] hash_lookup() — 查找 key
-  - [ ] hash_delete() — 删除 key
-  - [ ] 零拷贝：所有数据在 pool 中，只存 offset
+- [x] 9.3.1 创建 `src/cache/hash_index.c`
+  - [x] FNV-1a hash 算法
+  - [x] 链地址法冲突处理
+  - [x] 自动扩容（负载因子 > 0.75 时 bucket 翻倍）
+  - [x] hash_insert() — 插入 key → entry_offset
+  - [x] hash_lookup() — 查找 key
+  - [x] hash_delete() — 删除 key
+  - [x] 零拷贝：所有数据在 pool 中，只存 offset
 
 ### 9.4 排序数组索引
 - [ ] 9.4.1 创建 `src/cache/sorted_array.c`

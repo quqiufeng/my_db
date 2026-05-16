@@ -35,12 +35,11 @@ size_t cache_entry_total_size(cache_entry_header_t* header) {
     return (size + MYDB_ALIGN - 1) & ~(MYDB_ALIGN - 1);
 }
 
-// 初始化 cache 文件头
+// 初始化 cache 文件头（在 pool 头基础上写入扩展信息）
 static void cache_header_init(cache_t* cache) {
     void* base = cache->pool.base;
-    memcpy(base, CACHE_MAGIC, 4);
-    *(uint32_t*)((char*)base + 4) = CACHE_VERSION;
-    *(uint64_t*)((char*)base + 8) = CACHE_HEADER_SIZE;  // used
+    // pool_init 已经写了前 16 bytes: [magic:4][version:4][used:8]
+    // 现在写入 cache 扩展信息（offset 16 开始）
     *(uint64_t*)((char*)base + 16) = 0;  // entry_count
     *(uint64_t*)((char*)base + 24) = 0;  // hash_offset
     *(uint64_t*)((char*)base + 32) = 0;  // sorted_offset
@@ -78,34 +77,26 @@ static void cache_entry_parse(cache_t* cache, size_t offset, cache_entry_t* entr
     entry->flags = header->flags;
 }
 
-// 线性扫描查找 key（临时方案，后续用 hash）
-static cache_entry_t* cache_find_entry_linear(cache_t* cache, const char* key) {
-    size_t offset = CACHE_HEADER_SIZE;
+// 使用 Hash 索引查找 key
+static cache_entry_t* cache_find_entry(cache_t* cache, const char* key) {
+    size_t key_len = strlen(key);
     uint64_t now = cache_now_ms();
     
-    while (offset < cache->pool.used) {
-        cache_entry_header_t* header = (cache_entry_header_t*)CACHE_PTR(cache, offset);
-        if (header->key_len == 0) break;  // 遇到空 entry，结束
-        
-        if (!(header->flags & CACHE_ENTRY_DELETED)) {
-            char* entry_key = (char*)CACHE_PTR(cache, offset + sizeof(cache_entry_header_t));
-            if (strncmp(entry_key, key, header->key_len) == 0 && strlen(key) == header->key_len) {
-                // 找到匹配的 key
-                cache_entry_t* entry = malloc(sizeof(cache_entry_t));
-                cache_entry_parse(cache, offset, entry);
-                // 检查是否过期
-                if (cache_entry_is_expired(entry, now)) {
-                    free(entry);
-                    return NULL;
-                }
-                return entry;
-            }
-        }
-        
-        offset += cache_entry_total_size(header);
-    }
+    // 使用 Hash 索引查找
+    size_t offset = cache_hash_lookup(cache, key, key_len);
+    if (!offset) return NULL;
     
-    return NULL;
+    cache_entry_header_t* header = (cache_entry_header_t*)CACHE_PTR(cache, offset);
+    
+    // 检查是否已删除
+    if (header->flags & CACHE_ENTRY_DELETED) return NULL;
+    
+    // 检查是否过期
+    if (header->expire_at > 0 && header->expire_at < now) return NULL;
+    
+    cache_entry_t* entry = malloc(sizeof(cache_entry_t));
+    cache_entry_parse(cache, offset, entry);
+    return entry;
 }
 
 #include <sys/stat.h>
@@ -147,9 +138,11 @@ cache_t* cache_open(const char* db_dir, size_t max_memory) {
     bool is_new = (pool_used == 16);
     
     if (is_new) {
-        // 初始化文件头
+        // 初始化文件头（在 pool 头基础上扩展）
         cache_header_init(cache);
         cache->pool.used = CACHE_HEADER_SIZE;
+        // 更新 pool 文件头中的 used
+        *(uint64_t*)((char*)cache->pool.base + 8) = CACHE_HEADER_SIZE;
     } else {
         // 验证文件头
         if (cache_header_validate(cache) < 0) {
@@ -162,12 +155,46 @@ cache_t* cache_open(const char* db_dir, size_t max_memory) {
         void* base = cache->pool.base;
         cache->entry_count = *(uint64_t*)((char*)base + 16);
         cache->hash.buckets_offset = *(uint64_t*)((char*)base + 24);
+        cache->hash.bucket_count = 0;
+        cache->hash.size = 0;
     }
     
-    // 初始化索引（后续实现）
-    // cache_hash_init(cache);
-    // cache_sorted_init(cache);
-    // cache_ns_init(cache);
+    // 初始化索引
+    if (cache_hash_init(cache) < 0) {
+        pool_close(&cache->pool);
+        free(cache);
+        return NULL;
+    }
+    
+    if (!is_new) {
+        // 已有文件：重建 hash 索引
+        // 扫描所有 entry（通过 key_len 识别有效的 entry）
+        size_t offset = CACHE_HEADER_SIZE;
+        size_t valid_count = 0;
+        while (offset + sizeof(cache_entry_header_t) <= cache->pool.used) {
+            cache_entry_header_t* header = (cache_entry_header_t*)CACHE_PTR(cache, offset);
+            
+            // 检查是否是有效的 entry header
+            if (header->key_len == 0 || header->key_len > CACHE_MAX_KEY_LEN ||
+                header->value_len > CACHE_MAX_VALUE_LEN) {
+                // 不是 entry，跳过对齐大小
+                offset += MYDB_ALIGN;
+                continue;
+            }
+            
+            size_t total_size = cache_entry_total_size(header);
+            if (offset + total_size > cache->pool.used) break;
+            
+            if (!(header->flags & CACHE_ENTRY_DELETED)) {
+                char* key = (char*)CACHE_PTR(cache, offset + sizeof(cache_entry_header_t));
+                cache_hash_insert(cache, offset, key, header->key_len);
+                valid_count++;
+            }
+            
+            offset += total_size;
+        }
+        cache->entry_count = valid_count;
+    }
     
     return cache;
 }
@@ -236,8 +263,8 @@ int cache_set(cache_t* cache, const char* key, const char* value, uint64_t ttl_m
     cache->entry_count++;
     cache->memory_used += aligned_size;
     
-    // 更新索引（后续实现）
-    // cache_hash_insert(cache, offset, key, key_len);
+    // 更新索引
+    cache_hash_insert(cache, offset, key, key_len);
     // cache_sorted_insert(cache, offset);
     // cache_ns_add(cache, key, offset);
     
@@ -247,8 +274,7 @@ int cache_set(cache_t* cache, const char* key, const char* value, uint64_t ttl_m
 const char* cache_get(cache_t* cache, const char* key) {
     if (!cache || !key) return NULL;
     
-    // 线性查找（临时方案）
-    cache_entry_t* entry = cache_find_entry_linear(cache, key);
+    cache_entry_t* entry = cache_find_entry(cache, key);
     if (!entry) return NULL;
     
     // 更新 access_time
@@ -263,8 +289,7 @@ const char* cache_get(cache_t* cache, const char* key) {
 int cache_del(cache_t* cache, const char* key) {
     if (!cache || !key) return CACHE_ERR_INVAL;
     
-    // 线性查找（临时方案）
-    cache_entry_t* entry = cache_find_entry_linear(cache, key);
+    cache_entry_t* entry = cache_find_entry(cache, key);
     if (!entry) return CACHE_ERR_NOENT;
     
     // 标记删除
@@ -274,8 +299,8 @@ int cache_del(cache_t* cache, const char* key) {
     cache->entry_count--;
     cache->deleted_count++;
     
-    // 更新索引（后续实现）
-    // cache_hash_remove(cache, key, strlen(key));
+    // 更新索引
+    cache_hash_remove(cache, key, strlen(key));
     // cache_sorted_remove(cache, key, strlen(key));
     // cache_ns_remove(cache, key);
     
