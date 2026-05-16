@@ -49,7 +49,7 @@ int main() {
     
     // 插入订单
     struct order o1 = {0, uid1, 100.0};
-    rowid_t oid1 = db_insert(orders, &o1, sizeof(o1));
+    db_insert(orders, &o1, sizeof(o1));
     printf("[OK] 订单1 user_id=%lu\n", (unsigned long)uid1);
     
     // 验证数据

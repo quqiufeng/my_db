@@ -156,8 +156,9 @@ char* json_rows(db_table_t* table, rowid_t* rowids, size_t count) {
     return buf;
 }
 
-char* json_join_rows(db_table_t* left, db_table_t* right,
-                     void** left_rows, void** right_rows, size_t count) {
+char* json_join_rows(db_table_t* left __attribute__((unused)), db_table_t* right __attribute__((unused)),
+                     void** left_rows __attribute__((unused)), void** right_rows __attribute__((unused)),
+                     size_t count __attribute__((unused))) {
     // 简化实现
     return strdup("[]");
 }

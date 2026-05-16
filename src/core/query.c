@@ -4,6 +4,7 @@
 
 bool row_match(db_table_t* table, void* row_ptr,
                const db_condition_t* conditions, size_t count) {
+    (void)table;
     if (!conditions || count == 0) return true;
     
     for (size_t i = 0; i < count; i++) {
@@ -83,7 +84,7 @@ static int sort_compare(const void* a, const void* b) {
 
 static rowid_t* query_internal(db_table_t* table,
                                 const db_condition_t* conditions, size_t condition_count,
-                                size_t order_field_offset, int ascending,
+                                size_t order_field_offset, int ascending __attribute__((unused)),
                                 size_t limit_offset, size_t limit_count,
                                 size_t* out_count) {
     if (!table) {

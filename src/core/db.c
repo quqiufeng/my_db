@@ -66,6 +66,7 @@ void db_config_max_rows(db_t db, size_t max_rows) {
 }
 
 int db_begin(db_t db) {
+    (void)db;
     // 简化实现：单操作原子性已由 WAL 保证
     return DB_OK;
 }
@@ -76,6 +77,7 @@ int db_commit(db_t db) {
 }
 
 int db_rollback(db_t db) {
+    (void)db;
     // 简化实现：复杂事务需要保存点机制
     return DB_OK;
 }

@@ -94,9 +94,95 @@ int wal_fsync(db_wal_t* wal) {
 int wal_replay(db_wal_t* wal, db_instance_t* db) {
     if (!wal || wal->fd < 0 || !db) return -1;
     
-    // 简单的 WAL 回放实现
-    // 完整实现需要解析 WAL 文件并重放操作
-    // 这里先返回成功（简化版）
+    struct stat st;
+    if (fstat(wal->fd, &st) < 0 || st.st_size == 0) {
+        return 0; // WAL 为空，无需回放
+    }
+    
+    // 读取整个 WAL 文件
+    uint8_t* buf = (uint8_t*)malloc(st.st_size);
+    if (!buf) return -1;
+    
+    lseek(wal->fd, 0, SEEK_SET);
+    ssize_t n = read(wal->fd, buf, st.st_size);
+    if (n != st.st_size) {
+        free(buf);
+        return -1;
+    }
+    
+    // 解析并重放每个 WAL Entry
+    size_t offset = 0;
+    uint64_t max_lsn = 0;
+    
+    while (offset < (size_t)n) {
+        if (offset + 4 > (size_t)n) break;
+        
+        uint32_t entry_len = *(uint32_t*)(buf + offset);
+        offset += 4;
+        
+        if (offset + entry_len > (size_t)n) break;
+        
+        uint32_t entry_crc = *(uint32_t*)(buf + offset);
+        offset += 4;
+        
+        uint32_t calc_crc = crc32(buf + offset, entry_len - 4);
+        if (entry_crc != calc_crc) {
+            fprintf(stderr, "WAL CRC mismatch, skipping entry\n");
+            offset += entry_len - 4;
+            continue;
+        }
+        
+        uint64_t lsn = *(uint64_t*)(buf + offset);
+        offset += 8;
+        
+        uint32_t op = *(uint32_t*)(buf + offset);
+        offset += 4;
+        
+        uint32_t name_len = *(uint32_t*)(buf + offset);
+        offset += 4;
+        
+        char table_name[MYDB_TABLE_NAME_LEN];
+        if (name_len >= MYDB_TABLE_NAME_LEN) name_len = MYDB_TABLE_NAME_LEN - 1;
+        memcpy(table_name, buf + offset, name_len);
+        table_name[name_len] = '\0';
+        offset += name_len;
+        
+        uint64_t rowid = *(uint64_t*)(buf + offset);
+        offset += 8;
+        
+        uint32_t row_size = *(uint32_t*)(buf + offset);
+        offset += 4;
+        
+        void* row_data = buf + offset;
+        offset += row_size;
+        
+        // 重放操作
+        table_t table = db_table(db, table_name);
+        if (table) {
+            switch (op) {
+                case 1: // INSERT
+                    db_insert(table, row_data, row_size);
+                    break;
+                case 2: // UPDATE
+                    db_update(table, rowid, row_data, row_size);
+                    break;
+                case 3: // DELETE
+                    db_delete(table, rowid);
+                    break;
+            }
+        }
+        
+        if (lsn > max_lsn) max_lsn = lsn;
+    }
+    
+    wal->lsn = max_lsn;
+    free(buf);
+    
+    // 清空 WAL 文件
+    if (ftruncate(wal->fd, 0) < 0) {
+        // 忽略错误
+    }
+    lseek(wal->fd, 0, SEEK_SET);
     
     return 0;
 }

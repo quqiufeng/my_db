@@ -97,6 +97,7 @@ int main() {
     printf("[OK] 流式查询:\n");
     int count = 0;
     int callback(const char* json, void* data) {
+        (void)data;
         count++;
         printf("  行 %d: %s\n", count, json);
         return 0;

@@ -98,6 +98,7 @@ typedef struct db_instance {
 
 // ====== 工具函数 ======
 uint32_t crc32(const void* data, size_t len);
+void db_set_error(db_instance_t* db, int code, const char* fmt, ...);
 
 // ====== 池操作 ======
 int pool_init(db_pool_t* pool, const char* path, size_t initial_size);

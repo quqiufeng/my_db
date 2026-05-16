@@ -200,11 +200,13 @@ int db_delete(table_t table, rowid_t id) {
 }
 
 int db_table_add_index(table_t table, const char* field_name, size_t field_offset, int field_type) {
+    (void)table; (void)field_name; (void)field_offset; (void)field_type;
     // 简化实现：暂不实现索引
     return DB_OK;
 }
 
 int db_table_add_index_composite(table_t table, db_field_def_t* fields, size_t field_count) {
+    (void)table; (void)fields; (void)field_count;
     // 简化实现：暂不实现复合索引
     return DB_OK;
 }

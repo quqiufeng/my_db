@@ -47,7 +47,7 @@ int main() {
     
     // 流式查询（统计）
     int count = 0;
-    int cb(const char* json, void* d) {
+    int cb(const char* json __attribute__((unused)), void* d __attribute__((unused))) {
         count++;
         return 0;
     }
