@@ -1,6 +1,8 @@
 #include "mydb_internal.h"
 #include <sys/stat.h>
 #include <libgen.h>
+#include <dirent.h>
+#include <string.h>
 
 // 确保目录存在
 static int ensure_dir(const char* path) {
@@ -135,4 +137,132 @@ size_t db_compact(db_t db) {
     }
     
     return total_deleted;
+}
+
+// 检查单个 pool 文件的头部（magic + version + used）
+static int check_pool_file(const char* path) {
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) return DB_ERR_IO;
+    
+    char header[16];
+    ssize_t n = read(fd, header, 16);
+    close(fd);
+    
+    if (n < 16) return DB_ERR_CORRUPTED;
+    
+    if (memcmp(header, MYDB_MAGIC_DATA, 4) != 0) return DB_ERR_CORRUPTED;
+    
+    uint32_t version = *(uint32_t*)(header + 4);
+    if (version != MYDB_VERSION) return DB_ERR_CORRUPTED;
+    
+    size_t used = *(size_t*)(header + 8);
+    if (used < 16) return DB_ERR_CORRUPTED;
+    
+    return DB_OK;
+}
+
+// 检查 .bin 文件的表元数据一致性
+static int check_table_meta(const char* path) {
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) return DB_ERR_IO;
+    
+    struct stat st;
+    if (fstat(fd, &st) < 0) {
+        close(fd);
+        return DB_ERR_IO;
+    }
+    
+    if (st.st_size < 16 + 24) {
+        close(fd);
+        return DB_OK; // 文件太小，没有元数据，视为正常
+    }
+    
+    size_t meta[3];
+    if (pread(fd, meta, sizeof(meta), 16) != sizeof(meta)) {
+        close(fd);
+        return DB_ERR_CORRUPTED;
+    }
+    
+    close(fd);
+    
+    size_t row_count = meta[0];
+    size_t max_rowid = meta[1];
+    size_t deleted_count = meta[2];
+    
+    // 基本一致性检查
+    if (row_count > max_rowid) return DB_ERR_CORRUPTED;
+    if (deleted_count > max_rowid) return DB_ERR_CORRUPTED;
+    
+    return DB_OK;
+}
+
+int db_check(const char* db_dir) {
+    if (!db_dir) return DB_ERR_INVAL;
+    
+    struct stat st;
+    if (stat(db_dir, &st) != 0 || !S_ISDIR(st.st_mode)) {
+        return DB_ERR_IO;
+    }
+    
+    DIR* dir = opendir(db_dir);
+    if (!dir) return DB_ERR_IO;
+    
+    int result = DB_OK;
+    char path[MYDB_TABLE_NAME_LEN * 4];
+    
+    struct dirent* entry;
+    while ((entry = readdir(dir)) != NULL) {
+        size_t len = strlen(entry->d_name);
+        if (len < 5) continue; // 至少需要 x.bin
+        
+        // 检查是否为 .bin 文件
+        if (strcmp(entry->d_name + len - 4, ".bin") != 0) continue;
+        
+        // 跳过 wal.bin
+        if (strcmp(entry->d_name, "wal.bin") == 0) continue;
+        
+        // 提取表名（去掉 .bin 后缀）
+        char table_name[MYDB_TABLE_NAME_LEN];
+        size_t name_len = len - 4;
+        if (name_len >= MYDB_TABLE_NAME_LEN) name_len = MYDB_TABLE_NAME_LEN - 1;
+        memcpy(table_name, entry->d_name, name_len);
+        table_name[name_len] = '\0';
+        
+        // 检查 .bin
+        snprintf(path, sizeof(path), "%s/%s.bin", db_dir, table_name);
+        int ret = check_pool_file(path);
+        if (ret != DB_OK) { result = ret; break; }
+        
+        ret = check_table_meta(path);
+        if (ret != DB_OK) { result = ret; break; }
+        
+        // 检查 .index
+        snprintf(path, sizeof(path), "%s/%s.index", db_dir, table_name);
+        ret = check_pool_file(path);
+        if (ret != DB_OK) { result = ret; break; }
+        
+        // 检查 .idxmeta
+        snprintf(path, sizeof(path), "%s/%s.idxmeta", db_dir, table_name);
+        ret = check_pool_file(path);
+        if (ret != DB_OK) { result = ret; break; }
+        
+        // 检查 .strings
+        snprintf(path, sizeof(path), "%s/%s.strings", db_dir, table_name);
+        ret = check_pool_file(path);
+        if (ret != DB_OK) { result = ret; break; }
+    }
+    
+    closedir(dir);
+    
+    // WAL 文件格式与 pool 不同，只检查可读性
+    if (result == DB_OK) {
+        snprintf(path, sizeof(path), "%s/wal.bin", db_dir);
+        int fd = open(path, O_RDONLY);
+        if (fd >= 0) {
+            close(fd);
+        }
+        // WAL 不存在或不可读都不视为错误（WAL 是可选的）
+    }
+    
+    return result;
 }

@@ -62,6 +62,9 @@ typedef int (*db_row_cb_t)(const char* json, void* user_data);
 db_t db_open(const char* db_dir, size_t pool_size);
 void db_close(db_t db);
 int  db_sync(db_t db);
+
+// 数据库诊断：检查完整性，返回 0=正常，负数=错误码
+int db_check(const char* db_dir);
 const char* db_errstr(db_t db);
 
 // ====== 配置 ======

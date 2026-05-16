@@ -55,11 +55,58 @@ void hash_destroy(db_pool_t* pool, size_t table_offset) {
     (void)table_offset;
 }
 
+// 重新哈希所有节点到新 bucket 数组
+static int hash_resize(db_pool_t* pool, hash_header_t* header) {
+    size_t old_count = header->bucket_count;
+    size_t new_count = old_count * 2;
+    if (new_count < old_count) return -1; // 溢出
+    
+    size_t new_buckets_size = sizeof(size_t) * new_count;
+    size_t new_buckets_off = pool_alloc_offset(pool, new_buckets_size);
+    if (!new_buckets_off) return -1;
+    
+    size_t* new_buckets = (size_t*)POOL_PTR(pool, new_buckets_off);
+    memset(new_buckets, 0, new_buckets_size);
+    
+    size_t* old_buckets = (size_t*)POOL_PTR(pool, header->buckets_offset);
+    
+    // 遍历旧 bucket，重新分配到新 bucket
+    for (size_t i = 0; i < old_count; i++) {
+        size_t node_off = old_buckets[i];
+        while (node_off) {
+            hash_node_t* node = (hash_node_t*)POOL_PTR(pool, node_off);
+            size_t next_off = node->next_offset;
+            
+            // 重新计算 hash
+            void* node_key = POOL_PTR(pool, node->key_offset);
+            uint64_t h = hash_fnv1a(node_key, node->key_len);
+            size_t idx = h % new_count;
+            
+            // 头插法插入新 bucket
+            node->next_offset = new_buckets[idx];
+            new_buckets[idx] = node_off;
+            
+            node_off = next_off;
+        }
+    }
+    
+    header->bucket_count = new_count;
+    header->buckets_offset = new_buckets_off;
+    return 0;
+}
+
 int hash_insert(db_pool_t* pool, size_t table_offset, const void* key, size_t key_len, rowid_t value) {
     if (!pool || !table_offset || !key || key_len == 0) return -1;
     
     hash_header_t* header = (hash_header_t*)POOL_PTR(pool, table_offset);
     size_t* buckets = (size_t*)POOL_PTR(pool, header->buckets_offset);
+    
+    // 负载因子 > 0.75 时扩容
+    if (header->size > 0 && header->size >= header->bucket_count * 3 / 4) {
+        if (hash_resize(pool, header) == 0) {
+            buckets = (size_t*)POOL_PTR(pool, header->buckets_offset);
+        }
+    }
     
     uint64_t h = hash_fnv1a(key, key_len);
     size_t idx = h % header->bucket_count;

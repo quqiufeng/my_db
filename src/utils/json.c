@@ -2,23 +2,48 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-static char* json_escape_string(const char* str, size_t len) {
-    // 计算需要的空间
+// 动态 JSON buffer，避免重复 realloc
+typedef struct {
+    char*  data;
+    size_t offset;
+    size_t capacity;
+} json_buf_t;
+
+static int json_buf_ensure(json_buf_t* buf, size_t need) {
+    if (buf->offset + need <= buf->capacity) return 0;
+    size_t new_cap = buf->capacity * 2;
+    if (new_cap < buf->offset + need + 256) new_cap = buf->offset + need + 256;
+    char* new_data = realloc(buf->data, new_cap);
+    if (!new_data) return -1;
+    buf->data = new_data;
+    buf->capacity = new_cap;
+    return 0;
+}
+
+static int json_buf_append(json_buf_t* buf, const char* str) {
+    size_t len = strlen(str);
+    if (json_buf_ensure(buf, len + 1) < 0) return -1;
+    memcpy(buf->data + buf->offset, str, len + 1);
+    buf->offset += len;
+    return 0;
+}
+
+static int json_buf_append_escaped(json_buf_t* buf, const char* str, size_t len) {
+    // 计算转义后长度
     size_t need = 2; // 引号
     for (size_t i = 0; i < len; i++) {
         switch (str[i]) {
             case '\n': case '\r': case '\t': case '\\': case '"':
-                need += 2;
-                break;
+                need += 2; break;
             default:
                 if ((unsigned char)str[i] < 0x20) need += 6;
                 else need++;
         }
     }
     
-    char* out = (char*)malloc(need + 1);
-    if (!out) return NULL;
+    if (json_buf_ensure(buf, need + 1) < 0) return -1;
     
+    char* out = buf->data + buf->offset;
     size_t j = 0;
     out[j++] = '"';
     for (size_t i = 0; i < len; i++) {
@@ -38,90 +63,118 @@ static char* json_escape_string(const char* str, size_t len) {
         }
     }
     out[j++] = '"';
-    out[j] = '\0';
-    
-    return out;
+    buf->offset += j;
+    buf->data[buf->offset] = '\0';
+    return 0;
 }
 
 char* json_row(db_table_t* table, void* row_ptr) {
     if (!table || !row_ptr) return NULL;
     
-    // 预估大小
-    size_t est_size = 256;
-    for (size_t i = 0; i < table->field_count; i++) {
-        est_size += 64 + table->fields[i].size * 2;
-    }
+    json_buf_t buf = {malloc(256), 0, 256};
+    if (!buf.data) return NULL;
     
-    char* buf = (char*)malloc(est_size);
-    if (!buf) return NULL;
-    
-    size_t offset = 0;
-    offset += sprintf(buf + offset, "{");
+    buf.data[0] = '{';
+    buf.offset = 1;
     
     for (size_t i = 0; i < table->field_count; i++) {
         db_field_def_t* field = &table->fields[i];
         void* field_ptr = (char*)row_ptr + field->offset;
         
-        if (i > 0) offset += sprintf(buf + offset, ",");
-        offset += sprintf(buf + offset, "\"%s\":", field->name);
+        if (i > 0) {
+            if (json_buf_ensure(&buf, 2) < 0) goto fail;
+            buf.data[buf.offset++] = ',';
+        }
+        
+        // 字段名
+        size_t name_len = strlen(field->name);
+        if (json_buf_ensure(&buf, name_len + 4) < 0) goto fail;
+        buf.data[buf.offset++] = '"';
+        memcpy(buf.data + buf.offset, field->name, name_len);
+        buf.offset += name_len;
+        buf.data[buf.offset++] = '"';
+        buf.data[buf.offset++] = ':';
+        buf.data[buf.offset] = '\0';
         
         switch (field->type) {
-            case DB_TYPE_INT32:
-                offset += sprintf(buf + offset, "%d", *(int32_t*)field_ptr);
+            case DB_TYPE_INT32: {
+                char tmp[32];
+                int n = snprintf(tmp, sizeof(tmp), "%d", *(int32_t*)field_ptr);
+                if (json_buf_ensure(&buf, n + 1) < 0) goto fail;
+                memcpy(buf.data + buf.offset, tmp, n + 1);
+                buf.offset += n;
                 break;
-            case DB_TYPE_INT64:
-                offset += sprintf(buf + offset, "%ld", (long)*(int64_t*)field_ptr);
+            }
+            case DB_TYPE_INT64: {
+                char tmp[32];
+                int n = snprintf(tmp, sizeof(tmp), "%ld", (long)*(int64_t*)field_ptr);
+                if (json_buf_ensure(&buf, n + 1) < 0) goto fail;
+                memcpy(buf.data + buf.offset, tmp, n + 1);
+                buf.offset += n;
                 break;
-            case DB_TYPE_UINT64:
-                offset += sprintf(buf + offset, "%lu", (unsigned long)*(uint64_t*)field_ptr);
+            }
+            case DB_TYPE_UINT64: {
+                char tmp[32];
+                int n = snprintf(tmp, sizeof(tmp), "%lu", (unsigned long)*(uint64_t*)field_ptr);
+                if (json_buf_ensure(&buf, n + 1) < 0) goto fail;
+                memcpy(buf.data + buf.offset, tmp, n + 1);
+                buf.offset += n;
                 break;
-            case DB_TYPE_FLOAT:
-                offset += sprintf(buf + offset, "%.6f", *(float*)field_ptr);
+            }
+            case DB_TYPE_FLOAT: {
+                char tmp[48];
+                int n = snprintf(tmp, sizeof(tmp), "%.6f", *(float*)field_ptr);
+                if (json_buf_ensure(&buf, n + 1) < 0) goto fail;
+                memcpy(buf.data + buf.offset, tmp, n + 1);
+                buf.offset += n;
                 break;
-            case DB_TYPE_DOUBLE:
-                offset += sprintf(buf + offset, "%.6f", *(double*)field_ptr);
+            }
+            case DB_TYPE_DOUBLE: {
+                char tmp[48];
+                int n = snprintf(tmp, sizeof(tmp), "%.6f", *(double*)field_ptr);
+                if (json_buf_ensure(&buf, n + 1) < 0) goto fail;
+                memcpy(buf.data + buf.offset, tmp, n + 1);
+                buf.offset += n;
                 break;
-            case DB_TYPE_BOOL:
-                offset += sprintf(buf + offset, "%s", *(uint8_t*)field_ptr ? "true" : "false");
+            }
+            case DB_TYPE_BOOL: {
+                const char* v = *(uint8_t*)field_ptr ? "true" : "false";
+                if (json_buf_append(&buf, v) < 0) goto fail;
                 break;
+            }
             case DB_TYPE_STRING: {
-                // 找到实际字符串长度（第一个 \0 之前）
                 size_t str_len = 0;
                 while (str_len < field->size && ((char*)field_ptr)[str_len] != '\0') str_len++;
-                if (str_len == 0) {
-                    offset += sprintf(buf + offset, "\"\"");
-                } else {
-                    char* escaped = json_escape_string((char*)field_ptr, str_len);
-                    if (escaped) {
-                        offset += sprintf(buf + offset, "%s", escaped);
-                        free(escaped);
-                    }
-                }
+                if (json_buf_append_escaped(&buf, (char*)field_ptr, str_len) < 0) goto fail;
                 break;
             }
             case DB_TYPE_VARSTRING: {
                 db_string_ref_t* ref = (db_string_ref_t*)field_ptr;
                 if (ref->length == 0 || ref->offset == 0) {
-                    offset += sprintf(buf + offset, "\"\"");
+                    if (json_buf_append(&buf, "\"\"") < 0) goto fail;
                 } else {
                     char* str = (char*)table->string_pool.base + ref->offset;
-                    char* escaped = json_escape_string(str, ref->length);
-                    if (escaped) {
-                        offset += sprintf(buf + offset, "%s", escaped);
-                        free(escaped);
-                    }
+                    if (json_buf_append_escaped(&buf, str, ref->length) < 0) goto fail;
                 }
                 break;
             }
             default:
-                offset += sprintf(buf + offset, "null");
+                if (json_buf_append(&buf, "null") < 0) goto fail;
                 break;
         }
     }
     
-    offset += sprintf(buf + offset, "}");
+    if (json_buf_ensure(&buf, 2) < 0) goto fail;
+    buf.data[buf.offset++] = '}';
+    buf.data[buf.offset] = '\0';
     
-    return buf;
+    // 收缩到实际大小
+    char* result = realloc(buf.data, buf.offset + 1);
+    return result ? result : buf.data;
+    
+fail:
+    free(buf.data);
+    return NULL;
 }
 
 char* json_rows(db_table_t* table, rowid_t* rowids, size_t count) {

@@ -164,6 +164,70 @@ void free_list_destroy(db_table_t* t) {
     }
 }
 
+static int copy_field_defs(db_table_t* table, const db_field_def_t* fields, size_t field_count) {
+    table->fields = (db_field_def_t*)malloc(sizeof(db_field_def_t) * field_count);
+    if (!table->fields) return -1;
+    
+    for (size_t i = 0; i < field_count; i++) {
+        table->fields[i] = fields[i];
+        if (fields[i].name) {
+            size_t name_len = strlen(fields[i].name) + 1;
+            table->fields[i].name = (char*)malloc(name_len);
+            if (!table->fields[i].name) {
+                for (size_t j = 0; j < i; j++) {
+                    free((void*)table->fields[j].name);
+                }
+                free(table->fields);
+                table->fields = NULL;
+                return -1;
+            }
+            memcpy((char*)table->fields[i].name, fields[i].name, name_len);
+        }
+        if (fields[i].type == DB_TYPE_VARSTRING) {
+            table->fields[i].size = sizeof(db_string_ref_t);
+        }
+    }
+    table->field_count = field_count;
+    return 0;
+}
+
+static void free_field_defs(db_table_t* table) {
+    if (!table->fields) return;
+    for (size_t i = 0; i < table->field_count; i++) {
+        free((void*)table->fields[i].name);
+    }
+    free(table->fields);
+    table->fields = NULL;
+}
+
+static int init_table_pools(db_table_t* table, const char* db_dir, const char* name) {
+    char path[MYDB_TABLE_NAME_LEN * 2];
+    size_t initial_pool_size = 16 * table->row_stride;
+    if (initial_pool_size < 1024 * 1024) initial_pool_size = 1024 * 1024;
+    
+    build_path(path, sizeof(path), db_dir, name, ".bin");
+    if (pool_init(&table->data_pool, path, initial_pool_size) < 0) return -1;
+    
+    build_path(path, sizeof(path), db_dir, name, ".index");
+    if (pool_init(&table->index_pool, path, initial_pool_size / 10) < 0) goto fail_data;
+    
+    build_path(path, sizeof(path), db_dir, name, ".idxmeta");
+    if (pool_init(&table->index_meta_pool, path, 64 * 1024) < 0) goto fail_index;
+    
+    build_path(path, sizeof(path), db_dir, name, ".strings");
+    if (pool_init(&table->string_pool, path, 1024 * 1024) < 0) goto fail_meta;
+    
+    return 0;
+    
+fail_meta:
+    pool_close(&table->index_meta_pool);
+fail_index:
+    pool_close(&table->index_pool);
+fail_data:
+    pool_close(&table->data_pool);
+    return -1;
+}
+
 table_t db_table_register(db_t db, const char* name, size_t row_size,
                           const db_field_def_t* fields, size_t field_count) {
     if (!db || !name || row_size == 0 || !fields || field_count == 0) return NULL;
@@ -174,7 +238,6 @@ table_t db_table_register(db_t db, const char* name, size_t row_size,
         return NULL;
     }
     
-    // 检查表名是否已存在
     for (size_t i = 0; i < inst->table_count; i++) {
         if (inst->tables[i] && strcmp(inst->tables[i]->name, name) == 0) {
             db_set_error(inst, DB_ERR_EXIST, "table '%s' already exists", name);
@@ -192,107 +255,30 @@ table_t db_table_register(db_t db, const char* name, size_t row_size,
     table->row_size = row_size;
     table->row_stride = ((sizeof(row_header_t) + row_size + MYDB_ALIGN - 1) / MYDB_ALIGN) * MYDB_ALIGN;
     table->db = inst;
-    table->compact_threshold = 0.3f; // 默认 30% 删除率触发 compact
+    table->compact_threshold = 0.3f;
     
-    // 复制字段定义（深拷贝字段名，变长字符串字段修改 size）
-    table->fields = (db_field_def_t*)malloc(sizeof(db_field_def_t) * field_count);
-    if (!table->fields) {
-        free(table);
-        return NULL;
-    }
-    for (size_t i = 0; i < field_count; i++) {
-        table->fields[i] = fields[i];
-        if (fields[i].name) {
-            size_t name_len = strlen(fields[i].name) + 1;
-            table->fields[i].name = (char*)malloc(name_len);
-            if (!table->fields[i].name) {
-                for (size_t j = 0; j < i; j++) {
-                    free((void*)table->fields[j].name);
-                }
-                free(table->fields);
-                free(table);
-                return NULL;
-            }
-            memcpy((char*)table->fields[i].name, fields[i].name, name_len);
-        }
-        // 变长字符串字段：size 改为 db_string_ref_t 大小
-        if (fields[i].type == DB_TYPE_VARSTRING) {
-            table->fields[i].size = sizeof(db_string_ref_t);
-        }
-    }
-    table->field_count = field_count;
-    
-    // 创建表级数据文件：db_dir/name.bin
-    char data_path[MYDB_TABLE_NAME_LEN * 2];
-    build_path(data_path, sizeof(data_path), inst->db_dir, name, ".bin");
-    size_t initial_pool_size = 16 * table->row_stride;
-    if (initial_pool_size < 1024 * 1024) initial_pool_size = 1024 * 1024; // 最小 1MB
-    if (pool_init(&table->data_pool, data_path, initial_pool_size) < 0) {
-        for (size_t i = 0; i < field_count; i++) {
-            free((void*)table->fields[i].name);
-        }
-        free(table->fields);
+    if (copy_field_defs(table, fields, field_count) < 0) {
         free(table);
         return NULL;
     }
     
-    // 创建表级索引文件：db_dir/name.index
-    char index_path[MYDB_TABLE_NAME_LEN * 2];
-    build_path(index_path, sizeof(index_path), inst->db_dir, name, ".index");
-    if (pool_init(&table->index_pool, index_path, initial_pool_size / 10) < 0) {
-        pool_close(&table->data_pool);
-        for (size_t i = 0; i < field_count; i++) {
-            free((void*)table->fields[i].name);
-        }
-        free(table->fields);
-        free(table);
-        return NULL;
-    }
-    
-    // 创建索引元数据文件：db_dir/name.idxmeta
-    char meta_path[MYDB_TABLE_NAME_LEN * 2];
-    build_path(meta_path, sizeof(meta_path), inst->db_dir, name, ".idxmeta");
-    if (pool_init(&table->index_meta_pool, meta_path, 64 * 1024) < 0) {
-        pool_close(&table->index_pool);
-        pool_close(&table->data_pool);
-        for (size_t i = 0; i < field_count; i++) {
-            free((void*)table->fields[i].name);
-        }
-        free(table->fields);
-        free(table);
-        return NULL;
-    }
-    
-    // 创建字符串池文件：db_dir/name.strings
-    char string_path[MYDB_TABLE_NAME_LEN * 2];
-    build_path(string_path, sizeof(string_path), inst->db_dir, name, ".strings");
-    if (pool_init(&table->string_pool, string_path, 1024 * 1024) < 0) {
-        pool_close(&table->index_meta_pool);
-        pool_close(&table->index_pool);
-        pool_close(&table->data_pool);
-        for (size_t i = 0; i < field_count; i++) {
-            free((void*)table->fields[i].name);
-        }
-        free(table->fields);
+    if (init_table_pools(table, inst->db_dir, name) < 0) {
+        free_field_defs(table);
         free(table);
         return NULL;
     }
     
     inst->tables[inst->table_count++] = table;
     
-    // 自动为主键创建索引（第一字段是 uint64_t 且 offset 为 0）
     if (field_count > 0 && fields[0].type == DB_TYPE_UINT64 && fields[0].offset == 0) {
         index_create(table, "id", fields[0].offset, fields[0].type);
     }
     
-    // 加载已存在的索引定义（从 .idxmeta 文件）
     load_index_defs(table);
     
-    // 加载表元数据（如果是已有文件）
     if (table->data_pool.used > TABLE_META_OFFSET + 24) {
         load_table_meta(table);
     } else {
-        // 新文件：初始化元数据区域
         save_table_meta(table);
     }
     
@@ -364,63 +350,30 @@ size_t db_table_count(table_t table) {
     return t->row_count;
 }
 
-size_t db_table_compact(table_t table) {
-    if (!table) return 0;
-    db_table_t* t = (db_table_t*)table;
-    
-    if (t->deleted_count == 0 || t->row_count == 0) return 0;
-    
-    // 分配新的连续内存用于 compact 后的数据
-    size_t new_size = (t->row_count + 16) * t->row_stride;
-    if (new_size < 1024 * 1024) new_size = 1024 * 1024;
-    
-    void* new_base = malloc(new_size);
-    if (!new_base) return 0;
-    memset(new_base, 0, new_size);
-    
-    // 复制文件头（16 字节）
+static size_t compact_move_rows(db_table_t* t, void* new_base, size_t new_size, rowid_t* out_new_id) {
     memcpy(new_base, t->data_pool.base, 16);
     
-    // 顺序扫描，存活行移到新位置
     rowid_t new_id = 0;
-    size_t moved = 0;
     for (rowid_t id = 1; id <= t->max_rowid; id++) {
         size_t old_offset = id * t->row_stride;
         row_header_t* old_header = (row_header_t*)PTR(t->data_pool.base, old_offset);
-        
         if (old_header->flags & MYDB_DELETED_FLAG) continue;
         
         new_id++;
         size_t new_offset = new_id * t->row_stride;
         row_header_t* new_header = (row_header_t*)PTR(new_base, new_offset);
-        
         memcpy(new_header, old_header, t->row_stride);
         new_header->rowid = new_id;
-        moved++;
     }
     
-    if (moved == 0) {
-        free(new_base);
-        return 0;
-    }
+    *out_new_id = new_id;
+    if (new_id == 0) return 0;
     
-    // 更新内存
     memcpy(t->data_pool.base, new_base, new_size > t->data_pool.size ? t->data_pool.size : new_size);
-    free(new_base);
-    
-    // 更新元数据
-    size_t old_max_rowid = t->max_rowid;
-    t->max_rowid = new_id;
-    t->deleted_count = 0;
-    t->free_count = 0; // 清空 free list
-    
-    // 更新 pool used
-    t->data_pool.used = (new_id + 1) * t->row_stride;
-    *(size_t*)((char*)t->data_pool.base + 8) = t->data_pool.used;
-    save_table_meta(t);
-    
-    // 重建索引（rowid 变了）
-    // 先清空旧索引
+    return new_id;
+}
+
+static void compact_reset_indexes(db_table_t* t) {
     db_index_t* idx = t->indexes;
     while (idx) {
         if (idx->type == INDEX_HASH) {
@@ -432,56 +385,86 @@ size_t db_table_compact(table_t table) {
         }
         idx = idx->next;
     }
+}
+
+static void compact_rebuild_string_pool(db_table_t* t) {
+    if (!t->string_pool.base) return;
     
-    // 重建 string_pool（清理已删除行的字符串）
-    if (t->string_pool.base) {
-        // 重置 string_pool：保留文件头，清空数据区
-        memset((char*)t->string_pool.base + 16, 0, t->string_pool.size - 16);
-        t->string_pool.used = 16;
-        *(size_t*)((char*)t->string_pool.base + 8) = 16;
+    memset((char*)t->string_pool.base + 16, 0, t->string_pool.size - 16);
+    t->string_pool.used = 16;
+    *(size_t*)((char*)t->string_pool.base + 8) = 16;
+    
+    for (rowid_t id = 1; id <= t->max_rowid; id++) {
+        size_t offset = id * t->row_stride;
+        row_header_t* header = (row_header_t*)PTR(t->data_pool.base, offset);
+        if (header->flags & MYDB_DELETED_FLAG) continue;
         
-        // 重新插入所有存活行的字符串
-        for (rowid_t id = 1; id <= t->max_rowid; id++) {
-            size_t offset = id * t->row_stride;
-            row_header_t* header = (row_header_t*)PTR(t->data_pool.base, offset);
-            if (header->flags & MYDB_DELETED_FLAG) continue;
-            
-            void* row_ptr = (char*)header + sizeof(row_header_t);
-            char* dst = (char*)row_ptr;
-            
-            for (size_t i = 0; i < t->field_count; i++) {
-                db_field_def_t* f = &t->fields[i];
-                if (f->type == DB_TYPE_VARSTRING) {
-                    db_string_ref_t* ref = (db_string_ref_t*)(dst + f->offset);
-                    if (ref->length > 0) {
-                        void* str_ptr = pool_alloc(&t->string_pool, ref->length + 1);
-                        if (str_ptr) {
-                            size_t old_offset = ref->offset;
-                            ref->offset = (size_t)((char*)str_ptr - (char*)t->string_pool.base);
-                            memcpy(str_ptr, (char*)t->string_pool.base + old_offset, ref->length + 1);
-                        }
+        void* row_ptr = (char*)header + sizeof(row_header_t);
+        char* dst = (char*)row_ptr;
+        
+        for (size_t i = 0; i < t->field_count; i++) {
+            db_field_def_t* f = &t->fields[i];
+            if (f->type == DB_TYPE_VARSTRING) {
+                db_string_ref_t* ref = (db_string_ref_t*)(dst + f->offset);
+                if (ref->length > 0) {
+                    void* str_ptr = pool_alloc(&t->string_pool, ref->length + 1);
+                    if (str_ptr) {
+                        size_t old_offset = ref->offset;
+                        ref->offset = (size_t)((char*)str_ptr - (char*)t->string_pool.base);
+                        memcpy(str_ptr, (char*)t->string_pool.base + old_offset, ref->length + 1);
                     }
                 }
             }
         }
     }
-    
-    // 重新插入所有数据到索引
+}
+
+static void compact_rebuild_all_indexes(db_table_t* t) {
     for (rowid_t id = 1; id <= t->max_rowid; id++) {
         size_t offset = id * t->row_stride;
         row_header_t* header = (row_header_t*)PTR(t->data_pool.base, offset);
         void* row_ptr = (char*)header + sizeof(row_header_t);
         index_insert(t, id, row_ptr);
     }
+}
+
+size_t db_table_compact(table_t table) {
+    if (!table) return 0;
+    db_table_t* t = (db_table_t*)table;
     
-    // 收缩文件（如果显著变小）
+    if (t->deleted_count == 0 || t->row_count == 0) return 0;
+    
+    size_t new_size = (t->row_count + 16) * t->row_stride;
+    if (new_size < 1024 * 1024) new_size = 1024 * 1024;
+    
+    void* new_base = malloc(new_size);
+    if (!new_base) return 0;
+    memset(new_base, 0, new_size);
+    
+    rowid_t new_id = 0;
+    size_t moved = compact_move_rows(t, new_base, new_size, &new_id);
+    free(new_base);
+    
+    if (moved == 0) return 0;
+    
+    size_t old_max_rowid = t->max_rowid;
+    t->max_rowid = new_id;
+    t->deleted_count = 0;
+    t->free_count = 0;
+    
+    t->data_pool.used = (new_id + 1) * t->row_stride;
+    *(size_t*)((char*)t->data_pool.base + 8) = t->data_pool.used;
+    save_table_meta(t);
+    
+    compact_reset_indexes(t);
+    compact_rebuild_string_pool(t);
+    compact_rebuild_all_indexes(t);
+    
     if (t->data_pool.size > new_size * 2 && new_size >= 1024 * 1024) {
         pool_resize(&t->data_pool, new_size);
     }
     
-    // 保存索引元数据
     save_index_defs(t);
-    
     return old_max_rowid - new_id;
 }
 

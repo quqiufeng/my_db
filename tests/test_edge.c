@@ -97,7 +97,19 @@ int main() {
         CHECK(ret == 0 || ret == -1, "db_wal_replay 可调用");
     }
     
+    // 测试8: db_check 对已存在的数据库返回 0
+    {
+        int ret = db_check("edge_data_db");
+        CHECK(ret == 0, "db_check 对已存在数据库返回 0");
+    }
+    
     db_close(db);
+    
+    // 测试9: db_check 对不存在的目录返回 DB_ERR_IO
+    {
+        int ret = db_check("nonexistent_db_dir_12345");
+        CHECK(ret == DB_ERR_IO, "db_check 对不存在目录返回 DB_ERR_IO");
+    }
     
     printf("\n=== 测试结果: %d/%d 通过 ===\n", pass_count, test_count);
     return (pass_count == test_count) ? 0 : 1;

@@ -77,13 +77,13 @@ int wal_append(db_wal_t* wal, int op, const char* table_name,
     // 计算 CRC
     *crc_ptr = crc32(buf + 8, total_size - 8);
     
-    // 写入文件并 fsync
+    // 写入文件（不 fsync，依赖 OS page cache 或显式 db_sync）
     ssize_t written = write(wal->fd, buf, total_size);
     free(buf);
     
     if (written != (ssize_t)total_size) return -1;
     
-    return fsync(wal->fd);
+    return 0;
 }
 
 int wal_fsync(db_wal_t* wal) {
