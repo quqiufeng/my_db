@@ -1,5 +1,10 @@
 #include "mydb_internal.h"
 
+// 构建路径：dir/name.ext
+static void build_path(char* out, size_t out_size, const char* dir, const char* name, const char* ext) {
+    snprintf(out, out_size, "%s/%s%s", dir, name, ext);
+}
+
 table_t db_table_register(db_t db, const char* name, size_t row_size,
                           const db_field_def_t* fields, size_t field_count) {
     if (!db || !name || row_size == 0 || !fields || field_count == 0) return NULL;
@@ -27,7 +32,6 @@ table_t db_table_register(db_t db, const char* name, size_t row_size,
     strncpy(table->name, name, MYDB_TABLE_NAME_LEN - 1);
     table->row_size = row_size;
     table->row_stride = ((sizeof(row_header_t) + row_size + MYDB_ALIGN - 1) / MYDB_ALIGN) * MYDB_ALIGN;
-    table->data_pool = &inst->data_pool;
     table->db = inst;
     
     // 复制字段定义（深拷贝字段名）
@@ -38,12 +42,10 @@ table_t db_table_register(db_t db, const char* name, size_t row_size,
     }
     for (size_t i = 0; i < field_count; i++) {
         table->fields[i] = fields[i];
-        // 深拷贝字段名
         if (fields[i].name) {
             size_t name_len = strlen(fields[i].name) + 1;
             table->fields[i].name = (char*)malloc(name_len);
             if (!table->fields[i].name) {
-                // 清理已分配的内存
                 for (size_t j = 0; j < i; j++) {
                     free((void*)table->fields[j].name);
                 }
@@ -56,16 +58,32 @@ table_t db_table_register(db_t db, const char* name, size_t row_size,
     }
     table->field_count = field_count;
     
-    // 分配数据区（每张表独立区域）
-    size_t initial_rows = 16;
-    size_t reserve_size = initial_rows * table->row_stride;
-    void* reserved = pool_alloc(&inst->data_pool, reserve_size);
-    if (!reserved) {
+    // 创建表级数据文件：db_dir/name.bin
+    char data_path[MYDB_TABLE_NAME_LEN * 2];
+    build_path(data_path, sizeof(data_path), inst->db_dir, name, ".bin");
+    size_t initial_pool_size = 16 * table->row_stride;
+    if (initial_pool_size < 1024 * 1024) initial_pool_size = 1024 * 1024; // 最小 1MB
+    if (pool_init(&table->data_pool, data_path, initial_pool_size) < 0) {
+        for (size_t i = 0; i < field_count; i++) {
+            free((void*)table->fields[i].name);
+        }
         free(table->fields);
         free(table);
         return NULL;
     }
-    table->data_offset = OFF(inst->data_pool.base, reserved);
+    
+    // 创建表级索引文件：db_dir/name.index
+    char index_path[MYDB_TABLE_NAME_LEN * 2];
+    build_path(index_path, sizeof(index_path), inst->db_dir, name, ".index");
+    if (pool_init(&table->index_pool, index_path, initial_pool_size / 10) < 0) {
+        pool_close(&table->data_pool);
+        for (size_t i = 0; i < field_count; i++) {
+            free((void*)table->fields[i].name);
+        }
+        free(table->fields);
+        free(table);
+        return NULL;
+    }
     
     inst->tables[inst->table_count++] = table;
     
@@ -105,9 +123,10 @@ int db_table_drop(db_t db, const char* name) {
     
     for (size_t i = 0; i < inst->table_count; i++) {
         if (inst->tables[i] && strcmp(inst->tables[i]->name, name) == 0) {
+            pool_close(&inst->tables[i]->index_pool);
+            pool_close(&inst->tables[i]->data_pool);
             free_table_fields(inst->tables[i]);
             free(inst->tables[i]);
-            // 移动后续表
             for (size_t j = i; j < inst->table_count - 1; j++) {
                 inst->tables[j] = inst->tables[j + 1];
             }
@@ -129,17 +148,13 @@ size_t db_table_compact(table_t table) {
     if (!table) return 0;
     db_table_t* t = (db_table_t*)table;
     
-    // 简化实现：统计已删除行数
     size_t deleted = 0;
     for (size_t i = 0; i < t->max_rowid; i++) {
-        row_header_t* header = (row_header_t*)PTR(t->data_pool->base, t->data_offset + i * t->row_stride);
+        row_header_t* header = (row_header_t*)PTR(t->data_pool.base, (i + 1) * t->row_stride);
         if (header->flags & MYDB_DELETED_FLAG) {
             deleted++;
         }
     }
-    
-    // 完整实现需要重建数据区并更新索引
-    // 简化版：仅统计，实际重建后续实现
     
     return deleted;
 }
@@ -153,16 +168,20 @@ rowid_t db_insert(table_t table, const void* row, size_t row_size) {
     rowid_t id = ++t->max_rowid;
     
     // 确保数据区足够大
-    size_t need_offset = t->data_offset + id * t->row_stride;
-    if (need_offset > t->data_pool->size) {
-        if (pool_resize(t->data_pool, need_offset + (1024 * 1024)) < 0) {
+    size_t need_offset = (id + 1) * t->row_stride;
+    if (need_offset > t->data_pool.size) {
+        size_t new_size = t->data_pool.size * 2;
+        if (need_offset > new_size) {
+            new_size = need_offset + (1024 * 1024);
+        }
+        if (pool_resize(&t->data_pool, new_size) < 0) {
             return 0;
         }
     }
     
-    // 计算行位置
-    size_t row_offset = t->data_offset + (id - 1) * t->row_stride;
-    void* ptr = (char*)t->data_pool->base + row_offset;
+    // 计算行位置（跳过文件头 16 字节）
+    size_t row_offset = id * t->row_stride;
+    void* ptr = (char*)t->data_pool.base + row_offset;
     
     // 写入 header
     row_header_t* header = (row_header_t*)ptr;
@@ -177,12 +196,13 @@ rowid_t db_insert(table_t table, const void* row, size_t row_size) {
         *(uint64_t*)((char*)ptr + sizeof(row_header_t)) = id;
     }
     
-    // 更新计数
     t->row_count++;
     
     // 更新池已用大小
-    if (need_offset > t->data_pool->used) {
-        t->data_pool->used = need_offset;
+    if (need_offset > t->data_pool.used) {
+        t->data_pool.used = need_offset;
+        // 更新文件头
+        *(size_t*)((char*)t->data_pool.base + 8) = need_offset;
     }
     
     // 更新索引
@@ -218,8 +238,8 @@ int db_update(table_t table, rowid_t id, const void* row, size_t row_size) {
     
     if (id > t->max_rowid) return DB_ERR_NOENT;
     
-    size_t offset = t->data_offset + (id - 1) * t->row_stride;
-    row_header_t* header = (row_header_t*)PTR(t->data_pool->base, offset);
+    size_t offset = id * t->row_stride;
+    row_header_t* header = (row_header_t*)PTR(t->data_pool.base, offset);
     
     if (header->flags & MYDB_DELETED_FLAG) return DB_ERR_NOENT;
     
@@ -248,8 +268,8 @@ int db_delete(table_t table, rowid_t id) {
     
     if (id > t->max_rowid) return DB_ERR_NOENT;
     
-    size_t offset = t->data_offset + (id - 1) * t->row_stride;
-    row_header_t* header = (row_header_t*)PTR(t->data_pool->base, offset);
+    size_t offset = id * t->row_stride;
+    row_header_t* header = (row_header_t*)PTR(t->data_pool.base, offset);
     
     if (header->flags & MYDB_DELETED_FLAG) return DB_ERR_NOENT;
     
@@ -307,10 +327,8 @@ int db_table_add_index_composite(table_t table, db_field_def_t* fields, size_t f
         index->field_types[i] = fields[i].type;
     }
     
-    // 复合索引用 B+树（支持范围查询和排序）
     index->type = INDEX_BTREE;
     
-    // 计算复合键的最大大小
     size_t key_size = 0;
     for (size_t i = 0; i < field_count && i < MYDB_MAX_INDEX_FIELDS; i++) {
         key_size += fields[i].size;
@@ -322,14 +340,13 @@ int db_table_add_index_composite(table_t table, db_field_def_t* fields, size_t f
         return DB_ERR_NOMEM;
     }
     
-    // 添加到索引链表
     index->next = t->indexes;
     t->indexes = index;
     
     // 为已有数据建立索引
     for (rowid_t id = 1; id <= t->max_rowid; id++) {
-        size_t offset = t->data_offset + (id - 1) * t->row_stride;
-        row_header_t* header = (row_header_t*)PTR(t->data_pool->base, offset);
+        size_t offset = id * t->row_stride;
+        row_header_t* header = (row_header_t*)PTR(t->data_pool.base, offset);
         if (header->flags & MYDB_DELETED_FLAG) continue;
         
         void* row_ptr = (char*)header + sizeof(row_header_t);

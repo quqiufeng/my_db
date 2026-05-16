@@ -179,8 +179,8 @@ static rowid_t* query_internal(db_table_t* table,
                 size_t filtered_count = 0;
                 
                 for (size_t i = 0; i < index_count; i++) {
-                    size_t offset = table->data_offset + (index_results[i] - 1) * table->row_stride;
-                    row_header_t* header = (row_header_t*)PTR(table->data_pool->base, offset);
+                    size_t offset = index_results[i] * table->row_stride;
+                    row_header_t* header = (row_header_t*)PTR(table->data_pool.base, offset);
                     if (header->flags & MYDB_DELETED_FLAG) continue;
                     
                     void* row_ptr = (char*)header + sizeof(row_header_t);
@@ -217,8 +217,8 @@ static rowid_t* query_internal(db_table_t* table,
     
     size_t match_count = 0;
     for (rowid_t id = 1; id <= table->max_rowid; id++) {
-        size_t offset = table->data_offset + (id - 1) * (sizeof(row_header_t) + table->row_size);
-        row_header_t* header = (row_header_t*)PTR(table->data_pool->base, offset);
+        size_t offset = id * table->row_stride;
+        row_header_t* header = (row_header_t*)PTR(table->data_pool.base, offset);
         
         if (header->flags & MYDB_DELETED_FLAG) continue;
         
@@ -246,8 +246,8 @@ static rowid_t* query_internal(db_table_t* table,
             void* sort_array = malloc(match_count * table->row_size);
             if (sort_array) {
                 for (size_t i = 0; i < match_count; i++) {
-                    size_t offset = table->data_offset + (results[i] - 1) * (sizeof(row_header_t) + table->row_size);
-                    row_header_t* header = (row_header_t*)PTR(table->data_pool->base, offset);
+                    size_t offset = results[i] * table->row_stride;
+                    row_header_t* header = (row_header_t*)PTR(table->data_pool.base, offset);
                     memcpy((char*)sort_array + i * table->row_size,
                            (char*)header + sizeof(row_header_t), table->row_size);
                 }
@@ -296,8 +296,8 @@ const char* db_select_by_pk_json(table_t table, rowid_t id) {
     
     if (id > t->max_rowid) return NULL;
     
-    size_t offset = t->data_offset + (id - 1) * t->row_stride;
-    row_header_t* header = (row_header_t*)PTR(t->data_pool->base, offset);
+    size_t offset = id * t->row_stride;
+    row_header_t* header = (row_header_t*)PTR(t->data_pool.base, offset);
     
     if (header->flags & MYDB_DELETED_FLAG) return NULL;
     
@@ -366,15 +366,15 @@ const char* db_join_json(table_t left_table, size_t left_field_offset,
     
     // 先计算大小
     for (rowid_t lid = 1; lid <= left->max_rowid; lid++) {
-        size_t loff = left->data_offset + (lid - 1) * (sizeof(row_header_t) + left->row_size);
-        row_header_t* lheader = (row_header_t*)PTR(left->data_pool->base, loff);
+        size_t loff = lid * left->row_stride;
+        row_header_t* lheader = (row_header_t*)PTR(left->data_pool.base, loff);
         if (lheader->flags & MYDB_DELETED_FLAG) continue;
         
         void* lval = (char*)lheader + sizeof(row_header_t) + left_field_offset;
         
         for (rowid_t rid = 1; rid <= right->max_rowid; rid++) {
-            size_t roff = right->data_offset + (rid - 1) * (sizeof(row_header_t) + right->row_size);
-            row_header_t* rheader = (row_header_t*)PTR(right->data_pool->base, roff);
+            size_t roff = rid * right->row_stride;
+            row_header_t* rheader = (row_header_t*)PTR(right->data_pool.base, roff);
             if (rheader->flags & MYDB_DELETED_FLAG) continue;
             
             void* rval = (char*)rheader + sizeof(row_header_t) + right_field_offset;
@@ -396,16 +396,16 @@ const char* db_join_json(table_t left_table, size_t left_field_offset,
     
     bool first = true;
     for (rowid_t lid = 1; lid <= left->max_rowid; lid++) {
-        size_t loff = left->data_offset + (lid - 1) * (sizeof(row_header_t) + left->row_size);
-        row_header_t* lheader = (row_header_t*)PTR(left->data_pool->base, loff);
+        size_t loff = lid * left->row_stride;
+        row_header_t* lheader = (row_header_t*)PTR(left->data_pool.base, loff);
         if (lheader->flags & MYDB_DELETED_FLAG) continue;
         
         void* lval = (char*)lheader + sizeof(row_header_t) + left_field_offset;
         void* lrow = (char*)lheader + sizeof(row_header_t);
         
         for (rowid_t rid = 1; rid <= right->max_rowid; rid++) {
-            size_t roff = right->data_offset + (rid - 1) * (sizeof(row_header_t) + right->row_size);
-            row_header_t* rheader = (row_header_t*)PTR(right->data_pool->base, roff);
+            size_t roff = rid * right->row_stride;
+            row_header_t* rheader = (row_header_t*)PTR(right->data_pool.base, roff);
             if (rheader->flags & MYDB_DELETED_FLAG) continue;
             
             void* rval = (char*)rheader + sizeof(row_header_t) + right_field_offset;
@@ -517,8 +517,8 @@ int db_select_all_stream(table_t table, db_row_cb_t cb, void* user_data) {
     db_table_t* t = (db_table_t*)table;
     
     for (rowid_t id = 1; id <= t->max_rowid; id++) {
-        size_t offset = t->data_offset + (id - 1) * t->row_stride;
-        row_header_t* header = (row_header_t*)PTR(t->data_pool->base, offset);
+        size_t offset = id * t->row_stride;
+        row_header_t* header = (row_header_t*)PTR(t->data_pool.base, offset);
         
         if (header->flags & MYDB_DELETED_FLAG) continue;
         
@@ -541,8 +541,8 @@ int db_select_where_stream(table_t table,
     db_table_t* t = (db_table_t*)table;
     
     for (rowid_t id = 1; id <= t->max_rowid; id++) {
-        size_t offset = t->data_offset + (id - 1) * t->row_stride;
-        row_header_t* header = (row_header_t*)PTR(t->data_pool->base, offset);
+        size_t offset = id * t->row_stride;
+        row_header_t* header = (row_header_t*)PTR(t->data_pool.base, offset);
         
         if (header->flags & MYDB_DELETED_FLAG) continue;
         
@@ -577,8 +577,8 @@ int db_select_stream(table_t table,
     
     db_table_t* t = (db_table_t*)table;
     for (size_t i = 0; i < count; i++) {
-        size_t offset = t->data_offset + (results[i] - 1) * t->row_stride;
-        row_header_t* header = (row_header_t*)PTR(t->data_pool->base, offset);
+        size_t offset = results[i] * t->row_stride;
+        row_header_t* header = (row_header_t*)PTR(t->data_pool.base, offset);
         void* row_ptr = (char*)header + sizeof(row_header_t);
         
         char* json = json_row(t, row_ptr);

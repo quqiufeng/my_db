@@ -18,7 +18,7 @@ DB_TABLE(user, "users",
 int main() {
     printf("=== 性能测试：100万行插入 + 查询 ===\n");
     
-    db_t db = db_open("perf_data.bin", "perf_index.index", "perf_wal.bin", 1024*1024*500);
+    db_t db = db_open("perf_data_db", 1024*1024*500);
     db_register_user(db);
     table_t users = db_table(db, "users");
     

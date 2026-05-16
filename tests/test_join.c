@@ -31,7 +31,7 @@ DB_TABLE(order, "orders",
 int main() {
     printf("=== my_db JOIN 测试 ===\n\n");
     
-    db_t db = db_open("join_data.bin", "join_index.index", "join_wal.bin", 1024*1024*10);
+    db_t db = db_open("join_data_db", 1024*1024*10);
     db_register_user(db);
     db_register_order(db);
     

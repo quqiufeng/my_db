@@ -79,19 +79,17 @@ typedef struct db_table {
     size_t          row_stride;     // 对齐后的行大小（包含 header）
     size_t          row_count;
     size_t          max_rowid;
-    size_t          data_offset;    // 数据区起始偏移
-    size_t          data_used;      // 数据区已用字节
     db_field_def_t* fields;
     size_t          field_count;
     db_index_t*     indexes;        // 索引链表
-    db_pool_t*      data_pool;      // 数据文件 mmap
+    db_pool_t       data_pool;      // 数据文件 mmap（独立文件）
+    db_pool_t       index_pool;     // 索引文件 mmap（独立文件）
     struct db_instance* db;         // 指向数据库实例（用于访问配置）
 } db_table_t;
 
 // ====== 数据库实例 ======
 typedef struct db_instance {
-    db_pool_t       data_pool;
-    db_pool_t       index_pool;
+    char            db_dir[MYDB_TABLE_NAME_LEN];    // 数据库目录
     db_wal_t        wal;
     db_table_t*     tables[MYDB_MAX_TABLES];
     size_t          table_count;

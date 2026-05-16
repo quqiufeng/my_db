@@ -30,7 +30,7 @@ static int pass_count = 0;
 int main() {
     printf("=== my_db 边界情况测试 ===\n\n");
     
-    db_t db = db_open("edge_data.bin", "edge_index.index", "edge_wal.bin", 1024*1024*10);
+    db_t db = db_open("edge_data_db", 1024*1024*10);
     if (!db) {
         printf("ERROR: db_open failed\n");
         return 1;

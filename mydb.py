@@ -52,6 +52,7 @@ class db_condition_t(ctypes.Structure):
     ]
 
 # 配置函数签名
+_lib.db_open.argtypes = [ctypes.c_char_p, ctypes.c_size_t]
 _lib.db_open.restype = ctypes.c_void_p
 _lib.db_close.argtypes = [ctypes.c_void_p]
 _lib.db_checkpoint.argtypes = [ctypes.c_void_p]
@@ -481,30 +482,25 @@ class DB:
         return False
 
 
-def open(data_path="mydb_data.bin", index_path=None, wal_path=None, pool_size=100*1024*1024):
-    """打开数据库"""
-    index_path = index_path or data_path + ".index"
-    wal_path = wal_path or data_path + ".wal"
-    
+def open(db_dir="mydb_data", pool_size=100*1024*1024):
+    """打开数据库目录"""
     ptr = _lib.db_open(
-        data_path.encode('utf-8'),
-        index_path.encode('utf-8'),
-        wal_path.encode('utf-8'),
+        db_dir.encode('utf-8'),
         pool_size
     )
     
     if not ptr:
-        raise RuntimeError("Failed to open database")
+        raise RuntimeError(f"Failed to open database directory: {db_dir}")
     
     return DB(ptr)
 
 
-def create(path, schemas=None):
+def create(db_dir, schemas=None):
     """创建数据库并注册表
     
     schemas: {table_name: [field_def, ...], ...}
     """
-    db = open(path)
+    db = open(db_dir)
     
     if schemas:
         for name, schema in schemas.items():

@@ -58,7 +58,7 @@ typedef struct {
 typedef int (*db_row_cb_t)(const char* json, void* user_data);
 
 // ====== 数据库 ======
-db_t db_open(const char* data_path, const char* index_path, const char* wal_path, size_t pool_size);
+db_t db_open(const char* db_dir, size_t pool_size);
 void db_close(db_t db);
 int  db_sync(db_t db);
 const char* db_errstr(db_t db);

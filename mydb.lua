@@ -57,7 +57,7 @@ ffi.cdef[[
         int         op;
     } db_condition_t;
     
-    db_t db_open(const char* dp, const char* ip, const char* wp, size_t ps);
+    db_t db_open(const char* db_dir, size_t pool_size);
     void db_close(db_t db);
     int db_sync(db_t db);
     int db_wal_replay(db_t db);
@@ -409,15 +409,13 @@ end
 -- 模块 API
 local mydb = {}
 
-function mydb.open(data_path, index_path, wal_path, pool_size)
-    data_path = data_path or "mydb_data.bin"
-    index_path = index_path or "mydb_index.index"
-    wal_path = wal_path or "mydb_wal.bin"
+function mydb.open(db_dir, pool_size)
+    db_dir = db_dir or "mydb_data"
     pool_size = pool_size or (1024 * 1024 * 100)
     
-    local ptr = _lib.db_open(data_path, index_path, wal_path, pool_size)
+    local ptr = _lib.db_open(db_dir, pool_size)
     if ptr == nil then
-        error("Failed to open database")
+        error("Failed to open database directory: " .. db_dir)
     end
     
     return setmetatable({
@@ -427,8 +425,8 @@ function mydb.open(data_path, index_path, wal_path, pool_size)
 end
 
 -- 便捷函数：直接打开并注册表
-function mydb.create(path, schemas)
-    local db = mydb.open(path, path .. ".index", path .. ".wal")
+function mydb.create(db_dir, schemas)
+    local db = mydb.open(db_dir)
     
     if schemas then
         for name, schema in pairs(schemas) do

@@ -33,7 +33,7 @@ int main() {
     
     // 测试1: WAL 写入和回放
     {
-        db_t db = db_open("wal_data.bin", "wal_index.index", "wal_test.bin", 1024*1024*10);
+        db_t db = db_open("wal_data_db", 1024*1024*10);
         CHECK(db != NULL, "数据库打开成功");
         
         db_register_wal_user(db);
@@ -60,7 +60,7 @@ int main() {
         db_close(db);
         
         // 重新打开并回放 WAL
-        db = db_open("wal_data.bin", "wal_index.index", "wal_test.bin", 1024*1024*10);
+        db = db_open("wal_data_db", 1024*1024*10);
         CHECK(db != NULL, "重新打开数据库成功");
         
         db_register_wal_user(db);
@@ -83,7 +83,7 @@ int main() {
     
     // 测试2: Checkpoint 机制
     {
-        db_t db = db_open("wal_data2.bin", "wal_index2.index", "wal_test2.bin", 1024*1024*10);
+        db_t db = db_open("wal_data2_db", 1024*1024*10);
         CHECK(db != NULL, "Checkpoint 测试：数据库打开");
         
         db_register_wal_user(db);

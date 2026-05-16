@@ -25,7 +25,7 @@ int main() {
     printf("=== my_db C 示例 ===\n\n");
     
     // 1. 打开数据库
-    db_t db = db_open("example_data.bin", "example_index.index", "example_wal.bin", 1024*1024*10);
+    db_t db = db_open("example_data_db", 1024*1024*10);
     if (!db) {
         printf("打开数据库失败\n");
         return 1;

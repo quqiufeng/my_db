@@ -19,7 +19,7 @@ DB_TABLE(user, "users",
 int main() {
     printf("=== my_db 基础测试 ===\n\n");
     
-    db_t db = db_open("test_data.bin", "test_index.index", "test_wal.bin", 1024*1024*10);
+    db_t db = db_open("test_data_db", 1024*1024*10);
     if (!db) {
         printf("ERROR: db_open failed\n");
         return 1;

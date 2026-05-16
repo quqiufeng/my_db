@@ -116,8 +116,8 @@ char* json_rows(db_table_t* table, rowid_t* rowids, size_t count) {
     // 先计算需要的大小
     size_t total_size = 2; // []
     for (size_t i = 0; i < count; i++) {
-        size_t offset = table->data_offset + (rowids[i] - 1) * (sizeof(row_header_t) + table->row_size);
-        row_header_t* header = (row_header_t*)PTR(table->data_pool->base, offset);
+        size_t offset = rowids[i] * table->row_stride;
+        row_header_t* header = (row_header_t*)PTR(table->data_pool.base, offset);
         if (header->flags & MYDB_DELETED_FLAG) continue;
         
         void* row_ptr = (char*)header + sizeof(row_header_t);
@@ -136,8 +136,8 @@ char* json_rows(db_table_t* table, rowid_t* rowids, size_t count) {
     
     bool first = true;
     for (size_t i = 0; i < count; i++) {
-        size_t offset = table->data_offset + (rowids[i] - 1) * (sizeof(row_header_t) + table->row_size);
-        row_header_t* header = (row_header_t*)PTR(table->data_pool->base, offset);
+        size_t offset = rowids[i] * table->row_stride;
+        row_header_t* header = (row_header_t*)PTR(table->data_pool.base, offset);
         if (header->flags & MYDB_DELETED_FLAG) continue;
         
         if (!first) off += sprintf(buf + off, ",");

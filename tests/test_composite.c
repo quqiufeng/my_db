@@ -32,7 +32,7 @@ static int pass_count = 0;
 int main() {
     printf("=== my_db 复合索引测试 ===\n\n");
     
-    db_t db = db_open("composite_data.bin", "composite_index.index", "composite_wal.bin", 1024*1024*10);
+    db_t db = db_open("composite_data_db", 1024*1024*10);
     if (!db) {
         printf("ERROR: db_open failed\n");
         return 1;
