@@ -44,7 +44,11 @@
 - **JOIN 关联**：等值关联查询，填补嵌入式零拷贝领域的空白
 - **零拷贝持久化**：内存布局 = 磁盘布局，mmap 直接映射
 - **动态 Schema**：LuaJIT/Python 纯动态注册，无需预定义 C struct
-- **双文件架构**：数据（.bin）和索引（.index）分离，独立管理
+- **多文件目录架构**：每表独立文件（.bin + .index + .idxmeta），目录即数据库
+- **零拷贝索引持久化**：Hash 索引直接 mmap，重启后自动恢复，无需重建
+- **Hash Join 优化**：自动检测右表索引，Hash Join + 嵌套循环 fallback
+- **Free List 复用**：删除的 rowid 自动复用，删除率 ≥ 30% 自动 compact
+- **变长字符串**：DB_TYPE_VARSTRING 支持任意长度文本，独立 strings 池
 - **WAL 日志**：同步写入保证不丢失，异步刷盘保证性能
 - **JSON 查询结果**：SELECT 自动返回 JSON，无需 FFI 侧定义 struct
 - **流式查询**：逐行回调，无内存上限，适合大数据量
@@ -76,22 +80,31 @@
 └─────────┘     └──────────┘      └──────────────┘
 ```
 
-### 双文件 mmap 设计
+### 多文件 mmap 目录架构
 
 ```
-data.bin          data.index           wal.bin
-┌──────────┐     ┌──────────┐        ┌──────────┐
-│ 表数据    │     │ 主键索引  │        │ WAL日志  │
-│ 行数组    │     │ 二级索引  │        │ 顺序写入 │
-└──────────┘     └──────────┘        └──────────┘
-   ↑ mmap            ↑ mmap                ↑ fsync
-   └─────────────────┘                     │
-                     内存                     │
+game_data/              -- 数据库目录
+├── users.bin          -- users 表数据
+├── users.index        -- users 索引（零拷贝 mmap）
+├── users.idxmeta      -- users 索引元数据
+├── users.strings      -- users 变长字符串池
+├── orders.bin         -- orders 表数据
+├── orders.index       -- orders 索引
+├── orders.idxmeta     -- orders 索引元数据
+└── wal.bin            -- WAL 日志
 ```
 
-**数据文件（data.bin）**：只存原始行数据，结构简单
-**索引文件（data.index）**：独立 mmap，主键哈希 + 可选 B+树/哈希
-**WAL 日志（wal.bin）**：每次写操作先同步写入，崩溃后回放恢复
+**每表独立文件**：
+- **`.bin`**：表数据 + 表元数据（row_count, max_rowid, deleted_count）
+- **`.index`**：索引数据结构（hash buckets/nodes），零拷贝 mmap
+- **`.idxmeta`**：索引定义（字段名、类型、offset），持久化索引配置
+- **`.strings`**：变长字符串池（仅 VARSTRING 字段类型）
+- **`wal.bin`**：单文件 WAL，所有表共享
+
+**设计优势**：
+- 单表 compact 不影响其他表
+- 索引零拷贝：重启后自动恢复，无需重建
+- 变长字符串独立存储，避免数据文件膨胀
 
 ### 内存布局
 
@@ -298,7 +311,7 @@ make install      # 安装到 /usr/local
 ### 数据库生命周期
 
 ```lua
-local db = mydb.open("data.bin")              -- 打开（自动生成 .index 和 .wal）
+local db = mydb.open("game_data")             -- 打开目录（自动生成所有表文件和 wal）
 db:sync()                                      -- 强制刷盘（同步等待落盘）
 db:checkpoint()                                -- 刷盘 + 清空 WAL
 db:close()                                     -- 关闭数据库
@@ -320,8 +333,9 @@ local users = db:register("users", {
     {"name", "age"},           -- 复合索引（最多 4 个字段）
 })
 
--- 支持的类型：int32, int64, uint64, float, double, string, bool
--- string 需指定 size（最大长度）
+-- 支持的类型：int32, int64, uint64, float, double, string, varstring, bool
+-- string  需指定 size（定长，最大长度）
+-- varstring 无需 size（变长，任意长度，适合大文本）
 
 -- 后续手动创建索引（如果注册时没指定）
 users:create_index("score")
@@ -403,20 +417,23 @@ local total = db:compact()
 
 ## 设计决策
 
-| 决策项 | 选择 | 理由 |
-|--------|------|------|
-| **定位** | 零拷贝嵌入式存储引擎 | 内存数据库，直接操作 struct，无网络、无序列化 |
-| Schema 定义 | **动态 Lua 注册** | 无需编译 C struct，脚本层完全控制 |
-| 持久化机制 | mmap + 异步 msync | 零拷贝，内存布局 = 磁盘布局 |
-| 数据安全 | WAL 同步写入 | 每次写先 fsync WAL，再改内存 |
-| 主键 | 自增 uint64_t | 简单高效，FFI 兼容 |
-| 读取方式 | SELECT 返回 JSON 字符串 | 无需 FFI 侧定义 struct，自动解析为 Lua 表 |
-| 写入方式 | Lua 表自动序列化 | `insert({...})` 自动转换为 C 内存 |
-| 删除 | 软删除（标记位） | 避免内存碎片，定期 compact |
-| 索引 | 主键哈希 + 单列/复合 B+树 + 哈希 | 复合索引第一版即支持，简单高效 |
-| 内存分配 | Bump Allocator | 顺序分配，先不实现复杂回收 |
-| 并发 | **无锁，用户自行保证** | 类似 Redis，简单快速第一，用户自己管理并发 |
-| 查询优化 | **简单规则匹配**（第一版） | 复合索引优先 → 单列索引 → 全表扫描，无复杂成本估算 |
+| 决策项 | 原设计 | 实际实现 | 理由 |
+|--------|--------|----------|------|
+| **定位** | 零拷贝嵌入式存储引擎 | 同上 | 内存数据库，直接操作 struct，无网络、无序列化 |
+| **存储架构** | 单文件双池 | **多文件目录**（每表独立） | 单表 compact 不影响其他表 |
+| Schema 定义 | 动态 Lua 注册 | 同上 | 无需编译 C struct，脚本层完全控制 |
+| 持久化机制 | mmap + 异步 msync | **mmap + 同步 msync** | 确保数据真正落盘 |
+| 数据安全 | WAL 同步写入 | 同上 | 每次写先 fsync WAL，再改内存 |
+| 主键 | 自增 uint64_t | 同上 | 简单高效，FFI 兼容 |
+| 读取方式 | SELECT 返回 JSON 字符串 | 同上 | 无需 FFI 侧定义 struct |
+| 写入方式 | Lua 表自动序列化 | 同上 | `insert({...})` 自动转换为 C 内存 |
+| 删除 | 软删除 | 软删除 + **Free List** | 删除的 rowid 优先复用 |
+| 内存回收 | 手动 compact | **自动 compact**（≥30% 触发） | 自动回收，无感知 |
+| 索引 | 堆内存指针 | **mmap 零拷贝 offset** | 重启保留，无需重建 |
+| 索引元数据 | 与索引数据混存 | **独立 `.idxmeta` 文件** | 避免覆盖索引结构 |
+| JOIN 算法 | 纯嵌套循环 | **Hash Join + fallback** | 自动检测索引，性能提升 |
+| 字符串类型 | 仅定长 STRING | 定长 + **变长 VARSTRING** | 支持任意长度文本 |
+| 并发 | **无锁，用户自行保证** | 同上 | 类似 Redis，简单快速第一 |
 
 ## 并发设计
 
@@ -440,16 +457,20 @@ Bump Allocator + 软删除 = 内存只增不减
 ### 解决方案：Compact
 
 ```lua
--- 单表重建，回收已删除空间
+-- 单表重建，回收已删除空间（也可自动触发）
 local deleted = users:compact()
 
 -- 全盘重建，回收所有已删除空间
 local total = db:compact()
+
+-- 设置自动 compact 阈值（默认 30%）
+users:set_compact_threshold(0.3)  -- 删除率 ≥ 30% 时自动触发
 ```
 
-**使用建议**：
-- 删除比例 > 20% 时触发
-- 业务低峰期执行（用户自行加锁保证独占访问）
+**自动回收机制**：
+- **Free List**：删除的 rowid 放入空闲列表，INSERT 优先复用
+- **自动 Compact**：删除率 ≥ 30%（可配置）时自动触发，无需手动调用
+- **手动 Compact**：业务低峰期执行（用户自行加锁保证独占访问）
 
 ### 大结果集保护
 
@@ -478,37 +499,45 @@ local total = db:compact()
 
 ```
 my_db/
-├── design.md              # 设计方案
-├── README.md              # 本文件
-├── task.md                # 开发任务列表
+├── design.md                # 设计方案
+├── ARCHITECTURE_CHANGES.md  # 架构变更记录（原设计 vs 实际实现）
+├── README.md                # 本文件
+├── task.md                  # 开发任务列表
 ├── LICENSE
 ├── Makefile
-├── mydb.lua               # LuaJIT FFI 高级封装（推荐）
-├── mydb.py                # Python ctypes 高级封装
+├── mydb.lua                 # LuaJIT FFI 高级封装（推荐）
+├── mydb.py                  # Python ctypes 高级封装
 ├── include/
-│   ├── mydb.h             # 公共头文件（FFI 依赖）
-│   └── mydb_internal.h    # 内部头文件
+│   ├── mydb.h               # 公共头文件（FFI 依赖）
+│   └── mydb_internal.h      # 内部头文件
 ├── src/
 │   ├── core/
-│   │   ├── db.c           # 数据库生命周期
-│   │   ├── table.c        # 表操作
-│   │   └── query.c        # 查询引擎
+│   │   ├── db.c             # 数据库生命周期（多文件目录模式）
+│   │   ├── table.c          # 表操作（Free List + Compact）
+│   │   └── query.c          # 查询引擎（Hash Join + 索引优化）
+│   ├── types/
+│   │   ├── hash.c           # 哈希表（零拷贝 mmap 索引）
+│   │   └── btree.c          # B+树（二级索引）
 │   ├── storage/
-│   │   ├── wal.c          # WAL 日志
-│   │   └── mmap.c         # mmap 封装
+│   │   ├── wal.c            # WAL 日志
+│   │   └── mmap.c           # mmap 封装
 │   └── utils/
-│       ├── crc32.c        # 校验和
-│       ├── error.c        # 错误处理
-│       └── json.c         # JSON 序列化
+│       ├── crc32.c          # 校验和
+│       ├── error.c          # 错误处理
+│       └── json.c           # JSON 序列化（支持 VARSTRING）
 ├── examples/
 │   ├── example_dynamic.lua  # LuaJIT 动态示例（推荐）
-│   └── example_dynamic.py   # Python 动态示例
+│   ├── example_dynamic.py   # Python 动态示例
+│   └── example.c            # C 示例（编译时 Schema）
 └── tests/
-    ├── test_basic.c       # 基础功能测试
-    ├── test_join.c        # JOIN 测试
-    ├── test_perf.c        # 性能测试
-    ├── test_composite.c   # 复合索引测试
-    └── test_wal.c         # WAL + Checkpoint 测试
+    ├── test_basic.c         # 基础功能测试
+    ├── test_join.c          # JOIN 测试
+    ├── test_perf.c          # 性能测试
+    ├── test_edge.c          # 边界情况测试
+    ├── test_composite.c     # 复合索引测试
+    ├── test_wal.c           # WAL + Checkpoint 测试
+    ├── test_ffi.lua         # LuaJIT FFI 测试
+    └── test_ffi.py          # Python ctypes 测试
 ```
 
 ## 许可证

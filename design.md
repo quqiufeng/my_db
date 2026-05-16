@@ -102,77 +102,137 @@
 4. 启动后台刷盘线程
 5. 清空/归档已确认落盘的 WAL
 
-## 3. 内存布局设计（双文件 mmap）
+## 3. 内存布局设计（多文件 mmap 目录模式）
 
-**数据文件（.bin）和索引文件（.index）分开保存，各自独立 mmap。**
+**目录即数据库。每张表拥有独立的文件组，各自独立 mmap。**
 
-### 3.1 数据文件（data.bin）
+### 3.1 文件架构
 
-只存储原始行数据，结构最简单。
+```
+db_dir/                          -- 数据库目录
+├── {table}.bin                  -- 表数据（每张表独立）
+├── {table}.index                -- 索引数据（零拷贝 mmap）
+├── {table}.idxmeta              -- 索引元数据（持久化索引定义）
+├── {table}.strings              -- 变长字符串池（仅 VARSTRING 类型）
+└── wal.bin                      -- WAL 日志（单文件）
+```
+
+**关键变更（vs 原设计的单文件双池）：**
+- 原设计：所有表数据共存于一个 `data.bin`，所有索引共存于一个 `data.index`
+- 实际：每张表有独立的 `.bin` + `.index` + `.idxmeta`（可选 `.strings`）
+- 优势：单表 compact 不影响其他表，独立扩展，简化管理
+
+### 3.2 数据文件（{table}.bin）
+
+存储单张表的行数据 + 表元数据。
 
 ```
 ┌────────────────────────────────────────────────────────┐
-│                 data.bin 文件布局                       │
+│              {table}.bin 文件布局                       │
 ├────────────────────────────────────────────────────────┤
 │  魔数 "MYDB" (4 bytes)                                  │
 │  版本号 (4 bytes)                                       │
-│  页大小/对齐要求 (4 bytes)                              │
-│  池总大小 (8 bytes)                                     │
 │  当前已用偏移 (8 bytes)                                 │
-│  表数量 (4 bytes)                                       │
 ├────────────────────────────────────────────────────────┤
-│  表目录数组 (struct table_entry[])                      │
-│    - 表名 (64 bytes)                                    │
-│    - 行大小 (4 bytes)                                   │
-│    - 行数量 (8 bytes)                                   │
-│    - 行数据区 offset (8 bytes)                          │
+│  表元数据区（offset 16）                                │
+│    - row_count (8 bytes)                                │
+│    - max_rowid (8 bytes)                                │
+│    - deleted_count (8 bytes)                            │
 ├────────────────────────────────────────────────────────┤
 │                    数据区域                             │
 │  ┌──────────────┐                                      │
-│  │  表 1 数据   │  struct user[]                       │
-│  │              │  连续存储，紧凑排列                   │
+│  │ row_header   │  rowid + flags                       │
+│  │ + row_data   │  struct user (紧凑排列)              │
 │  ├──────────────┤                                      │
-│  │  表 2 数据   │  struct order[]                      │
+│  │ row_header   │                                      │
+│  │ + row_data   │                                      │
 │  └──────────────┘                                      │
 ├────────────────────────────────────────────────────────┤
 │  空闲区（预留扩展）                                     │
 └────────────────────────────────────────────────────────┘
 ```
 
-### 3.2 索引文件（data.index）
+### 3.3 索引文件（{table}.index）
 
-存储所有索引结构，与数据文件一一对应。
+**零拷贝实现**：索引结构（hash buckets/nodes）直接存储在 mmap 文件中，使用 offset 寻址。
 
 ```
 ┌────────────────────────────────────────────────────────┐
-│                data.index 文件布局                      │
+│            {table}.index 文件布局                       │
 ├────────────────────────────────────────────────────────┤
-│  魔数 "MYIX" (4 bytes)                                  │
+│  魔数 "MYDB" (4 bytes)                                  │
 │  版本号 (4 bytes)                                       │
-│  对应数据文件 checksum (8 bytes)                        │
-│  索引数量 (4 bytes)                                     │
+│  当前已用偏移 (8 bytes)                                 │
 ├────────────────────────────────────────────────────────┤
-│  索引目录数组 (struct index_entry[])                    │
-│    - 表名 (64 bytes)                                    │
-│    - 字段偏移 (4 bytes)                                 │
-│    - 索引类型 (4 bytes)  1=哈希, 2=B+树                │
-│    - 索引数据区 offset (8 bytes)                        │
-├────────────────────────────────────────────────────────┤
-│                    索引数据区域                         │
+│  索引数据结构区（零拷贝）                               │
 │  ┌──────────────┐                                      │
-│  │ 主键索引     │  哈希表：rowid → 数据文件 offset     │
-│  │ (users.pk)   │  offset_t key, offset_t value        │
+│  │ hash_header  │  bucket_count + size + buckets_offset│
 │  ├──────────────┤                                      │
-│  │ age 索引     │  B+树：age → rowid 数组              │
-│  │ (users.age)  │                                      │
+│  │ buckets[]    │  指向 hash_node 的 offset 数组       │
 │  ├──────────────┤                                      │
-│  │ name 索引    │  哈希表：name → rowid                │
-│  │ (users.name) │                                      │
+│  │ hash_node    │  key_offset + key_len + value + next │
 │  ├──────────────┤                                      │
-│  │ 主键索引     │  哈希表：rowid → 数据文件 offset     │
-│  │ (orders.pk)  │                                      │
+│  │ key data     │  键数据（从 pool_alloc 分配）        │
 │  └──────────────┘                                      │
 └────────────────────────────────────────────────────────┘
+```
+
+**索引持久化：**
+- 原设计：索引使用 `void* data` 堆内存指针，关闭后丢失
+- 实际：索引数据在 `.index` mmap 中，使用 `size_t data_offset` 寻址
+- 重启后索引自动恢复，无需重建
+
+### 3.4 索引元数据文件（{table}.idxmeta）
+
+存储索引定义（字段名、类型、offset 等），与索引数据结构分离。
+
+```
+┌────────────────────────────────────────────────────────┐
+│           {table}.idxmeta 文件布局                      │
+├────────────────────────────────────────────────────────┤
+│  魔数 "MYDB" (4 bytes)                                  │
+│  版本号 (4 bytes)                                       │
+│  当前已用偏移 (8 bytes)                                 │
+├────────────────────────────────────────────────────────┤
+│  索引定义序列化区                                       │
+│    [index_count:4][index_defs...]                       │
+│    每个索引：[type:4][field_count:4][data_offset:8]     │
+│              [fields...][name]                          │
+└────────────────────────────────────────────────────────┘
+```
+
+**为什么分离？**
+- 原设计尝试将索引定义和索引数据混存在 `.index` 中
+- 实际发现：索引定义需要序列化/反序列化，而索引 hash 数据是纯二进制结构
+- 混存会导致索引元数据写入时覆盖 hash bucket 区域
+- 分离后：`.idxmeta` 管理定义，`.index` 管理零拷贝数据结构
+
+### 3.5 变长字符串池（{table}.strings）
+
+仅当表包含 `DB_TYPE_VARSTRING` 字段时创建。
+
+```
+┌────────────────────────────────────────────────────────┐
+│           {table}.strings 文件布局                      │
+├────────────────────────────────────────────────────────┤
+│  魔数 "MYDB" (4 bytes)                                  │
+│  版本号 (4 bytes)                                       │
+│  当前已用偏移 (8 bytes)                                 │
+├────────────────────────────────────────────────────────┤
+│  字符串数据区（变长，连续存储）                         │
+│    "Alice\0"                                            │
+│    "Bob\0"                                              │
+│    "这是一段很长的文章...\0"                            │
+└────────────────────────────────────────────────────────┘
+```
+
+**行中存储方式：**
+```c
+// 变长字符串在行中不存实际字符，存引用
+typedef struct {
+    size_t offset;   // 在 string_pool 中的偏移
+    size_t length;   // 字符串长度（不含 \0）
+} db_string_ref_t;
 ```
 
 ### 3.1 偏移寻址
@@ -318,11 +378,9 @@ void db_register_all_schemas(db_t db) {
 
 **运行时获取表句柄：**
 ```c
-db_t db = db_open("data.bin", "data.index", "wal.bin", 1024*1024*100);
-db_register_all_schemas(db);  // 编译时生成的注册函数
-
-table_t users  = db_table(db, "users");   // 按名称获取已注册表
-table_t orders = db_table(db, "orders");
+// 目录模式：db_dir 下自动创建所有表文件
+// 每张表生成：{table}.bin + {table}.index + {table}.idxmeta [+ {table}.strings]
+db_t db = db_open("game_data", 1024*1024*100);
 ```
 
 ### 5.2 数据库视角：透明行存储
@@ -352,7 +410,44 @@ struct row_header {
 };
 ```
 
-### 5.4 变长字段处理
+### 5.4 字符串类型（定长 vs 变长）
+
+**`DB_TYPE_STRING`**：定长字符串（`char[N]`）
+- 适合用户名、标题等短文本
+- 直接内联在行数据中
+- 最大长度由 `size` 参数指定
+
+**`DB_TYPE_VARSTRING`**：变长字符串（`char*`）
+- 适合文章、日志、URL 等任意长度文本
+- 行中存储 `db_string_ref_t {offset, length}` 引用
+- 实际字符数据存储在独立的 `{table}.strings` mmap 文件中
+- 零拷贝：字符串数据直接 mmap，无需序列化
+
+```c
+// 定长（C struct 中定义 char[N]）
+struct user {
+    uint64_t id;
+    char     name[32];      // 定长，最大 32 字节
+    int32_t  age;
+};
+
+// 变长（C struct 中定义 char*）
+struct article {
+    uint64_t id;
+    char*    title;         // 变长，任意长度
+    char*    content;       // 变长，任意长度
+};
+```
+
+**插入变长字符串：**
+```c
+struct article a = {0};
+a.title = "Hello World";
+a.content = "这是一段很长的文章内容...";
+db_insert(articles, &a, sizeof(a));  // 自动分配 string_pool 空间
+```
+
+### 5.5 变长字段处理（通用）
 
 如果需要变长数据（字符串、数组），有两种方式：
 
@@ -527,11 +622,9 @@ enum {
 };
 
 // ====== 数据库 ======
-// data_path: 数据文件路径 (.bin)
-// index_path: 索引文件路径 (.index)
-// wal_path: WAL 日志路径
-// pool_size: 初始内存池大小
-db_t db_open(const char* data_path, const char* index_path, const char* wal_path, size_t pool_size);
+// db_dir: 数据库目录路径（目录下自动管理所有表文件）
+// pool_size: 初始内存池大小（单表初始大小，自动扩展）
+db_t db_open(const char* db_dir, size_t pool_size);
 void db_close(db_t db);
 int  db_sync(db_t db);                    // 强制刷盘（等待后台完成）
 const char* db_errstr(db_t db);           // 最后错误信息
@@ -680,7 +773,7 @@ DB_TABLE(order, "orders",
 
 // ========== 3. 主程序 ==========
 int main() {
-    db_t db = db_open("data.bin", "data.index", "wal.bin", 1024*1024*100);
+    db_t db = db_open("game_data", 1024*1024*100);
     
     // 注册所有表（自动调用 DB_TABLE 生成的函数）
     db_register_user(db);
@@ -727,7 +820,7 @@ ffi.cdef[[
     typedef struct db_table*    table_t;
     typedef uint64_t rowid_t;
 
-    db_t db_open(const char* data_path, const char* index_path, const char* wal_path, size_t pool_size);
+    db_t db_open(const char* db_dir, size_t pool_size);
     void db_close(db_t db);
     table_t db_table(db_t db, const char* name);
     rowid_t db_insert(table_t table, const void* row, size_t row_size);
@@ -749,7 +842,7 @@ ffi.cdef[[
 ]]
 
 -- 打开数据库（Schema 已在 C 侧注册）
-local db = mydb.db_open("data.bin", "data.index", "wal.bin", 1024*1024*100)
+local db = mydb.db_open("game_data", 1024*1024*100)
 local users = mydb.db_table(db, "users")   -- 直接按名称获取
 
 -- INSERT: 插入数据（传入 C struct）
@@ -810,7 +903,7 @@ class User(Structure):
     ]
 
 # 打开数据库（Schema 已在 C 侧注册）
-db = mydb.db_open(b"data.bin", b"data.index", b"wal.bin", 1024*1024*100)
+db = mydb.db_open(b"game_data", 1024*1024*100)
 users = mydb.db_table(db, b"users")   # 直接按名称获取
 
 # INSERT: 插入（传入 C struct）
@@ -849,58 +942,72 @@ mydb.db_close(db)
 
 ## 7. 关键设计决策
 
-| 决策项 | 选择 | 理由 |
-|--------|------|------|
-| **定位** | 零拷贝嵌入式存储引擎 | 内存数据库，直接操作 struct，无网络、无序列化 |
-| Schema 定义 | **编译时宏自动生成** | `DB_TABLE` / `DB_FIELD` 宏自动计算 offset/size，无需运行时注册 |
-| 持久化机制 | mmap + 异步 msync | 零拷贝，内存布局 = 磁盘布局 |
-| 数据安全 | WAL 同步写入 | 每次写先 fsync WAL，再改内存 |
-| 主键 | 自增 uint64_t | 简单高效，FFI 兼容 |
-| 读取方式 | SELECT 返回 JSON 字符串 | 无需 FFI 侧定义 struct，直接解析 JSON |
- | 写入方式 | 传入 C struct 直接写入 | `db_insert()` / `db_update()` 零拷贝写入 |
-| 删除 | 软删除（标记位） | 避免内存碎片，定期 compact |
-| 索引 | 主键哈希 + 单列/复合 B+树 + 哈希 | 复合索引第一版即支持，简单高效 |
-| 内存分配 | Bump Allocator | 顺序分配，先不实现复杂回收 |
-| 并发 | **无锁，用户自行保证** | 类似 Redis，简单快速第一，用户自己管理并发 |
-| 查询优化 | **简单规则匹配**（第一版） | 复合索引优先 → 单列索引 → 全表扫描，无复杂成本估算 |
-| 变长字段 | offset 指向池中 | 字符串/数组等大字段外置 |
-| 结构体对齐 | `__attribute__((packed))` 或自然对齐 | FFI 两侧必须一致 |
+| 决策项 | 原设计 | 实际实现 | 变更理由 |
+|--------|--------|----------|----------|
+| **定位** | 零拷贝嵌入式存储引擎 | 同上 | 内存数据库，直接操作 struct，无网络、无序列化 |
+| **存储架构** | 单文件双池（`data.bin` + `data.index`） | **多文件目录模式**（每表独立 `.bin` + `.index` + `.idxmeta`） | 单表 compact 不影响其他表，独立扩展 |
+| **Schema 定义** | 编译时宏自动生成 | 同上 + **动态注册**（LuaJIT/Python 纯脚本） | `DB_TABLE` 宏自动计算 offset/size，脚本层无需 C struct |
+| **持久化机制** | mmap + 异步 msync | **mmap + 同步 msync** (`MS_SYNC`) | 确保数据真正落盘，避免 msync 假异步 |
+| **数据安全** | WAL 同步写入 | 同上 | 每次写先 fsync WAL，再改内存 |
+| **主键** | 自增 uint64_t | 同上 | 简单高效，FFI 兼容 |
+| **读取方式** | SELECT 返回 JSON 字符串 | 同上 | 无需 FFI 侧定义 struct，直接解析 JSON |
+| **写入方式** | 传入 C struct 直接写入 | 同上 | `db_insert()` / `db_update()` 零拷贝写入 |
+| **删除** | 软删除（标记位） | 同上 + **Free List 复用** | 避免内存碎片，删除的 rowid 优先复用 |
+| **内存回收** | 手动 `db_table_compact()` | **自动 compact**（删除率 ≥ 30% 触发） | 自动回收，用户无感知 |
+| **索引** | 堆内存指针（重启丢失） | **mmap 零拷贝 offset**（重启保留） | 真正的零拷贝，重启无需重建 |
+| **索引元数据** | 与索引数据混存 | **独立 `.idxmeta` 文件** | 避免元数据覆盖索引 hash 结构 |
+| **JOIN 算法** | 纯嵌套循环 O(L×R) | **Hash Join** + 嵌套循环 fallback | 自动检测右表索引，性能提升 orders of magnitude |
+| **内存分配** | Bump Allocator（只增不减） | Bump Allocator + **Free List** | 顺序分配 + 空闲复用 |
+| **并发** | **无锁，用户自行保证** | 同上 | 类似 Redis，简单快速第一 |
+| **查询优化** | 简单规则匹配 | 同上 | 复合索引优先 → 单列索引 → 全表扫描 |
+| **字符串类型** | 仅 `DB_TYPE_STRING`（定长） | 定长 `STRING` + **变长 `VARSTRING`** | 支持任意长度文本，独立 `.strings` 文件 |
+| **变长字段** | offset 指向池中（手动管理） | **自动 string_pool**（独立 mmap） | 透明管理，零拷贝 |
+| **结构体对齐** | `__attribute__((packed))` 或自然对齐 | 自然对齐 | FFI 两侧必须一致 |
 
 ## 8. 目录结构
 
 ```
 my_db/
-├── design.md           # 本文件
-├── README.md
+├── design.md              # 本文件（设计方案）
+├── README.md              # 项目说明
+├── ARCHITECTURE_CHANGES.md # 架构变更记录（原设计 vs 实际实现）
+├── task.md                # 开发任务列表
 ├── LICENSE
 ├── Makefile
+├── .gitignore
+├── mydb.lua               # LuaJIT FFI 高级封装（推荐）
+├── mydb.py                # Python ctypes 高级封装
 ├── include/
-│   └── mydb.h          # 公共头文件（FFI 依赖）
+│   ├── mydb.h             # 公共头文件（FFI 依赖）
+│   └── mydb_internal.h    # 内部头文件（零拷贝索引、变长字符串等）
 ├── src/
 │   ├── core/
-│   │   ├── db.c              # 数据库生命周期、WAL
-│   │   ├── table.c           # 表操作（struct 数组管理）
-│   │   ├── pool.c            # mmap 内存池管理
-│   │   └── query.c           # 查询优化器（简单规则）
+│   │   ├── db.c           # 数据库生命周期（多文件目录模式）
+│   │   ├── table.c        # 表操作（Free List + Compact）
+│   │   └── query.c        # 查询引擎（Hash Join + 索引优化）
 │   ├── types/
-│   │   ├── vector.c          # 动态数组（池中用）
-│   │   ├── hash.c            # 哈希表（主键索引）
-│   │   ├── btree.c           # B+树（二级索引）
-│   │   └── composite_index.c # 复合索引（多列联合索引）
+│   │   ├── hash.c         # 哈希表（零拷贝 mmap 索引）
+│   │   └── btree.c        # B+树（二级索引，待零拷贝改造）
 │   ├── storage/
-│   │   ├── wal.c             # WAL 日志读写
-│   │   └── mmap.c            # mmap 封装
+│   │   ├── wal.c          # WAL 日志读写
+│   │   └── mmap.c         # mmap 封装（pool 管理）
 │   └── utils/
-│       ├── crc32.c           # 校验和
-│       └── error.c           # 错误处理
-├── tests/
-│   ├── test_basic.c    # 基础功能测试
-│   ├── test_wal.c      # WAL 恢复测试
-│   └── test_ffi.lua    # LuaJIT FFI 测试
-└── examples/
-    ├── example.c       # C 示例（定义 struct user）
-    ├── example.lua     # LuaJIT 示例
-    └── example.py      # Python 示例
+│       ├── crc32.c        # 校验和
+│       ├── error.c        # 错误处理
+│       └── json.c         # JSON 序列化（支持 VARSTRING）
+├── examples/
+│   ├── example_dynamic.lua # LuaJIT 动态示例（推荐）
+│   ├── example_dynamic.py  # Python 动态示例
+│   └── example.c          # C 示例（编译时 Schema）
+└── tests/
+    ├── test_basic.c       # 基础功能测试
+    ├── test_join.c        # JOIN 测试（Hash Join + 嵌套循环）
+    ├── test_perf.c        # 性能测试
+    ├── test_edge.c        # 边界情况测试
+    ├── test_composite.c   # 复合索引测试
+    ├── test_wal.c         # WAL + Checkpoint 测试
+    ├── test_ffi.lua       # LuaJIT FFI 测试
+    └── test_ffi.py        # Python ctypes 测试
 ```
 
 ## 9. 并发设计：无锁，用户自行保证
