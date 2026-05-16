@@ -359,7 +359,7 @@ class Table:
         return _lib.db_table_count(self._ptr)
     
     def create_index(self, field_name):
-        """创建索引"""
+        """创建单列索引"""
         field = self._layout['field_map'].get(field_name)
         if not field:
             raise ValueError(f"Unknown field: {field_name}")
@@ -367,6 +367,28 @@ class Table:
             self._ptr, field_name.encode('utf-8'),
             field['offset'], TYPE_MAP[field['type']]
         )
+    
+    def create_index_composite(self, field_names):
+        """创建复合索引
+        
+        field_names: ["field1", "field2", ...] — 最多 4 个字段
+        """
+        if not field_names or len(field_names) == 0:
+            raise ValueError("Composite index requires a non-empty list of field names")
+        if len(field_names) > 4:
+            raise ValueError("Composite index supports up to 4 fields")
+        
+        cfields = (db_field_def_t * len(field_names))()
+        for i, fname in enumerate(field_names):
+            field = self._layout['field_map'].get(fname)
+            if not field:
+                raise ValueError(f"Unknown field: {fname}")
+            cfields[i].name = fname.encode('utf-8')
+            cfields[i].offset = field['offset']
+            cfields[i].size = field['size']
+            cfields[i].type = TYPE_MAP[field['type']]
+        
+        return _lib.db_table_add_index_composite(self._ptr, cfields, len(field_names))
 
 
 class DB:
@@ -376,10 +398,11 @@ class DB:
         self._ptr = ptr
         self._tables = {}
     
-    def register(self, name, schema):
+    def register(self, name, schema, indexes=None):
         """注册表
         
         schema: [{name: str, type: str, size?: int}, ...]
+        indexes: ["field_name", ["field1", "field2"], ...] — 可选，自动创建索引
         """
         fields, row_size = _compute_layout(schema)
         
@@ -406,7 +429,19 @@ class DB:
         }
         
         self._tables[name] = layout
-        return Table(ptr, layout, name)
+        table = Table(ptr, layout, name)
+        
+        # 自动创建索引（如果指定了）
+        if indexes:
+            for idx in indexes:
+                if isinstance(idx, str):
+                    # 单列索引
+                    table.create_index(idx)
+                elif isinstance(idx, (list, tuple)):
+                    # 复合索引
+                    table.create_index_composite(idx)
+        
+        return table
     
     def table(self, name):
         """获取已注册的表"""

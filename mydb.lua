@@ -290,11 +290,34 @@ function Table:create_index(field_name)
     return _lib.db_table_add_index(self._ptr, field_name, field.offset, TYPE_MAP[field.type])
 end
 
+function Table:create_index_composite(field_names)
+    if type(field_names) ~= "table" or #field_names == 0 then
+        error("Composite index requires a non-empty array of field names")
+    end
+    if #field_names > 4 then
+        error("Composite index supports up to 4 fields")
+    end
+    
+    local cfields = ffi.new("db_field_def_t[?]", #field_names)
+    for i, fname in ipairs(field_names) do
+        local field = self._layout.field_map[fname]
+        if not field then
+            error("Unknown field: " .. tostring(fname))
+        end
+        cfields[i-1].name = fname
+        cfields[i-1].offset = field.offset
+        cfields[i-1].size = field.size
+        cfields[i-1].type = TYPE_MAP[field.type]
+    end
+    
+    return _lib.db_table_add_index_composite(self._ptr, cfields, #field_names)
+end
+
 -- DB 对象
 local DB = {}
 DB.__index = DB
 
-function DB:register(name, schema)
+function DB:register(name, schema, indexes)
     local fields, row_size = compute_layout(schema)
     
     local cfields = ffi.new("db_field_def_t[?]", #fields)
@@ -329,6 +352,19 @@ function DB:register(name, schema)
         _layout = layout,
         _name = name,
     }, Table)
+    
+    -- 自动创建索引（如果指定了）
+    if indexes then
+        for _, idx in ipairs(indexes) do
+            if type(idx) == "string" then
+                -- 单列索引
+                table_obj:create_index(idx)
+            elseif type(idx) == "table" then
+                -- 复合索引
+                table_obj:create_index_composite(idx)
+            end
+        end
+    end
     
     return table_obj
 end

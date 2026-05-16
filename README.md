@@ -144,15 +144,20 @@ local db = mydb.open("game_data.bin")
 ### 3. 注册表（纯 Lua 动态定义 Schema）
 
 ```lua
+-- 注册表时同时指定索引：
+-- 字符串 = 单列索引，表 = 复合索引
 local users = db:register("users", {
     {name = "id",    type = "uint64"},
     {name = "name",  type = "string", size = 32},
     {name = "age",   type = "int32"},
     {name = "score", type = "double"},
+}, {
+    "name",                    -- 单列索引
+    {"name", "age"},           -- 复合索引（name + age）
 })
 ```
 
-**无需 C struct**：封装层自动计算偏移和对齐
+**无需 C struct**：封装层自动计算偏移和对齐，索引在注册时自动创建并维护
 
 ### 4. 完整生命周期示例
 
@@ -166,25 +171,25 @@ local db = mydb.open("game_data.bin")
 
 -- ═══════════════════════════════════════════════════════
 -- 2. 注册 Schema（纯 Lua 动态定义，无需 C struct）
+--    第三个参数是索引列表：字符串=单列，表=复合
 -- ═══════════════════════════════════════════════════════
 local users = db:register("users", {
     {name = "id",     type = "uint64"},        -- 第一字段必须是 uint64 id
     {name = "name",   type = "string", size = 32},
     {name = "age",    type = "int32"},
     {name = "score",  type = "double"},
+}, {
+    "name",                    -- 单列索引（name 字段）
+    {"name", "age"},           -- 复合索引（name + age）
 })
 
 local orders = db:register("orders", {
     {name = "id",      type = "uint64"},
     {name = "user_id", type = "uint64"},       -- 外键，关联 users.id
     {name = "amount",  type = "double"},
+}, {
+    "user_id",                 -- 单列索引（user_id 字段）
 })
-
--- ═══════════════════════════════════════════════════════
--- 3. 创建索引
--- ═══════════════════════════════════════════════════════
-users:create_index("name")   -- 单列索引（name 字段）
-orders:create_index("user_id")
 
 -- ═══════════════════════════════════════════════════════
 -- 4. 插入数据（Lua 表自动序列化为 C 内存）
@@ -300,31 +305,27 @@ db:close()                                     -- 关闭数据库
 db:max_rows(50000)                             -- 设置最大返回行数（默认 10000）
 ```
 
-### Schema 注册（动态）
+### Schema 注册（动态，含索引）
 
 ```lua
+-- 注册表时同时指定索引（第三个参数）
+-- 字符串 = 单列索引，表 = 复合索引
 local users = db:register("users", {
     {name = "id",    type = "uint64"},        -- 第一字段必须是 uint64 id
     {name = "name",  type = "string", size = 32},
     {name = "age",   type = "int32"},
     {name = "score", type = "double"},
+}, {
+    "name",                    -- 单列索引
+    {"name", "age"},           -- 复合索引（最多 4 个字段）
 })
 
 -- 支持的类型：int32, int64, uint64, float, double, string, bool
 -- string 需指定 size（最大长度）
-```
 
-### 索引
-
-```lua
-users:create_index("name")           -- 单列索引
-users:create_index("age")            -- 数值索引（自动用 B+树）
-
--- 复合索引（name + age）
-orders:create_index_composite({
-    {name = "user_id", type = "uint64"},
-    {name = "amount",  type = "double"},
-})
+-- 后续手动创建索引（如果注册时没指定）
+users:create_index("score")
+users:create_index_composite({"age", "score"})
 ```
 
 ### CRUD
