@@ -1,6 +1,9 @@
 #define _GNU_SOURCE
 #include "mydb_internal.h"
 
+// 文件头格式：[魔数:4][版本:4][used:8]
+#define POOL_HEADER_SIZE 16
+
 int pool_init(db_pool_t* pool, const char* path, size_t initial_size) {
     memset(pool, 0, sizeof(db_pool_t));
     
@@ -17,6 +20,9 @@ int pool_init(db_pool_t* pool, const char* path, size_t initial_size) {
     bool is_new = (file_size == 0);
     
     if (is_new) {
+        if (initial_size < POOL_HEADER_SIZE + 1024) {
+            initial_size = POOL_HEADER_SIZE + 1024;
+        }
         if (ftruncate(fd, initial_size) < 0) {
             close(fd);
             return -1;
@@ -37,10 +43,28 @@ int pool_init(db_pool_t* pool, const char* path, size_t initial_size) {
     
     if (is_new) {
         memset(base, 0, file_size);
-        pool->used = 0;
+        // 写入文件头
+        memcpy(base, MYDB_MAGIC_DATA, 4);
+        *(uint32_t*)((char*)base + 4) = MYDB_VERSION;
+        *(size_t*)((char*)base + 8) = POOL_HEADER_SIZE;
+        pool->used = POOL_HEADER_SIZE;
     } else {
-        // 读取已用大小（存储在文件头）
-        pool->used = *(size_t*)((char*)base + 8); // 偏移 8 是 used 字段
+        // 验证文件头
+        if (memcmp(base, MYDB_MAGIC_DATA, 4) != 0) {
+            munmap(base, file_size);
+            close(fd);
+            return -1;
+        }
+        uint32_t version = *(uint32_t*)((char*)base + 4);
+        if (version != MYDB_VERSION) {
+            munmap(base, file_size);
+            close(fd);
+            return -1;
+        }
+        pool->used = *(size_t*)((char*)base + 8);
+        if (pool->used < POOL_HEADER_SIZE) {
+            pool->used = POOL_HEADER_SIZE;
+        }
     }
     
     return 0;

@@ -95,6 +95,18 @@ int db_wal_replay(db_t db) {
     return wal_replay(&inst->wal, inst);
 }
 
+int db_checkpoint(db_t db) {
+    if (!db) return DB_ERR_INVAL;
+    db_instance_t* inst = (db_instance_t*)db;
+    
+    // 1. 刷盘所有数据
+    int ret = db_sync(db);
+    if (ret < 0) return ret;
+    
+    // 2. 清空 WAL
+    return wal_checkpoint(&inst->wal);
+}
+
 size_t db_compact(db_t db) {
     if (!db) return 0;
     db_instance_t* inst = (db_instance_t*)db;

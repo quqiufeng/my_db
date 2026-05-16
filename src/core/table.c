@@ -28,6 +28,7 @@ table_t db_table_register(db_t db, const char* name, size_t row_size,
     table->row_size = row_size;
     table->row_stride = ((sizeof(row_header_t) + row_size + MYDB_ALIGN - 1) / MYDB_ALIGN) * MYDB_ALIGN;
     table->data_pool = &inst->data_pool;
+    table->db = inst;
     
     // 复制字段定义
     table->fields = (db_field_def_t*)malloc(sizeof(db_field_def_t) * field_count);
@@ -50,6 +51,12 @@ table_t db_table_register(db_t db, const char* name, size_t row_size,
     table->data_offset = OFF(inst->data_pool.base, reserved);
     
     inst->tables[inst->table_count++] = table;
+    
+    // 自动为主键创建索引（第一字段是 uint64_t 且 offset 为 0）
+    if (field_count > 0 && fields[0].type == DB_TYPE_UINT64 && fields[0].offset == 0) {
+        index_create(table, "id", fields[0].offset, fields[0].type);
+    }
+    
     return table;
 }
 
@@ -156,6 +163,11 @@ rowid_t db_insert(table_t table, const void* row, size_t row_size) {
     void* row_ptr = (char*)ptr + sizeof(row_header_t);
     index_insert(t, id, row_ptr);
     
+    // 写 WAL
+    if (t->db) {
+        wal_append(&t->db->wal, 1, t->name, row_ptr, row_size, id);
+    }
+    
     return id;
 }
 
@@ -196,6 +208,11 @@ int db_update(table_t table, rowid_t id, const void* row, size_t row_size) {
     // 插入新索引
     index_insert(t, id, old_row);
     
+    // 写 WAL
+    if (t->db) {
+        wal_append(&t->db->wal, 2, t->name, old_row, t->row_size, id);
+    }
+    
     return DB_OK;
 }
 
@@ -213,6 +230,11 @@ int db_delete(table_t table, rowid_t id) {
     // 删除索引
     void* row_ptr = (char*)header + sizeof(row_header_t);
     index_delete(t, id, row_ptr);
+    
+    // 写 WAL
+    if (t->db) {
+        wal_append(&t->db->wal, 3, t->name, NULL, 0, id);
+    }
     
     header->flags |= MYDB_DELETED_FLAG;
     t->row_count--;

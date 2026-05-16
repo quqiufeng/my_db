@@ -85,6 +85,7 @@ typedef struct db_table {
     size_t          field_count;
     db_index_t*     indexes;        // 索引链表
     db_pool_t*      data_pool;      // 数据文件 mmap
+    struct db_instance* db;         // 指向数据库实例（用于访问配置）
 } db_table_t;
 
 // ====== 数据库实例 ======
@@ -117,6 +118,7 @@ int wal_append(db_wal_t* wal, int op, const char* table_name,
                const void* row_data, size_t row_size, rowid_t rowid);
 int wal_replay(db_wal_t* wal, db_instance_t* db);
 int wal_fsync(db_wal_t* wal);
+int wal_checkpoint(db_wal_t* wal);
 
 // ====== 哈希表操作 ======
 void* hash_create(void);

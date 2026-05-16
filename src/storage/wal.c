@@ -91,6 +91,20 @@ int wal_fsync(db_wal_t* wal) {
     return fsync(wal->fd);
 }
 
+int wal_checkpoint(db_wal_t* wal) {
+    if (!wal || wal->fd < 0) return -1;
+    
+    // Checkpoint：清空 WAL 文件
+    // 数据已经通过 db_sync 刷盘，WAL 不再需要
+    if (ftruncate(wal->fd, 0) < 0) {
+        return -1;
+    }
+    lseek(wal->fd, 0, SEEK_SET);
+    wal->lsn = 0;
+    
+    return fsync(wal->fd);
+}
+
 int wal_replay(db_wal_t* wal, db_instance_t* db) {
     if (!wal || wal->fd < 0 || !db) return -1;
     

@@ -158,10 +158,10 @@ static int sort_compare(const void* a, const void* b) {
 }
 
 static rowid_t* query_internal(db_table_t* table,
-                                const db_condition_t* conditions, size_t condition_count,
-                                size_t order_field_offset, int ascending __attribute__((unused)),
-                                size_t limit_offset, size_t limit_count,
-                                size_t* out_count) {
+                                 const db_condition_t* conditions, size_t condition_count,
+                                 size_t order_field_offset, int ascending __attribute__((unused)),
+                                 size_t limit_offset, size_t limit_count,
+                                 size_t* out_count) {
     if (!table) {
         *out_count = 0;
         return NULL;
@@ -190,6 +190,17 @@ static rowid_t* query_internal(db_table_t* table,
                 }
                 
                 free(index_results);
+                
+                // max_rows 限制检查
+                if (table->db && filtered_count > table->db->max_rows) {
+                    free(filtered);
+                    *out_count = 0;
+                    db_set_error(table->db, DB_ERR_RESULT_TOO_LARGE,
+                                 "query returned %zu rows, exceeds max_rows=%zu",
+                                 filtered_count, table->db->max_rows);
+                    return NULL;
+                }
+                
                 *out_count = filtered_count;
                 return filtered;
             }
@@ -263,6 +274,16 @@ static rowid_t* query_internal(db_table_t* table,
             memmove(results, results + start, new_count * sizeof(rowid_t));
         }
         match_count = new_count;
+    }
+    
+    // max_rows 限制检查
+    if (table->db && match_count > table->db->max_rows) {
+        free(results);
+        *out_count = 0;
+        db_set_error(table->db, DB_ERR_RESULT_TOO_LARGE, 
+                     "query returned %zu rows, exceeds max_rows=%zu", 
+                     match_count, table->db->max_rows);
+        return NULL;
     }
     
     *out_count = match_count;

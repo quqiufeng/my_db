@@ -85,9 +85,9 @@ int main() {
     {
         db_config_max_rows(db, 0); // 设置 max_rows = 0
         const char* json = db_select_all_json(users);
-        // max_rows = 0 应该返回空数组或者截断为0行
-        CHECK(json != NULL, "max_rows=0 查询不崩溃");
-        db_json_free(json);
+        // max_rows = 0 应该返回 NULL（DB_ERR_RESULT_TOO_LARGE）
+        CHECK(json == NULL, "max_rows=0 返回 NULL（超限）");
+        if (json) db_json_free(json);
         db_config_max_rows(db, 10000); // 恢复
     }
     
