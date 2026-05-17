@@ -1,6 +1,10 @@
 CC = gcc
 CFLAGS = -Wall -Wextra -O2 -fPIC -I./include
 LDFLAGS = -shared
+ONNX_CFLAGS = -I/opt/piper-src/build/p/src/piper_phonemize_external/lib/onnxruntime-linux-x64-1.14.1/include
+
+ONNX_LIB = /opt/piper-src/build/p/src/piper_phonemize_external/lib/onnxruntime-linux-x64-1.14.1/lib
+ONNX_LDFLAGS = -L$(ONNX_LIB) -lonnxruntime -Wl,-rpath,$(ONNX_LIB)
 
 SRC_DIR = src
 OBJ_DIR = obj
@@ -120,8 +124,8 @@ $(TEST_HTTP_SERVER): $(TEST_DIR)/test_http_server.c $(LIB)
 $(TEST_HNSW): $(TEST_DIR)/test_hnsw.c $(LIB)
 	$(CC) $(CFLAGS) -o $@ $< -L. -lmydb -lm -Wl,-rpath,.
 
-$(IMPORT_BOOK): $(TOOLS_DIR)/import_book.c $(LIB)
-	$(CC) $(CFLAGS) -o $@ $< -L. -lmydb -Wl,-rpath,.
+$(IMPORT_BOOK): $(TOOLS_DIR)/import_book.c $(SRC_DIR)/embedding/onnx_embedder.c $(LIB)
+	$(CC) $(CFLAGS) $(ONNX_CFLAGS) -o $@ $(TOOLS_DIR)/import_book.c $(SRC_DIR)/embedding/onnx_embedder.c -L. -lmydb $(ONNX_LDFLAGS) -lm -Wl,-rpath,.
 
 $(CACHE_SERVER): $(TOOLS_DIR)/cache_server.c $(LIB)
 	$(CC) $(CFLAGS) -o $@ $< -L. -lmydb -Wl,-rpath,.
@@ -143,5 +147,5 @@ install: $(LIB)
 	@echo "Library: $(LIBDIR)/$(LIB)"
 	@echo "Header:  $(INCLUDEDIR)/mydb.h"
 
-	clean:
+clean:
 	rm -rf $(OBJ_DIR) $(LIB) $(TEST_BASIC) $(TEST_JOIN) $(TEST_PERF) $(TEST_EDGE) $(TEST_COMPOSITE) $(TEST_WAL) $(TEST_CACHE) $(TEST_CACHE_FULL) $(TEST_HTTP_SERVER) $(TEST_HNSW) $(IMPORT_BOOK) $(CACHE_HTTP_SERVER) $(EXAMPLE_C) *.bin *.index test_cache_dir test_cache_lru

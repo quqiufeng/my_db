@@ -36,3 +36,5 @@ __pycache__/
 
 # Importer libs (compiled locally)
 src/importer/libs/*.so
+models/
+*.onnx

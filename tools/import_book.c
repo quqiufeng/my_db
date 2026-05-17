@@ -1,8 +1,13 @@
 #include "cache.h"
+#include "onnx_embedder.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <dlfcn.h>
+
+// Global embedder instance (initialized in main)
+static onnx_embedder_t* g_embedder = NULL;
+static int g_embedding_dim = 384;
 
 // 章节信息结构（必须与 wrapper 中完全一致）
 // MOBI wrapper: struct MobiChapter { char* title; int level; size_t offset; }
@@ -188,6 +193,23 @@ static int import_chapter(cache_t* cache, const char* chapter_ns,
         if (ret != CACHE_OK) {
             printf("    Failed to set paragraph %d: %d\n", idx, ret);
         }
+        
+        // Generate and store vector embedding
+        if (g_embedder) {
+            float* vector = malloc(sizeof(float) * g_embedding_dim);
+            if (vector) {
+                if (onnx_embedder_encode(g_embedder, paragraphs[i], vector) == 0) {
+                    int vret = cache_set_vector(cache, key, value, vector, g_embedding_dim, 0);
+                    if (vret != CACHE_OK) {
+                        printf("    Failed to set vector for paragraph %d: %d\n", idx, vret);
+                    }
+                } else {
+                    printf("    Embedding failed for paragraph %d: %s\n", idx, onnx_embedder_error());
+                }
+                free(vector);
+            }
+        }
+        
         total_paragraphs++;
         idx++;
     }
@@ -227,8 +249,6 @@ static int import_book_chapters(cache_t* cache, const char* namespace,
     printf("Importing %d chapters...\n", chapter_count);
     
     int total_paragraphs = 0;
-    
-    printf("DEBUG: Starting chapter loop\n");
     
     if (chapter_count <= 1) {
         // 没有章节信息，整本书作为一个章节
@@ -304,14 +324,11 @@ static int import_book_chapters(cache_t* cache, const char* namespace,
                 }
             }
             
-            printf("DEBUG: Importing chapter %d/%d: %s\n", i+1, chapter_count, chapters[i].title);
-            total_paragraphs += import_chapter(cache, chapter_ns, chapters[i].title, 
+            total_paragraphs += import_chapter(cache, chapter_ns, chapters[i].title,
                                                   chapter_text, chapter_len);
-            printf("DEBUG: Chapter %d done\n", i+1);
         }
     }
     
-    printf("DEBUG: All chapters done\n");
     return total_paragraphs;
 }
 
@@ -364,6 +381,18 @@ int main(int argc, char* argv[]) {
     }
     
     printf("Cache opened: %s\n", cache_dir);
+    
+    // Initialize ONNX embedder for vector generation
+    const char* model_path = getenv("EMBEDDING_MODEL") ? getenv("EMBEDDING_MODEL") : "models/all-MiniLM-L6-v2/model.onnx";
+    const char* vocab_path = getenv("EMBEDDING_VOCAB") ? getenv("EMBEDDING_VOCAB") : "models/all-MiniLM-L6-v2/vocab.txt";
+    
+    g_embedder = onnx_embedder_init(model_path, vocab_path, 128, 384);
+    if (g_embedder) {
+        printf("Embedding model loaded: %s\n", model_path);
+    } else {
+        printf("Warning: Failed to load embedding model (%s), continuing without vectors\n",
+               onnx_embedder_error());
+    }
     printf("Importing: %s\n", book_path);
     
     // 生成 namespace
@@ -518,6 +547,12 @@ int main(int argc, char* argv[]) {
     
     cache_sync(cache);
     cache_close(cache);
+    
+    // Cleanup embedder
+    if (g_embedder) {
+        onnx_embedder_free(g_embedder);
+        g_embedder = NULL;
+    }
     
     return 0;
 }
