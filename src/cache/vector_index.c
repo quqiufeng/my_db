@@ -188,34 +188,44 @@ int cache_set_vector(cache_t* cache, const char* key, const char* value,
         return CACHE_ERR_INVAL;
     }
     
-    // 分配向量数据到pool
+    // 先存储普通 value，确保 entry 创建成功
+    int ret = cache_set(cache, key, value, ttl_ms);
+    if (ret != CACHE_OK) return ret;
+    
+    // 获取刚插入的 entry offset
+    size_t entry_offset = cache_hash_lookup(cache, key, strlen(key));
+    if (!entry_offset) return CACHE_ERR_IO;
+    
+    // 分配向量数据到 pool
     size_t vector_offset = alloc_vector_data(cache, vector, dim);
     if (!vector_offset) return CACHE_ERR_NOMEM;
     
-    // 构建包含向量元数据的value
-    size_t meta_len = snprintf(NULL, 0, "{\"__vector_offset\":%zu,\"__vector_dim\":%zu,\"content\":", 
-                                vector_offset, dim);
+    // 构建包含向量元数据的 value
+    size_t meta_len = snprintf(NULL, 0, "{\"__vector_offset\":%zu,\"__vector_dim\":%zu,\"content\":"
+                                , vector_offset, dim);
     size_t value_len = strlen(value);
     size_t total_value_len = meta_len + value_len + 2;  // +2 for closing }
     
     char* new_value = malloc(total_value_len + 1);
     if (!new_value) return CACHE_ERR_NOMEM;
     
-    snprintf(new_value, total_value_len + 1, 
+    snprintf(new_value, total_value_len + 1,
              "{\"__vector_offset\":%zu,\"__vector_dim\":%zu,\"content\":%s}",
              vector_offset, dim, value);
     
-    // 设置到cache
-    int ret = cache_set(cache, key, new_value, ttl_ms);
+    // 更新 entry 的 value（包含向量元数据）
+    ret = cache_set(cache, key, new_value, ttl_ms);
     free(new_value);
     
     if (ret == CACHE_OK) {
-        // 获取刚插入的entry offset
-        size_t entry_offset = cache_hash_lookup(cache, key, strlen(key));
+        // 重新获取 entry_offset（更新后可能变化）
+        entry_offset = cache_hash_lookup(cache, key, strlen(key));
         if (entry_offset) {
             cache_vector_index_add(cache, entry_offset, vector, dim);
         }
     }
+    // 如果第二次 cache_set 失败，向量数据仍在 pool 中（孤儿数据），
+    // 将在下次 compact 时回收。这是 pool 分配器的限制。
     
     return ret;
 }

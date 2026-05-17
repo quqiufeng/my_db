@@ -153,7 +153,10 @@ static size_t hot_cache_lookup(cache_t* cache, const char* key, size_t key_len) 
 }
 
 // 使用 Hash 索引查找 key（优先查 hot cache）
-static cache_entry_t* cache_find_entry(cache_t* cache, const char* key) {
+// out_entry: 调用者提供栈上的 cache_entry_t，避免堆分配
+static int cache_find_entry(cache_t* cache, const char* key, cache_entry_t* out_entry) {
+    if (!cache || !key || !out_entry) return 0;
+    
     size_t key_len = strlen(key);
     uint64_t now = cache_now_ms();
     
@@ -163,20 +166,19 @@ static cache_entry_t* cache_find_entry(cache_t* cache, const char* key) {
     // 2. 再查 Hash 索引
     if (!offset) {
         offset = cache_hash_lookup(cache, key, key_len);
-        if (!offset) return NULL;
+        if (!offset) return 0;
     }
     
     cache_entry_header_t* header = (cache_entry_header_t*)CACHE_PTR(cache, offset);
     
     // 检查是否已删除
-    if (header->flags & CACHE_ENTRY_DELETED) return NULL;
+    if (header->flags & CACHE_ENTRY_DELETED) return 0;
     
     // 检查是否过期
-    if (header->expire_at > 0 && header->expire_at < now) return NULL;
+    if (header->expire_at > 0 && header->expire_at < now) return 0;
     
-    cache_entry_t* entry = malloc(sizeof(cache_entry_t));
-    cache_entry_parse(cache, offset, entry);
-    return entry;
+    cache_entry_parse(cache, offset, out_entry);
+    return 1;
 }
 
 #include <sys/stat.h>
@@ -348,6 +350,8 @@ int cache_set(cache_t* cache, const char* key, const char* value, uint64_t ttl_m
         } evict_candidate_t;
         
         // 一次性扫描所有条目
+        if (cache->entry_count == 0) return CACHE_ERR_NOMEM;
+        
         evict_candidate_t* candidates = malloc(sizeof(evict_candidate_t) * cache->entry_count);
         if (!candidates) return CACHE_ERR_NOMEM;
         
@@ -382,15 +386,20 @@ int cache_set(cache_t* cache, const char* key, const char* value, uint64_t ttl_m
             return CACHE_ERR_NOMEM;  // 没有可淘汰的条目
         }
         
-        // 按 access_time 排序（升序，最老的在前）— 使用 qsort
-        // 简单的冒泡/插入排序，因为 candidate_count 不大（最多淘汰几百个）
+        // 按 access_time 排序（升序，最老的在前）
+        // 使用简单选择排序（O(n²)，但 candidate_count 通常 < 1000，实际很快）
+        // 注意：evict_candidate_t 定义在函数内部，无法使用 qsort（需要文件级比较函数）
         for (size_t i = 0; i < candidate_count - 1; i++) {
+            size_t min_idx = i;
             for (size_t j = i + 1; j < candidate_count; j++) {
-                if (candidates[j].access_time < candidates[i].access_time) {
-                    evict_candidate_t tmp = candidates[i];
-                    candidates[i] = candidates[j];
-                    candidates[j] = tmp;
+                if (candidates[j].access_time < candidates[min_idx].access_time) {
+                    min_idx = j;
                 }
+            }
+            if (min_idx != i) {
+                evict_candidate_t tmp = candidates[i];
+                candidates[i] = candidates[min_idx];
+                candidates[min_idx] = tmp;
             }
         }
         
@@ -464,6 +473,9 @@ int cache_set(cache_t* cache, const char* key, const char* value, uint64_t ttl_m
             // 从 tag 索引中移除
             const char* old_value = (const char*)CACHE_PTR(cache, old_offset + sizeof(cache_entry_header_t) + old_header->key_len + 1);
             cache_tag_index_remove(cache, old_offset, old_value, old_header->value_len);
+            
+            // 从向量索引中移除
+            cache_vector_index_remove(cache, old_offset);
             
             // 从 hot cache 中移除
             hot_cache_invalidate(cache, key, key_len);
@@ -647,17 +659,17 @@ const char* cache_get(cache_t* cache, const char* key) {
 int cache_del(cache_t* cache, const char* key) {
     if (!cache || !key) return CACHE_ERR_INVAL;
     
-    cache_entry_t* entry = cache_find_entry(cache, key);
-    if (!entry) return CACHE_ERR_NOENT;
+    cache_entry_t entry;
+    if (!cache_find_entry(cache, key, &entry)) return CACHE_ERR_NOENT;
     
-    cache_entry_header_t* header = (cache_entry_header_t*)CACHE_PTR(cache, entry->offset);
+    cache_entry_header_t* header = (cache_entry_header_t*)CACHE_PTR(cache, entry.offset);
     
     // 从 tag 索引中移除（在标记删除前）
-    const char* value = (const char*)CACHE_PTR(cache, entry->offset + sizeof(cache_entry_header_t) + header->key_len + 1);
-    cache_tag_index_remove(cache, entry->offset, value, header->value_len);
+    const char* value = (const char*)CACHE_PTR(cache, entry.offset + sizeof(cache_entry_header_t) + header->key_len + 1);
+    cache_tag_index_remove(cache, entry.offset, value, header->value_len);
     
     // 从向量索引中移除
-    cache_vector_index_remove(cache, entry->offset);
+    cache_vector_index_remove(cache, entry.offset);
     
     // 标记删除
     header->flags |= CACHE_ENTRY_DELETED;
@@ -674,7 +686,6 @@ int cache_del(cache_t* cache, const char* key) {
     // 从 hot cache 中移除
     hot_cache_invalidate(cache, key, key_len);
     
-    free(entry);
     return CACHE_OK;
 }
 
@@ -853,6 +864,7 @@ int cache_set_ns(cache_t* cache, const char* ns, const char* key,
     // 构建完整 key: ns + "/" + key
     size_t ns_len = strlen(ns);
     size_t key_len = strlen(key);
+    if (key_len == 0) return CACHE_ERR_INVAL;  // 空 key 无效
     
     // 移除 ns 末尾的 '/'（如果有）
     while (ns_len > 0 && ns[ns_len - 1] == '/') ns_len--;
@@ -931,29 +943,27 @@ int cache_del_ns(cache_t* cache, const char* ns, const char* key) {
 int cache_expire(cache_t* cache, const char* key) {
     if (!cache || !key) return CACHE_ERR_INVAL;
     
-    cache_entry_t* entry = cache_find_entry(cache, key);
-    if (!entry) return CACHE_ERR_NOENT;
+    cache_entry_t entry;
+    if (!cache_find_entry(cache, key, &entry)) return CACHE_ERR_NOENT;
     
-    cache_entry_header_t* header = (cache_entry_header_t*)CACHE_PTR(cache, entry->offset);
+    cache_entry_header_t* header = (cache_entry_header_t*)CACHE_PTR(cache, entry.offset);
     header->expire_at = 1;  // 设置为一个已经过去的时间点
     header->flags |= CACHE_ENTRY_DELETED;
     
     cache->entry_count--;
     cache->deleted_count++;
     
-    free(entry);
     return CACHE_OK;
 }
 
 int cache_touch(cache_t* cache, const char* key) {
     if (!cache || !key) return CACHE_ERR_INVAL;
     
-    cache_entry_t* entry = cache_find_entry(cache, key);
-    if (!entry) return CACHE_ERR_NOENT;
+    cache_entry_t entry;
+    if (!cache_find_entry(cache, key, &entry)) return CACHE_ERR_NOENT;
     
-    cache_entry_header_t* header = (cache_entry_header_t*)CACHE_PTR(cache, entry->offset);
+    cache_entry_header_t* header = (cache_entry_header_t*)CACHE_PTR(cache, entry.offset);
     header->access_time = cache_now_ms();
     
-    free(entry);
     return CACHE_OK;
 }

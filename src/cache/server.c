@@ -223,6 +223,14 @@ static void handle_client(int fd, cache_t* cache) {
             // 找行尾
             char* end = strstr(p, "\r\n");
             if (!end) break;
+            
+            // 命令长度限制：单行最大 4096 字节
+            size_t line_len = end - p;
+            if (line_len > 4096) {
+                send_err(fd, "command too long");
+                return;
+            }
+            
             *end = '\0';
             
             char* argv[16];
