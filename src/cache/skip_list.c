@@ -87,13 +87,13 @@ cache_skiplist_node_t* cache_skiplist_find(cache_skiplist_t* sl, const char* key
     
     for (int i = sl->max_level - 1; i >= 0; i--) {
         while (current->forward[i] && 
-               (current->forward[i]->key && strcmp(current->forward[i]->key, key) < 0)) {
+               (current->forward[i]->key && strncmp(current->forward[i]->key, key, key_len) < 0)) {
             current = current->forward[i];
         }
     }
     
     current = current->forward[0];
-    if (current && current->key && strcmp(current->key, key) == 0) {
+    if (current && current->key && strlen(current->key) == key_len && strncmp(current->key, key, key_len) == 0) {
         return current;
     }
     
@@ -172,7 +172,7 @@ void cache_skiplist_remove(cache_skiplist_t* sl, const char* key, size_t key_len
     
     for (int i = sl->max_level - 1; i >= 0; i--) {
         while (current->forward[i] && 
-               (current->forward[i]->key && strcmp(current->forward[i]->key, key) < 0)) {
+               (current->forward[i]->key && strncmp(current->forward[i]->key, key, key_len) < 0)) {
             current = current->forward[i];
         }
         update[i] = current;
@@ -180,7 +180,7 @@ void cache_skiplist_remove(cache_skiplist_t* sl, const char* key, size_t key_len
     
     current = current->forward[0];
     
-    if (current && current->key && strcmp(current->key, key) == 0) {
+    if (current && current->key && strlen(current->key) == key_len && strncmp(current->key, key, key_len) == 0) {
         for (int i = 0; i < sl->max_level; i++) {
             if (update[i]->forward[i] != current) break;
             update[i]->forward[i] = current->forward[i];

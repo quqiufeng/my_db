@@ -394,8 +394,7 @@ int cache_set(cache_t* cache, const char* key, const char* value, uint64_t ttl_m
             }
         }
         
-        // 批量淘汰，直到有足够空间（+ 额外预留 10% 避免频繁淘汰）
-        size_t needed = aligned_size + cache->memory_max / 10;
+        // 批量淘汰，直到有足够空间
         size_t evicted = 0;
         
         for (size_t i = 0; i < candidate_count && cache->memory_used + aligned_size > cache->memory_max - evicted; i++) {

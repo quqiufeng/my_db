@@ -1117,15 +1117,15 @@ end
 - [x] 源码语义分析：轻量级 regex 提取 AST（函数/类/结构体/导入），支持 C/C++/Python/JS/Java/Go/Rust ✅ 已完成（2026-05-17）
 
 ### Phase 3
-- [ ] 分布式：多 Agent 共享知识库（只读副本）
+- [x] TCP 远程操作：基于文本协议的 cache 服务器（PING/SET/GET/DEL/SEARCH/SYNC），支持端口远程访问 ✅ 已完成（2026-05-17）
 - [ ] 快照：定期快照备份
 - [ ] 增量同步：GitHub webhook 自动更新项目记忆
 
 ---
 
-*文档版本: 1.3*  
-*更新日期: 2026-05-16*  
-*状态: 设计完成，待实现*
+*文档版本: 1.4*  
+*更新日期: 2026-05-17*  
+*状态: Phase 2 全部完成 + TCP 远程操作*
 
 ### Phase 2
 - [x] 向量搜索：支持向量存储（float数组）和余弦相似度搜索，Python sentence-transformers helper ✅ 已完成（2026-05-17）
@@ -1134,7 +1134,7 @@ end
 - [x] 源码语义分析：轻量级 regex 提取 AST（函数/类/结构体/导入），支持 C/C++/Python/JS/Java/Go/Rust ✅ 已完成（2026-05-17）
 
 ### Phase 3
-- [ ] 分布式：多 Agent 共享知识库
+- [x] TCP 远程操作：基于文本协议的 cache 服务器（PING/SET/GET/DEL/SEARCH/SYNC），支持端口远程访问 ✅ 已完成（2026-05-17）
 - [ ] 快照：定期快照备份
 - [ ] 增量同步：GitHub webhook 自动更新项目记忆
 

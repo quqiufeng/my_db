@@ -456,6 +456,8 @@ char* cache_ast_to_json(const cache_ast_tree_t* tree, const char* filename) {
 int cache_search_ast(cache_t* cache, const char* query, cache_ast_node_type_t type_filter,
                      cache_search_options_t* options,
                      cache_result_t** out_results, size_t* out_count) {
+    (void)type_filter;  // TODO: implement type filtering
+    
     if (!cache || !query || !out_results || !out_count) return CACHE_ERR_INVAL;
     
     *out_results = NULL;

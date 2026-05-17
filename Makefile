@@ -30,6 +30,7 @@ EXAMPLE_DIR = examples
 EXAMPLE_C = $(EXAMPLE_DIR)/example_c
 TOOLS_DIR = tools
 IMPORT_BOOK = $(TOOLS_DIR)/import_book
+CACHE_SERVER = $(TOOLS_DIR)/cache_server
 
 PREFIX ?= /usr/local
 LIBDIR = $(PREFIX)/lib
@@ -37,7 +38,7 @@ INCLUDEDIR = $(PREFIX)/include
 
 .PHONY: all clean test test_join test_perf test_edge test_composite test_wal test_cache test_cache_full example install
 
-all: $(LIB) $(TEST_BASIC) $(TEST_JOIN) $(TEST_PERF) $(TEST_EDGE) $(TEST_COMPOSITE) $(TEST_WAL) $(TEST_CACHE) $(TEST_CACHE_FULL) $(IMPORT_BOOK) example
+all: $(LIB) $(TEST_BASIC) $(TEST_JOIN) $(TEST_PERF) $(TEST_EDGE) $(TEST_COMPOSITE) $(TEST_WAL) $(TEST_CACHE) $(TEST_CACHE_FULL) $(IMPORT_BOOK) $(CACHE_SERVER) example
 
 $(LIB): $(OBJECTS)
 	$(CC) -shared -o $@ $^ -lm
@@ -103,6 +104,9 @@ $(TEST_CACHE_FULL): $(TEST_DIR)/test_cache_full.c $(LIB)
 	$(CC) $(CFLAGS) -o $@ $< -L. -lmydb -Wl,-rpath,.
 
 $(IMPORT_BOOK): $(TOOLS_DIR)/import_book.c $(LIB)
+	$(CC) $(CFLAGS) -o $@ $< -L. -lmydb -Wl,-rpath,.
+
+$(CACHE_SERVER): $(TOOLS_DIR)/cache_server.c $(LIB)
 	$(CC) $(CFLAGS) -o $@ $< -L. -lmydb -Wl,-rpath,.
 
 example: $(LIB)

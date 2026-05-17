@@ -28,7 +28,6 @@
 5. **零拷贝持久化**：mmap 让内存和磁盘是同一回事
 
 **明确排除（第一版不做）**：
-- ❌ TCP/网络服务层
 - ❌ 多进程并发访问
 - ❌ 分布式/集群
 - ❌ SQL 字符串解析
@@ -69,6 +68,7 @@
 - **TTL + LRU**：自动过期 + 内存不足时淘汰最老条目
 - **零拷贝持久化**：复用 my_db mmap 架构，内存 = 磁盘
 - **Python FFI**：`mydb/cache.py` 提供类 dict 接口
+- **TCP 远程操作**：可选的网络服务层，支持端口远程访问
 
 ### 快速开始
 
@@ -124,6 +124,14 @@ cache purge
 # 导入
 cache import-book ~/book.mobi /books/cpp
 cache import-github https://github.com/redis/redis
+
+# 启动 TCP 服务器（远程操作）
+cache_server --port 7777 --db ./cache_data
+
+# 客户端连接
+# cache_client_connect("127.0.0.1", 7777)
+# cache_client_set(client, "key", "value", 0)
+# cache_client_get(client, "key")
 ```
 
 ### 存储格式
