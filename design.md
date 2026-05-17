@@ -1115,7 +1115,21 @@ db_select_by_pk(table, id, &u, sizeof(u));  // 拷贝到栈上
 - **设计理由**：简单可靠，索引与数据永远一致，避免漂移
 - **未来优化**：可考虑将 Sorted Array、HNSW 图保存到 `.index` 文件以加速启动
 
-### 11.2 TCP 远程操作层
+### 11.2 电子书语义搜索
+- [x] **章节级导入**：`tools/import_book.c` 解析 MOBI/AZW3/PDF，按章节切分存储
+  - 存储路径：`/books/{书名}/chapters/{章节号}-{标题}/content/p{段落号}`
+  - 每章独立 namespace，便于按章浏览和搜索
+- [x] **ONNX Runtime 嵌入引擎**：C 端本地推理，无需 Python 环境
+  - `tools/export_onnx.py`：导出 sentence-transformers `all-MiniLM-L6-v2` 为 ONNX
+  - `src/embedding/onnx_embedder.c`：加载 ONNX 模型，WordPiece tokenizer（哈希表优化）
+  - **推理流程**：Tokenize → ONNX Runtime 推理 → Mean Pooling → L2 Normalization → 384 维向量
+  - **性能**：单段落 ~100ms（含 tokenizer），纯 ONNX 推理 ~10ms
+- [x] **段落级向量索引**：导入时每段文本自动生成 embedding，通过 `cache_set_vector()` 存入
+  - 向量与文本共用同一个 key，检索时通过 `cache_search_vector()` 语义匹配
+  - HNSW 自动启用：段落数 > 1000 时自动构建近似索引，搜索 O(log n)
+- [x] **语义搜索验证**：查询 "马斯克创办特斯拉的故事" 返回第七章（全电动车）、第十章（电动车的复仇）等相关章节
+
+### 11.3 TCP 远程操作层
 - [x] **文本协议服务器**：Redis-like 简单协议
 - [x] **命令集**：PING / SET / GET / DEL / EXISTS / COUNT / SEARCH / STATS / SYNC / QUIT
 - [x] **客户端库**：`cache_client_connect()` / `cache_client_set()` / `cache_client_get()`

@@ -59,7 +59,7 @@
 - **KV Cache**：Agent 记忆存储，支持 5 种搜索 + TTL/LRU
 - **Tag 索引**：Hash-based 反向索引，O(1) 标签搜索
 - **Skip List**：20 级跳表，数据量 > 100 万自动启用
-- **向量搜索**：Float embedding + 余弦相似度，语义搜索
+- **向量搜索**：Float embedding + 余弦相似度，语义搜索（ONNX Runtime C 推理）
 - **源码分析**：7 种语言 AST 提取（函数/类/结构体/导入）
 - **TCP 远程**：文本协议服务器，支持端口远程操作
 
@@ -224,6 +224,31 @@ python3 tools/vector_helper.py store --key doc1 "content"
 python3 tools/vector_helper.py search "query text"
 ```
 
+**电子书语义搜索**（ONNX Runtime C 推理）
+
+导入电子书时自动为每个段落生成 384 维语义向量：
+```bash
+# 1. 导出 ONNX 模型（首次使用，已包含在项目中）
+python3 tools/export_onnx.py
+# 输出：models/all-MiniLM-L6-v2/model.onnx + vocab.txt + config.json
+
+# 2. 导入电子书（自动向量化）
+./tools/import_book ./my_cache ~/book.azw3
+# 输出：1235 paragraphs, 每段生成 embedding 并存储
+
+# 3. 语义搜索
+python3 tests/test_semantic_search.py "马斯克创办特斯拉的故事"
+# 返回：第七章（全电动车）、第十章（电动车的复仇）等相关段落
+```
+
+**技术细节**：
+- **模型**：sentence-transformers `all-MiniLM-L6-v2`（384 维）
+- **推理**：ONNX Runtime C API，本地推理无需 Python
+- **Tokenizer**：WordPiece（哈希表优化），30522 词表
+- **处理流程**：段落文本 → Tokenize → ONNX 推理 → Mean Pooling → L2 归一化 → 384 维向量
+- **性能**：单段落 ~100ms（含 tokenizer），导入 1200+ 段落的电子书约 2 分钟
+- **存储**：向量与文本共用 key，`/books/{书名}/chapters/{章}/content/p{段落号}`
+
 **源码语义分析**（AST 提取）
 ```c
 // 分析源代码，自动提取函数/类/结构体/导入
@@ -311,8 +336,73 @@ curl -X POST -H "Content-Type: application/json" \
 
 ### 导入工具
 
-- **电子书**：`tools/import_book.c` — 支持 MOBI/AZW3/PDF
+- **电子书**：`tools/import_book.c` — 支持 MOBI/AZW3/PDF，导入时自动生成语义向量
 - **GitHub 源码**：`tools/import_github.py` — ctags 提取符号 + 源码存储
+
+### 电子书语义搜索用法
+
+**1. 导入电子书（自动向量化）**
+
+```bash
+# 编译
+make tools/import_book
+
+# 导入单本书（自动为每个段落生成 384 维向量）
+./tools/import_book ./my_cache ~/book.azw3
+# 输出：Import complete: 1235 paragraphs
+
+# 导入多本书到同一 cache（自动跨书搜索）
+./tools/import_book ./my_cache ~/book1.mobi
+./tools/import_book ./my_cache ~/book2.pdf
+./tools/import_book ./my_cache ~/book3.azw3
+```
+
+**2. 语义搜索（跨所有电子书）**
+
+```bash
+# Python 搜索脚本（自动生成查询向量，搜索最相关段落）
+python3 tests/test_semantic_search.py "马斯克创办特斯拉的故事"
+
+# 输出示例：
+# Query: '马斯克创办特斯拉的故事'
+# Found 5 results:
+#
+# [1] /books/硅谷钢铁侠/chapters/13-第七章 全电动车.../content/p0026
+#     Score: 0.5674
+#     Text: 2008年，特斯拉推出Roadster...
+#
+# [2] /books/硅谷钢铁侠/chapters/16-第十章 电动车的复仇.../content/p0030
+#     Score: 0.5772
+#     Text: Model S的诞生标志着...
+```
+
+**3. 搜索特定书籍（Namespace 过滤）**
+
+```c
+// C API：限定只搜索某本书
+cache_search_options_t opts = cache_search_options_default();
+opts.ns_filter = "/books/硅谷钢铁侠";  // 只搜这本书
+
+cache_search_vector(cache, query_vector, 384, top_k=5, min_score=0.3, &opts, &results, &count);
+```
+
+**4. 存储结构**
+
+导入后存储路径格式：
+```
+/books/{书名}/_meta/title              # 书名
+/books/{书名}/_meta/author             # 作者
+/books/{书名}/_meta/chapters           # 章节列表
+/books/{书名}/chapters/{章节号}-{标题}/title       # 章节标题
+/books/{书名}/chapters/{章节号}-{标题}/content/p0000   # 段落 0（含向量）
+/books/{书名}/chapters/{章节号}-{标题}/content/p0001   # 段落 1（含向量）
+```
+
+**5. 性能**
+
+- 导入速度：~600 段落/分钟（含 ONNX 推理）
+- 搜索速度：~10ms/查询（HNSW 索引，>1000 向量自动启用）
+- 向量维度：384 维（sentence-transformers all-MiniLM-L6-v2）
 
 ## 架构设计
 
