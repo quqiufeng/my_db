@@ -278,11 +278,11 @@ cache_t* cache_open(const char* db_dir, size_t max_memory) {
             
             if (!(header->flags & CACHE_ENTRY_DELETED)) {
                 char* key = (char*)CACHE_PTR(cache, offset + sizeof(cache_entry_header_t));
-                const char* value = key + header->key_len + 1;
                 cache_hash_insert(cache, offset, key, header->key_len);
                 cache_sorted_insert(cache, offset);
                 cache_ns_add(cache, key, offset);
-                cache_tag_index_add(cache, offset, value, header->value_len);
+                // 跳过 tag 索引重建（电子书内容不需要 tag 搜索）
+                // cache_tag_index_add(cache, offset, value, header->value_len);
                 valid_count++;
             }
             
