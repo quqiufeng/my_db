@@ -4,11 +4,13 @@
 #include <string.h>
 #include <dlfcn.h>
 
-// 章节信息结构（与 wrapper 中一致）
+// 章节信息结构（必须与 wrapper 中完全一致）
+// MOBI wrapper: struct MobiChapter { char* title; int level; size_t offset; }
+// PDF wrapper:  struct PdfChapter  { char* title; int level; size_t page; }
 typedef struct {
     char* title;
     int level;
-    size_t offset;  // MOBI 用字节偏移，PDF 用页码
+    size_t offset;  // MOBI: byte offset, PDF: page number
 } ChapterInfo;
 
 // 简单的分块函数：将文本按段落分成多个块

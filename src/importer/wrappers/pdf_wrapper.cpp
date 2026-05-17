@@ -13,11 +13,11 @@ extern "C" {
 
 #define API __attribute__((visibility("default")))
 
-// 章节信息结构
+// 章节信息结构（与 MOBI wrapper 保持相同布局）
 struct PdfChapter {
     char* title;
     int level;
-    int page;
+    size_t page;  // 使用 size_t 与 MOBI 的 offset 对齐
 };
 
 // Opaque handle
@@ -171,7 +171,7 @@ static void extract_outlines(fz_context* ctx, fz_outline* outline, PdfChapter** 
         
         (*chapters)[*count].title = outline->title ? strdup(outline->title) : strdup("");
         (*chapters)[*count].level = level;
-        (*chapters)[*count].page = outline->page.page;  // fz_location.page
+        (*chapters)[*count].page = outline->page.page;  // fz_location.page (assign to size_t)
         (*count)++;
         
         // 递归处理子章节
