@@ -1108,7 +1108,15 @@ db_select_by_pk(table, id, &u, sizeof(u));  // 拷贝到栈上
 - [x] **客户端库**：`cache_client_connect()` / `cache_client_set()` / `cache_client_get()`
 - [x] **单线程模型**：`accept() → handle_client() → close()` 顺序处理
 
-### 11.3 待实现
+### 11.3 HTTP RESTful API
+- [x] **HTTP/1.1 服务器**：原生 socket 实现，零外部依赖
+- [x] **RESTful 端点**：GET/PUT/DELETE `/cache/:key`，GET `/search`，POST `/batch`
+- [x] **JSON 请求/响应**：`{"status":"ok","data":{...}}` / `{"status":"error","error":"..."}`
+- [x] **Namespace 支持**：GET `/namespaces`，GET `/namespace/:ns`
+- [x] **健康检查**：GET `/health`，GET `/stats`
+- [x] **同步接口**：POST `/sync`
+
+### 11.4 待实现
 - [ ] 快照：定期快照备份
 - [ ] 增量同步：GitHub webhook 自动更新
 - [ ] **自动 WAL 追踪**：`db_get()` 返回的指针被修改后，自动检测并写 WAL

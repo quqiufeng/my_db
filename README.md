@@ -233,6 +233,49 @@ DEL "key"               → :1
 SEARCH prefix "/coding" → *OK 2\r\n...$key...$score...$value...
 ```
 
+### HTTP RESTful API
+
+启动 HTTP 服务器：
+```bash
+./tools/cache_http_server --port 8080 --db ./cache_http_data
+```
+
+RESTful 端点：
+
+| 方法 | 端点 | 说明 |
+|------|------|------|
+| GET | `/health` | 健康检查 |
+| GET | `/stats` | 统计信息（entries, memory_used, memory_max） |
+| GET | `/cache/:key` | 获取 key 的值 |
+| PUT | `/cache/:key` | 设置 key（JSON body: `{"value":"...","ttl_ms":1234}`） |
+| DELETE | `/cache/:key` | 删除 key |
+| GET | `/cache/:key/exists` | 检查 key 是否存在 |
+| GET | `/search?pattern=...&type=prefix|regex|fuzzy|tag` | 搜索 |
+| POST | `/batch` | 批量设置（JSON array: `[{"key":"...","value":"..."}, ...]`） |
+| GET | `/namespaces` | 列出所有 namespace |
+| GET | `/namespace/:ns` | 获取 namespace 下的所有 key |
+| POST | `/sync` | 同步到磁盘 |
+
+示例：
+```bash
+# 设置值
+curl -X PUT -H "Content-Type: application/json" \
+  -d '{"value":"hello world","ttl_ms":60000}' \
+  http://localhost:8080/cache/mykey
+
+# 获取值
+curl http://localhost:8080/cache/mykey
+# → {"status":"ok","data":{"key":"mykey","value":"hello world"}}
+
+# 前缀搜索
+curl "http://localhost:8080/search?pattern=user:&type=prefix&max_results=10"
+
+# 批量设置
+curl -X POST -H "Content-Type: application/json" \
+  -d '[{"key":"k1","value":"v1"},{"key":"k2","value":"v2"}]' \
+  http://localhost:8080/batch
+```
+
 ### 导入工具
 
 - **电子书**：`tools/import_book.c` — 支持 MOBI/PDF/EPUB，按 ~4KB 分块

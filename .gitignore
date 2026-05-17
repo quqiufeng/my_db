@@ -10,7 +10,15 @@ tests/test_perf
 tests/test_edge
 tests/test_composite
 tests/test_wal
+tests/test_cache
+tests/test_cache_full
+tests/test_http_server
 examples/example_c
+
+# Tool binaries
+tools/cache_server
+tools/cache_http_server
+tools/import_book
 
 # Python
 __pycache__/

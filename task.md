@@ -461,9 +461,37 @@
 
 ---
 
+## Phase 11: HTTP RESTful API
+
+### 11.1 HTTP 服务器
+- [x] 11.1.1 原生 HTTP/1.1 解析器（零外部依赖）
+- [x] 11.1.2 RESTful 路由：GET/PUT/DELETE /cache/:key
+- [x] 11.1.3 JSON 请求/响应格式
+- [x] 11.1.4 URL decode 支持
+
+### 11.2 端点实现
+- [x] 11.2.1 GET /health — 健康检查
+- [x] 11.2.2 GET /stats — 统计信息
+- [x] 11.2.3 GET /cache/:key — 获取值
+- [x] 11.2.4 PUT /cache/:key — 设置值（JSON body，可选 ttl_ms）
+- [x] 11.2.5 DELETE /cache/:key — 删除
+- [x] 11.2.6 GET /cache/:key/exists — 检查存在
+- [x] 11.2.7 GET /search?pattern=&type= — 前缀/正则/模糊/标签搜索
+- [x] 11.2.8 POST /batch — 批量设置
+- [x] 11.2.9 GET /namespaces — 列出 namespace
+- [x] 11.2.10 GET /namespace/:ns — 获取 namespace 下的 key
+- [x] 11.2.11 POST /sync — 同步到磁盘
+
+### 11.3 工具与测试
+- [x] 11.3.1 tools/cache_http_server.c — 服务器入口
+- [x] 11.3.2 tests/test_http_server.c — 14/14 测试通过
+- [x] 11.3.3 Makefile 集成
+
+---
+
 ## 当前状态
 
-**✅ V2.0 KV Cache 已完成（含 Phase 2 扩展 + TCP 远程操作）**
+**✅ V2.1 KV Cache 已完成（含 HTTP RESTful API）**
 
 | Phase | 任务数 | 已完成 | 状态 |
 |-------|--------|--------|------|
@@ -472,5 +500,6 @@
 | Phase 10 | 3 | 3 | ✅ 优化完成 |
 | Phase 2 扩展 | 4 | 4 | ✅ 标签索引/跳表/源码分析/向量搜索 |
 | TCP 远程 | 1 | 1 | ✅ TCP 服务器完成 |
+| HTTP RESTful | 3 | 3 | ✅ HTTP API 完成 |
 
-**总计：63 个任务，已完成 63 个（100%）**
+**总计：66 个任务，已完成 66 个（100%）**
