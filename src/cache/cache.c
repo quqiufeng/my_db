@@ -278,9 +278,11 @@ cache_t* cache_open(const char* db_dir, size_t max_memory) {
             
             if (!(header->flags & CACHE_ENTRY_DELETED)) {
                 char* key = (char*)CACHE_PTR(cache, offset + sizeof(cache_entry_header_t));
+                const char* value = key + header->key_len + 1;
                 cache_hash_insert(cache, offset, key, header->key_len);
                 cache_sorted_insert(cache, offset);
                 cache_ns_add(cache, key, offset);
+                cache_tag_index_add(cache, offset, value, header->value_len);
                 valid_count++;
             }
             
@@ -406,14 +408,15 @@ int cache_set(cache_t* cache, const char* key, const char* value, uint64_t ttl_m
         // 批量淘汰，直到有足够空间
         size_t evicted = 0;
         
-        for (size_t i = 0; i < candidate_count && cache->memory_used + aligned_size > cache->memory_max - evicted; i++) {
+        for (size_t i = 0; i < candidate_count && cache->memory_used + aligned_size > cache->memory_max; i++) {
             evict_candidate_t* c = &candidates[i];
             cache_entry_header_t* h = (cache_entry_header_t*)CACHE_PTR(cache, c->offset);
             
             if (h->flags & CACHE_ENTRY_DELETED) continue;  // 可能已被之前的淘汰标记
             
-            // 读取 key
+            // 读取 key 和 value
             char* key_ptr = (char*)CACHE_PTR(cache, c->offset + sizeof(cache_entry_header_t));
+            const char* value_ptr = key_ptr + c->key_len + 1;
             
             // 标记删除
             h->flags |= CACHE_ENTRY_DELETED;
@@ -424,9 +427,10 @@ int cache_set(cache_t* cache, const char* key, const char* value, uint64_t ttl_m
             
             // 更新索引
             cache_hash_remove(cache, key_ptr, c->key_len);
-            // sorted_remove 会触发 ensure_sorted，但我们已经在批量处理了
-            // 直接标记 dirty，稍后统一重建
             cache_ns_remove(cache, key_ptr);
+            cache_tag_index_remove(cache, c->offset, value_ptr, h->value_len);
+            cache_vector_index_remove(cache, c->offset);
+            hot_cache_invalidate(cache, key_ptr, c->key_len);
         }
         
         free(candidates);
@@ -595,7 +599,13 @@ int cache_batch_set(cache_t* cache, const cache_batch_item_t* items, size_t coun
         cache_ns_add(cache, items[i].key, offsets[i]);
     }
     
-    // 第五遍：排序数组优化——直接追加到末尾，最后统一 qsort
+    // 第五遍：批量更新 tag 索引
+    for (size_t i = 0; i < count; i++) {
+        const char* value = items[i].value;
+        cache_tag_index_add(cache, offsets[i], value, strlen(value));
+    }
+    
+    // 第六遍：排序数组优化——直接追加到末尾，最后统一 qsort
     cache_sorted_array_t* sorted = &cache->sorted;
     size_t new_count = sorted->count + count;
     
