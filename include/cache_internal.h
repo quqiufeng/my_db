@@ -56,12 +56,32 @@ typedef struct {
     size_t buckets_offset;      // bucket 数组在 pool 中的 offset
 } cache_hash_index_t;
 
+// ====== 跳表（Skip List）======
+#define CACHE_SKIPLIST_MAX_LEVEL 20
+#define CACHE_SKIPLIST_P 0.5
+#define CACHE_SKIPLIST_THRESHOLD 1000000  // 超过此阈值启用跳表
+
+typedef struct cache_skiplist_node {
+    size_t offset;              // entry 在 pool 中的 offset
+    char* key;                  // key 的副本（用于比较）
+    size_t key_len;
+    struct cache_skiplist_node** forward;  // 前向指针数组 [level]
+    int level;                  // 节点层数
+} cache_skiplist_node_t;
+
+typedef struct {
+    cache_skiplist_node_t* head;  // 头节点
+    int max_level;                // 当前最大层数
+    size_t size;                  // 节点数量
+} cache_skiplist_t;
+
 // ====== 排序数组（借鉴 code_bin sorted array）======
 typedef struct {
     size_t* offsets;            // entry offset 数组（按 key 字典序排列）
     size_t count;               // 当前数量
     size_t capacity;            // 数组容量
     int dirty;                  // 1 = 需要重新排序（延迟排序优化）
+    cache_skiplist_t* skiplist; // 跳表加速层（NULL = 未启用）
 } cache_sorted_array_t;
 
 // ====== Namespace 索引 ======
@@ -181,5 +201,13 @@ int cache_tag_index_add(cache_t* cache, size_t entry_offset, const char* value, 
 int cache_tag_index_remove(cache_t* cache, size_t entry_offset, const char* value, size_t value_len);
 int cache_tag_index_search(cache_t* cache, const char* tag, size_t** out_offsets, size_t* out_count);
 void cache_tag_index_rebuild(cache_t* cache);
+
+// 跳表操作
+cache_skiplist_t* cache_skiplist_create(void);
+void cache_skiplist_destroy(cache_skiplist_t* sl);
+int cache_skiplist_insert(cache_t* cache, cache_skiplist_t* sl, size_t entry_offset, const char* key, size_t key_len);
+void cache_skiplist_remove(cache_skiplist_t* sl, const char* key, size_t key_len);
+cache_skiplist_node_t* cache_skiplist_find(cache_skiplist_t* sl, const char* key, size_t key_len);
+void cache_skiplist_build(cache_t* cache, cache_skiplist_t* sl);
 
 #endif /* CACHE_INTERNAL_H */

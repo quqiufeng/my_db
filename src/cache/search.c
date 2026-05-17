@@ -91,13 +91,46 @@ int cache_search_prefix(cache_t* cache, const char* prefix,
     int max_results = options ? options->max_results : 100;
     const char* ns_filter = options ? options->ns_filter : NULL;
     
-    // 使用排序数组的 lower_bound 找到前缀起点
-    size_t start = cache_sorted_find_lower_bound(cache, prefix, prefix_len);
-    size_t count = cache->sorted.count;
-    
     cache_result_t* results = NULL;
     size_t result_count = 0;
     size_t result_cap = 0;
+    
+    // 如果跳表已启用且数据量大，使用跳表遍历
+    if (cache->sorted.skiplist && cache->sorted.count >= CACHE_SKIPLIST_THRESHOLD) {
+        // 用跳表找到第一个 >= prefix 的节点
+        cache_skiplist_node_t* current = cache->sorted.skiplist->head;
+        for (int i = cache->sorted.skiplist->max_level - 1; i >= 0; i--) {
+            while (current->forward[i] && 
+                   strncmp(current->forward[i]->key, prefix, prefix_len) < 0) {
+                current = current->forward[i];
+            }
+        }
+        current = current->forward[0];
+        
+        // 从该节点开始遍历，直到不匹配前缀
+        while (current) {
+            if (!str_starts_with(current->key, current->key_len, prefix, prefix_len)) break;
+            
+            if (entry_is_valid(cache, current->offset, now) &&
+                ns_filter_match(cache, current->offset, ns_filter)) {
+                double score = 1.0;
+                if (append_result(&results, &result_count, &result_cap, cache, current->offset, score) < 0) {
+                    free(results);
+                    return CACHE_ERR_NOMEM;
+                }
+                if (max_results > 0 && result_count >= (size_t)max_results) break;
+            }
+            current = current->forward[0];
+        }
+        
+        *out_results = results;
+        *out_count = result_count;
+        return CACHE_OK;
+    }
+    
+    // 使用排序数组的 lower_bound 找到前缀起点
+    size_t start = cache_sorted_find_lower_bound(cache, prefix, prefix_len);
+    size_t count = cache->sorted.count;
     
     for (size_t i = start; i < count; i++) {
         size_t offset = cache_sorted_get(cache, i);
@@ -143,12 +176,44 @@ int cache_search_range(cache_t* cache, const char* start_key, const char* end_ke
     int max_results = options ? options->max_results : 100;
     const char* ns_filter = options ? options->ns_filter : NULL;
     
-    size_t start_idx = cache_sorted_find_lower_bound(cache, start_key, start_len);
-    size_t end_idx = cache_sorted_find_lower_bound(cache, end_key, end_len);
-    
     cache_result_t* results = NULL;
     size_t result_count = 0;
     size_t result_cap = 0;
+    
+    // 如果跳表已启用，使用跳表遍历
+    if (cache->sorted.skiplist && cache->sorted.count >= CACHE_SKIPLIST_THRESHOLD) {
+        // 找到第一个 >= start_key 的节点
+        cache_skiplist_node_t* current = cache->sorted.skiplist->head;
+        for (int i = cache->sorted.skiplist->max_level - 1; i >= 0; i--) {
+            while (current->forward[i] && 
+                   strncmp(current->forward[i]->key, start_key, start_len) < 0) {
+                current = current->forward[i];
+            }
+        }
+        current = current->forward[0];
+        
+        // 遍历直到 >= end_key
+        while (current) {
+            if (strncmp(current->key, end_key, end_len) >= 0) break;
+            
+            if (entry_is_valid(cache, current->offset, now) &&
+                ns_filter_match(cache, current->offset, ns_filter)) {
+                if (append_result(&results, &result_count, &result_cap, cache, current->offset, 1.0) < 0) {
+                    free(results);
+                    return CACHE_ERR_NOMEM;
+                }
+                if (max_results > 0 && result_count >= (size_t)max_results) break;
+            }
+            current = current->forward[0];
+        }
+        
+        *out_results = results;
+        *out_count = result_count;
+        return CACHE_OK;
+    }
+    
+    size_t start_idx = cache_sorted_find_lower_bound(cache, start_key, start_len);
+    size_t end_idx = cache_sorted_find_lower_bound(cache, end_key, end_len);
     
     for (size_t i = start_idx; i < end_idx; i++) {
         size_t offset = cache_sorted_get(cache, i);

@@ -87,6 +87,7 @@ int cache_sorted_init(cache_t* cache) {
     cache->sorted.count = 0;
     cache->sorted.capacity = 0;
     cache->sorted.dirty = 0;
+    cache->sorted.skiplist = NULL;
     
     return 0;
 }
@@ -102,6 +103,13 @@ int cache_sorted_insert(cache_t* cache, size_t entry_offset) {
     sorted->offsets[sorted->count] = entry_offset;
     sorted->count++;
     sorted->dirty = 1;  // 标记需要重新排序
+    
+    // 如果跳表已启用，也插入到跳表
+    if (sorted->skiplist) {
+        cache_entry_header_t* h = (cache_entry_header_t*)CACHE_PTR(cache, entry_offset);
+        const char* key = (const char*)CACHE_PTR(cache, entry_offset + sizeof(cache_entry_header_t));
+        cache_skiplist_insert(cache, sorted->skiplist, entry_offset, key, h->key_len);
+    }
     
     return 0;
 }
@@ -131,6 +139,11 @@ int cache_sorted_remove(cache_t* cache, const char* key, size_t key_len) {
             sorted->dirty = 1;
             return 0;
         }
+    }
+    
+    // 如果跳表已启用，也删除跳表节点
+    if (sorted->skiplist) {
+        cache_skiplist_remove(sorted->skiplist, key, key_len);
     }
     
     return -1;  // 未找到
@@ -184,10 +197,20 @@ size_t cache_sorted_get(cache_t* cache, size_t index) {
     return cache->sorted.offsets[index];
 }
 
-// 重建排序数组（全量 qsort）
+// 重建排序数组（全量 qsort），并根据数据量决定是否启用跳表
 void cache_sorted_rebuild(cache_t* cache) {
     if (!cache) return;
     ensure_sorted(cache);
+    
+    // 当数据量超过阈值时，启用跳表加速
+    if (cache->sorted.count >= CACHE_SKIPLIST_THRESHOLD) {
+        if (!cache->sorted.skiplist) {
+            cache->sorted.skiplist = cache_skiplist_create();
+        }
+        if (cache->sorted.skiplist) {
+            cache_skiplist_build(cache, cache->sorted.skiplist);
+        }
+    }
 }
 
 // 释放排序数组内存
@@ -200,4 +223,9 @@ void cache_sorted_destroy(cache_t* cache) {
     cache->sorted.count = 0;
     cache->sorted.capacity = 0;
     cache->sorted.dirty = 0;
+    
+    if (cache->sorted.skiplist) {
+        cache_skiplist_destroy(cache->sorted.skiplist);
+        cache->sorted.skiplist = NULL;
+    }
 }
