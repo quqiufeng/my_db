@@ -120,6 +120,21 @@ typedef struct {
     size_t size;                  // 总 tag 数量
 } cache_tag_index_t;
 
+// ====== Vector 索引 ======
+#define CACHE_MAX_VECTOR_DIM 1536  // 最大向量维度（OpenAI text-embedding-3-small=1536）
+
+typedef struct {
+    size_t entry_offset;        // 对应的 entry offset
+    size_t vector_offset;       // 向量数据在 pool 中的 offset
+    uint16_t dim;               // 向量维度
+} cache_vector_entry_t;
+
+typedef struct {
+    cache_vector_entry_t* entries;  // 向量条目数组
+    size_t count;                   // 当前数量
+    size_t capacity;                // 数组容量
+} cache_vector_index_t;
+
 // ====== Hot Cache（热点缓存，加速重复读取）======
 #define CACHE_HOT_SIZE 64
 
@@ -138,6 +153,9 @@ struct cache {
     cache_sorted_array_t sorted; // 排序数组：按 key 字典序排列
     cache_ns_node_t* ns_root;   // Namespace 树
     cache_tag_index_t tag_index; // Tag 反向索引：tag → [entry_offsets]
+    
+    // 向量索引
+    cache_vector_index_t vector_index; // 向量索引（内存中，重启重建）
     
     // 热点缓存
     cache_hot_entry_t hot_cache[CACHE_HOT_SIZE];
@@ -218,5 +236,13 @@ int cache_skiplist_insert(cache_t* cache, cache_skiplist_t* sl, size_t entry_off
 void cache_skiplist_remove(cache_skiplist_t* sl, const char* key, size_t key_len);
 cache_skiplist_node_t* cache_skiplist_find(cache_skiplist_t* sl, const char* key, size_t key_len);
 void cache_skiplist_build(cache_t* cache, cache_skiplist_t* sl);
+
+// 向量操作
+int cache_vector_index_init(cache_t* cache);
+void cache_vector_index_destroy(cache_t* cache);
+int cache_vector_index_add(cache_t* cache, size_t entry_offset, const float* vector, size_t dim);
+void cache_vector_index_remove(cache_t* cache, size_t entry_offset);
+float cache_vector_cosine_similarity(const float* a, const float* b, size_t dim);
+void cache_vector_index_rebuild(cache_t* cache);
 
 #endif /* CACHE_INTERNAL_H */

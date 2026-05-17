@@ -179,6 +179,24 @@ int cache_search_ast(cache_t* cache, const char* query, cache_ast_node_type_t ty
 // 释放 AST 树
 void cache_ast_free(cache_ast_tree_t* tree);
 
+// ====== 向量搜索 ======
+// 设置带向量嵌入的 key-value
+// vector: float 数组，dim 维度（常用 384/768/1536）
+int cache_set_vector(cache_t* cache, const char* key, const char* value,
+                     const float* vector, size_t dim, uint64_t ttl_ms);
+
+// 向量相似度搜索（暴力精确搜索，O(n)，适合 < 10万条）
+// query_vector: 查询向量
+// top_k: 返回最相似的 k 个结果
+// min_score: 最小相似度阈值（0-1，cosine similarity，1=完全相同）
+int cache_search_vector(cache_t* cache, const float* query_vector, size_t dim,
+                        int top_k, double min_score,
+                        cache_search_options_t* options,
+                        cache_result_t** out_results, size_t* out_count);
+
+// 获取 entry 的向量（NULL = 无向量）
+const float* cache_get_vector(cache_t* cache, const char* key, size_t* out_dim);
+
 #ifdef __cplusplus
 }
 #endif

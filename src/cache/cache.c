@@ -248,7 +248,8 @@ cache_t* cache_open(const char* db_dir, size_t max_memory) {
     
     // 初始化索引
     if (cache_hash_init(cache) < 0 || cache_sorted_init(cache) < 0 || 
-        cache_ns_init(cache) < 0 || cache_tag_index_init(cache) < 0) {
+        cache_ns_init(cache) < 0 || cache_tag_index_init(cache) < 0 ||
+        cache_vector_index_init(cache) < 0) {
         pool_close(&cache->pool);
         free(cache);
         return NULL;
@@ -284,6 +285,9 @@ cache_t* cache_open(const char* db_dir, size_t max_memory) {
             offset += total_size;
         }
         cache->entry_count = valid_count;
+        
+        // 重建向量索引
+        cache_vector_index_rebuild(cache);
     }
     
     return cache;
@@ -307,6 +311,9 @@ void cache_close(cache_t* cache) {
     
     // 释放 tag 索引
     cache_tag_index_destroy(cache);
+    
+    // 释放向量索引
+    cache_vector_index_destroy(cache);
     
     free(cache);
 }
@@ -649,6 +656,9 @@ int cache_del(cache_t* cache, const char* key) {
     // 从 tag 索引中移除（在标记删除前）
     const char* value = (const char*)CACHE_PTR(cache, entry->offset + sizeof(cache_entry_header_t) + header->key_len + 1);
     cache_tag_index_remove(cache, entry->offset, value, header->value_len);
+    
+    // 从向量索引中移除
+    cache_vector_index_remove(cache, entry->offset);
     
     // 标记删除
     header->flags |= CACHE_ENTRY_DELETED;

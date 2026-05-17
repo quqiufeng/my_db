@@ -40,7 +40,7 @@ INCLUDEDIR = $(PREFIX)/include
 all: $(LIB) $(TEST_BASIC) $(TEST_JOIN) $(TEST_PERF) $(TEST_EDGE) $(TEST_COMPOSITE) $(TEST_WAL) $(TEST_CACHE) $(TEST_CACHE_FULL) $(IMPORT_BOOK) example
 
 $(LIB): $(OBJECTS)
-	$(CC) $(LDFLAGS) -o $@ $^
+	$(CC) -shared -o $@ $^ -lm
 
 $(OBJ_DIR)/%.o: $(SRC_DIR)/%.c
 	@mkdir -p $(dir $@)
