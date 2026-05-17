@@ -145,6 +145,40 @@ size_t cache_purge_expired(cache_t* cache);
 // 诊断：检查 cache 文件完整性
 int cache_check(const char* db_dir);
 
+// ====== 源码语义分析（轻量级 AST 提取）======
+// AST 节点类型
+typedef enum {
+    CACHE_AST_FUNCTION,
+    CACHE_AST_CLASS,
+    CACHE_AST_STRUCT,
+    CACHE_AST_VARIABLE,
+    CACHE_AST_IMPORT,
+    CACHE_AST_COMMENT,
+} cache_ast_node_type_t;
+
+// AST 树（不透明）
+typedef struct cache_ast_tree cache_ast_tree_t;
+
+// 分析源代码，提取 AST 信息
+// filename: 用于检测语言（.c, .py, .js 等）
+// source: 源代码内容
+cache_ast_tree_t* cache_analyze_source(const char* filename, const char* source);
+
+// 将 AST 序列化为 JSON 字符串（调用者负责 free）
+char* cache_ast_to_json(const cache_ast_tree_t* tree, const char* filename);
+
+// 从 AST 提取语义标签（func:name class:name 格式，用于 tag 索引）
+int cache_ast_extract_tags(const char* filename, const char* source,
+                           char** out_tags, size_t* out_tag_count);
+
+// 语义搜索：在 AST JSON 中搜索特定符号
+int cache_search_ast(cache_t* cache, const char* query, cache_ast_node_type_t type_filter,
+                     cache_search_options_t* options,
+                     cache_result_t** out_results, size_t* out_count);
+
+// 释放 AST 树
+void cache_ast_free(cache_ast_tree_t* tree);
+
 #ifdef __cplusplus
 }
 #endif

@@ -10,7 +10,7 @@
 // ====== 辅助函数 ======
 
 // 从 entry_offset 读取 key
-static const char* entry_key(cache_t* cache, size_t offset, size_t* key_len_out) {
+const char* entry_key(cache_t* cache, size_t offset, size_t* key_len_out) {
     cache_entry_header_t* h = (cache_entry_header_t*)CACHE_PTR(cache, offset);
     if (key_len_out) *key_len_out = h->key_len;
     return (const char*)CACHE_PTR(cache, offset + sizeof(cache_entry_header_t));
@@ -18,14 +18,14 @@ static const char* entry_key(cache_t* cache, size_t offset, size_t* key_len_out)
 
 // 从 entry_offset 读取 value
 // Layout: [header][key(key_len+1)][value(value_len+1)]
-static const char* entry_value(cache_t* cache, size_t offset, size_t* value_len_out) {
+const char* entry_value(cache_t* cache, size_t offset, size_t* value_len_out) {
     cache_entry_header_t* h = (cache_entry_header_t*)CACHE_PTR(cache, offset);
     if (value_len_out) *value_len_out = h->value_len;
     return (const char*)CACHE_PTR(cache, offset + sizeof(cache_entry_header_t) + h->key_len + 1);
 }
 
 // 检查 entry 是否有效（未删除、未过期）
-static int entry_is_valid(cache_t* cache, size_t offset, uint64_t now) {
+int entry_is_valid(cache_t* cache, size_t offset, uint64_t now) {
     cache_entry_header_t* h = (cache_entry_header_t*)CACHE_PTR(cache, offset);
     if (h->flags & CACHE_ENTRY_DELETED) return 0;
     if (h->expire_at > 0 && h->expire_at < now) return 0;
@@ -33,7 +33,7 @@ static int entry_is_valid(cache_t* cache, size_t offset, uint64_t now) {
 }
 
 // 添加结果到动态数组
-static int append_result(cache_result_t** results, size_t* count, size_t* capacity,
+int append_result(cache_result_t** results, size_t* count, size_t* capacity,
                           cache_t* cache, size_t entry_offset, double score) {
     if (*count >= *capacity) {
         size_t new_cap = *capacity * 2;
@@ -55,13 +55,13 @@ static int append_result(cache_result_t** results, size_t* count, size_t* capaci
 }
 
 // 辅助：字符串前缀匹配
-static int str_starts_with(const char* str, size_t str_len, const char* prefix, size_t prefix_len) {
+int str_starts_with(const char* str, size_t str_len, const char* prefix, size_t prefix_len) {
     if (str_len < prefix_len) return 0;
     return memcmp(str, prefix, prefix_len) == 0;
 }
 
 // 辅助：检查 namespace 过滤
-static int ns_filter_match(cache_t* cache, size_t entry_offset, const char* ns_filter) {
+int ns_filter_match(cache_t* cache, size_t entry_offset, const char* ns_filter) {
     if (!ns_filter) return 1;
     size_t key_len;
     const char* key = entry_key(cache, entry_offset, &key_len);

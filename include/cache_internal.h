@@ -183,6 +183,15 @@ uint64_t cache_now_ms(void);
 int cache_entry_is_expired(cache_entry_t* entry, uint64_t now);
 size_t cache_entry_total_size(cache_entry_header_t* header);
 
+// 搜索辅助函数（供其他模块使用）
+const char* entry_key(cache_t* cache, size_t offset, size_t* key_len_out);
+const char* entry_value(cache_t* cache, size_t offset, size_t* value_len_out);
+int entry_is_valid(cache_t* cache, size_t offset, uint64_t now);
+int append_result(cache_result_t** results, size_t* count, size_t* capacity,
+                  cache_t* cache, size_t entry_offset, double score);
+int str_starts_with(const char* str, size_t str_len, const char* prefix, size_t prefix_len);
+int ns_filter_match(cache_t* cache, size_t offset, const char* ns_filter);
+
 // 搜索内部函数
 int cache_search_internal_prefix(cache_t* cache, const char* prefix,
                                  const cache_search_options_t* options,
