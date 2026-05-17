@@ -13,6 +13,8 @@ int cache_vector_index_init(cache_t* cache) {
     cache->vector_index.entries = NULL;
     cache->vector_index.count = 0;
     cache->vector_index.capacity = 0;
+    cache->vector_index.hnsw = NULL;
+    cache->vector_index.use_hnsw = 0;
     return CACHE_OK;
 }
 
@@ -23,6 +25,12 @@ void cache_vector_index_destroy(cache_t* cache) {
     cache->vector_index.entries = NULL;
     cache->vector_index.count = 0;
     cache->vector_index.capacity = 0;
+    
+    if (cache->vector_index.hnsw) {
+        hnsw_destroy(cache->vector_index.hnsw);
+        cache->vector_index.hnsw = NULL;
+    }
+    cache->vector_index.use_hnsw = 0;
 }
 
 // 在pool中分配向量存储空间
@@ -34,6 +42,41 @@ static size_t alloc_vector_data(cache_t* cache, const float* vector, size_t dim)
     float* dest = (float*)CACHE_PTR(cache, offset);
     memcpy(dest, vector, data_size);
     return offset;
+}
+
+// 从 pool 读取向量数据
+static const float* get_vector_data(cache_t* cache, size_t vector_offset) {
+    return (const float*)CACHE_PTR(cache, vector_offset);
+}
+
+// 检查是否应该启用 HNSW
+static void maybe_enable_hnsw(cache_t* cache) {
+    if (cache->vector_index.use_hnsw) return;
+    if (cache->vector_index.count < CACHE_HNSW_THRESHOLD) return;
+    
+    // 确定维度（使用第一个有效向量的维度）
+    size_t dim = 0;
+    for (size_t i = 0; i < cache->vector_index.count; i++) {
+        if (cache->vector_index.entries[i].dim > 0) {
+            dim = cache->vector_index.entries[i].dim;
+            break;
+        }
+    }
+    if (dim == 0) return;
+    
+    // 创建 HNSW
+    hnsw_index_t* hnsw = hnsw_create(dim);
+    if (!hnsw) return;
+    
+    // 批量插入所有现有向量
+    for (size_t i = 0; i < cache->vector_index.count; i++) {
+        cache_vector_entry_t* e = &cache->vector_index.entries[i];
+        const float* vec = get_vector_data(cache, e->vector_offset);
+        hnsw_insert(hnsw, e->entry_offset, vec);
+    }
+    
+    cache->vector_index.hnsw = hnsw;
+    cache->vector_index.use_hnsw = 1;
 }
 
 // 添加向量到索引
@@ -49,6 +92,13 @@ int cache_vector_index_add(cache_t* cache, size_t entry_offset, const float* vec
             
             cache->vector_index.entries[i].vector_offset = new_offset;
             cache->vector_index.entries[i].dim = dim;
+            
+            // 如果 HNSW 已启用，更新 HNSW 中的向量
+            if (cache->vector_index.use_hnsw && cache->vector_index.hnsw) {
+                hnsw_remove(cache->vector_index.hnsw, entry_offset);
+                hnsw_insert(cache->vector_index.hnsw, entry_offset, vector);
+            }
+            
             return CACHE_OK;
         }
     }
@@ -73,6 +123,14 @@ int cache_vector_index_add(cache_t* cache, size_t entry_offset, const float* vec
     entry->dim = dim;
     cache->vector_index.count++;
     
+    // 如果 HNSW 已启用，插入到 HNSW
+    if (cache->vector_index.use_hnsw && cache->vector_index.hnsw) {
+        hnsw_insert(cache->vector_index.hnsw, entry_offset, vector);
+    }
+    
+    // 检查是否需要启用 HNSW
+    maybe_enable_hnsw(cache);
+    
     return CACHE_OK;
 }
 
@@ -80,6 +138,12 @@ int cache_vector_index_add(cache_t* cache, size_t entry_offset, const float* vec
 void cache_vector_index_remove(cache_t* cache, size_t entry_offset) {
     if (!cache) return;
     
+    // 从 HNSW 中删除
+    if (cache->vector_index.use_hnsw && cache->vector_index.hnsw) {
+        hnsw_remove(cache->vector_index.hnsw, entry_offset);
+    }
+    
+    // 从 entries 数组中删除
     size_t write = 0;
     for (size_t i = 0; i < cache->vector_index.count; i++) {
         if (cache->vector_index.entries[i].entry_offset != entry_offset) {
@@ -119,6 +183,12 @@ void cache_vector_index_rebuild(cache_t* cache) {
     cache->vector_index.entries = NULL;
     cache->vector_index.count = 0;
     cache->vector_index.capacity = 0;
+    
+    if (cache->vector_index.hnsw) {
+        hnsw_destroy(cache->vector_index.hnsw);
+        cache->vector_index.hnsw = NULL;
+    }
+    cache->vector_index.use_hnsw = 0;
     
     uint64_t now = cache_now_ms();
     size_t offset = CACHE_HEADER_SIZE;
@@ -178,6 +248,9 @@ void cache_vector_index_rebuild(cache_t* cache) {
         
         offset += cache_entry_total_size(h);
     }
+    
+    // 重建后检查是否需要启用 HNSW
+    maybe_enable_hnsw(cache);
 }
 
 // ====== 公共 API 实现 ======
@@ -279,7 +352,71 @@ int cache_search_vector(cache_t* cache, const float* query_vector, size_t dim,
     int max_results = top_k > 0 ? top_k : 10;
     const char* ns_filter = options ? options->ns_filter : NULL;
     
-    // 分配分数数组
+    // 如果启用了 HNSW 且数据量足够，使用近似搜索
+    if (cache->vector_index.use_hnsw && cache->vector_index.hnsw) {
+        size_t* ids = NULL;
+        float* scores = NULL;
+        
+        // 扩大搜索范围，然后过滤
+        int ef = (max_results > hnsw_get_ef_search(cache->vector_index.hnsw)) ? 
+                 max_results : hnsw_get_ef_search(cache->vector_index.hnsw);
+        hnsw_set_ef_search(cache->vector_index.hnsw, ef);
+        
+        size_t found = hnsw_search(cache->vector_index.hnsw, query_vector, max_results * 2, &ids, &scores);
+        
+        if (found == 0) return CACHE_OK;
+        
+        // 过滤无效结果和 namespace，应用 min_score
+        vector_score_t* valid_scores = malloc(sizeof(vector_score_t) * found);
+        if (!valid_scores) {
+            free(ids); free(scores);
+            return CACHE_ERR_NOMEM;
+        }
+        
+        size_t valid_count = 0;
+        for (size_t i = 0; i < found; i++) {
+            size_t entry_offset = ids[i];
+            if (!entry_is_valid(cache, entry_offset, now)) continue;
+            if (!ns_filter_match(cache, entry_offset, ns_filter)) continue;
+            if (scores[i] < min_score) continue;
+            
+            valid_scores[valid_count].entry_offset = entry_offset;
+            valid_scores[valid_count].score = scores[i];
+            valid_count++;
+        }
+        
+        free(ids);
+        free(scores);
+        
+        if (valid_count == 0) {
+            free(valid_scores);
+            return CACHE_OK;
+        }
+        
+        // 取前 top_k
+        size_t result_count = valid_count < (size_t)max_results ? valid_count : (size_t)max_results;
+        
+        cache_result_t* results = malloc(sizeof(cache_result_t) * result_count);
+        if (!results) {
+            free(valid_scores);
+            return CACHE_ERR_NOMEM;
+        }
+        
+        for (size_t i = 0; i < result_count; i++) {
+            size_t key_len, value_len;
+            results[i].key = entry_key(cache, valid_scores[i].entry_offset, &key_len);
+            results[i].value = entry_value(cache, valid_scores[i].entry_offset, &value_len);
+            results[i].score = valid_scores[i].score;
+        }
+        
+        free(valid_scores);
+        
+        *out_results = results;
+        *out_count = result_count;
+        return CACHE_OK;
+    }
+    
+    // 暴力精确搜索（少量数据或 HNSW 未启用）
     vector_score_t* scores = malloc(sizeof(vector_score_t) * cache->vector_index.count);
     if (!scores) return CACHE_ERR_NOMEM;
     

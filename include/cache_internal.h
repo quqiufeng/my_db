@@ -2,6 +2,7 @@
 #define CACHE_INTERNAL_H
 
 #include "cache.h"
+#include "cache_hnsw.h"
 #include "mydb_internal.h"  // 复用 db_pool_t, error handling 等
 #include <stdbool.h>
 #include <regex.h>
@@ -122,6 +123,7 @@ typedef struct {
 
 // ====== Vector 索引 ======
 #define CACHE_MAX_VECTOR_DIM 1536  // 最大向量维度（OpenAI text-embedding-3-small=1536）
+#define CACHE_HNSW_THRESHOLD 1000  // 超过此数量启用 HNSW
 
 typedef struct {
     size_t entry_offset;        // 对应的 entry offset
@@ -130,9 +132,11 @@ typedef struct {
 } cache_vector_entry_t;
 
 typedef struct {
-    cache_vector_entry_t* entries;  // 向量条目数组
+    cache_vector_entry_t* entries;  // 向量条目数组（暴力搜索用）
     size_t count;                   // 当前数量
     size_t capacity;                // 数组容量
+    hnsw_index_t* hnsw;             // HNSW 近似索引（NULL = 未启用）
+    int use_hnsw;                   // 1 = 当前使用 HNSW
 } cache_vector_index_t;
 
 // ====== Hot Cache（热点缓存，加速重复读取）======

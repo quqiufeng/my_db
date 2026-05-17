@@ -13,6 +13,7 @@ tests/test_wal
 tests/test_cache
 tests/test_cache_full
 tests/test_http_server
+tests/test_hnsw
 examples/example_c
 
 # Tool binaries
