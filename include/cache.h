@@ -129,6 +129,9 @@ const char* cache_get_ns(cache_t* cache, const char* ns, const char* key);
 // 在指定 namespace 内删除 key
 int cache_del_ns(cache_t* cache, const char* ns, const char* key);
 
+// 删除整个 namespace 及其下所有 entry
+int cache_del_namespace(cache_t* cache, const char* ns);
+
 // ====== 生命周期管理 ======
 // 立即过期某个 key
 int cache_expire(cache_t* cache, const char* key);

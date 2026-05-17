@@ -956,6 +956,96 @@ int cache_del_ns(cache_t* cache, const char* ns, const char* key) {
     return ret;
 }
 
+// 删除整个 namespace 下的所有 entry
+// 利用 sorted array 中 key 按字典序排列的特性，namespace 下的条目是连续的
+int cache_del_namespace(cache_t* cache, const char* ns) {
+    if (!cache || !ns) return CACHE_ERR_INVAL;
+    
+    size_t ns_len = strlen(ns);
+    while (ns_len > 0 && ns[ns_len - 1] == '/') ns_len--;
+    if (ns_len == 0) return CACHE_ERR_INVAL;
+    
+    // 构建 namespace 前缀（确保以 / 结尾）
+    char* ns_prefix = malloc(ns_len + 2);
+    if (!ns_prefix) return CACHE_ERR_NOMEM;
+    memcpy(ns_prefix, ns, ns_len);
+    ns_prefix[ns_len] = '/';
+    ns_prefix[ns_len + 1] = '\0';
+    size_t prefix_len = ns_len + 1;
+    
+    // 在 sorted array 中查找范围
+    size_t start = cache_sorted_find_lower_bound(cache, ns_prefix, prefix_len);
+    
+    // 构建 upper bound：namespace 的下一个字典序前缀
+    // 例如 /books/staff-engineer/ 的 upper bound 是 /books/staff-engineer0
+    char* upper_key = malloc(ns_len + 2);
+    if (!upper_key) { free(ns_prefix); return CACHE_ERR_NOMEM; }
+    memcpy(upper_key, ns, ns_len);
+    upper_key[ns_len] = '0';  // '0' 的 ASCII 码在 '/' 之后
+    upper_key[ns_len + 1] = '\0';
+    size_t end = cache_sorted_find_lower_bound(cache, upper_key, ns_len + 1);
+    free(upper_key);
+    
+    if (start >= cache->sorted.count || start >= end) {
+        free(ns_prefix);
+        return CACHE_OK;  // namespace 不存在或为空
+    }
+    
+    // 批量删除 [start, end) 范围内的条目
+    size_t deleted = 0;
+    for (size_t i = start; i < end; i++) {
+        size_t offset = cache_sorted_get(cache, i);
+        if (offset == 0) continue;
+        
+        cache_entry_header_t* h = (cache_entry_header_t*)CACHE_PTR(cache, offset);
+        if (h->flags & CACHE_ENTRY_DELETED) continue;
+        
+        // 再次确认 key 前缀匹配
+        const char* key = (const char*)CACHE_PTR(cache, offset + sizeof(cache_entry_header_t));
+        if (strncmp(key, ns_prefix, prefix_len) != 0) continue;
+        
+        // 标记删除
+        h->flags |= CACHE_ENTRY_DELETED;
+        h->expire_at = 1;
+        cache->entry_count--;
+        deleted++;
+    }
+    
+    // 从 sorted array 中移除（压缩数组）
+    if (deleted > 0) {
+        size_t write = start;
+        for (size_t i = start; i < end; i++) {
+            size_t offset = cache->sorted.offsets[i];
+            cache_entry_header_t* h = (cache_entry_header_t*)CACHE_PTR(cache, offset);
+            if (!(h->flags & CACHE_ENTRY_DELETED)) {
+                cache->sorted.offsets[write++] = offset;
+            }
+        }
+        // 将后面的元素前移
+        size_t remaining = cache->sorted.count - end;
+        if (remaining > 0) {
+            memmove(&cache->sorted.offsets[write], &cache->sorted.offsets[end], 
+                    remaining * sizeof(size_t));
+        }
+        cache->sorted.count = write + remaining;
+        cache->sorted.dirty = 1;
+        
+        // 从 hash index 和 namespace index 中移除
+        for (size_t i = start; i < end; i++) {
+            size_t offset = cache_sorted_get(cache, i);
+            if (offset == 0) continue;
+            cache_entry_header_t* h = (cache_entry_header_t*)CACHE_PTR(cache, offset);
+            if (h->flags & CACHE_ENTRY_DELETED) continue;
+            const char* key = (const char*)CACHE_PTR(cache, offset + sizeof(cache_entry_header_t));
+            cache_hash_remove(cache, key, h->key_len);
+            cache_ns_remove(cache, key);
+        }
+    }
+    
+    free(ns_prefix);
+    return CACHE_OK;
+}
+
 int cache_expire(cache_t* cache, const char* key) {
     if (!cache || !key) return CACHE_ERR_INVAL;
     
