@@ -564,6 +564,28 @@ make example      # 编译 C 示例
 make install      # 安装到 /usr/local
 ```
 
+### 电子书解析库编译（可选）
+
+如需使用电子书导入功能（MOBI/AZW3/PDF），需额外编译 wrapper：
+
+**依赖（需预先编译安装）：**
+- `/opt/libmobi/src/.libs/libmobi.a` — libmobi 静态库（MOBI/AZW3 解析）
+- `/opt/mupdf/build/release/libmupdf.a` — MuPDF 静态库（PDF 解析）
+- `/opt/mupdf/build/release/libmupdf-third.a` — MuPDF 第三方库
+
+**编译：**
+```bash
+cd src/importer/wrappers
+make              # 编译 MOBI + PDF 两个 wrapper
+make mobi         # 只编译 MOBI/AZW3 wrapper
+make pdf          # 只编译 PDF wrapper
+make clean        # 清理编译产物
+```
+
+**输出：**
+- `src/importer/libs/libmobiparse.so` — MOBI/AZW3 解析库
+- `src/importer/libs/libpdfparse.so` — PDF 解析库
+
 ## LuaJIT API 参考
 
 ### 数据库生命周期
