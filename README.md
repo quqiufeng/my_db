@@ -311,7 +311,7 @@ curl -X POST -H "Content-Type: application/json" \
 
 ### 导入工具
 
-- **电子书**：`tools/import_book.c` — 支持 MOBI/PDF/EPUB，按 ~4KB 分块
+- **电子书**：`tools/import_book.c` — 支持 MOBI/AZW3/PDF
 - **GitHub 源码**：`tools/import_github.py` — ctags 提取符号 + 源码存储
 
 ## 架构设计
@@ -819,7 +819,7 @@ my_db/
 │   └── cache_cli.py         # CLI 工具（cache 命令）
 ├── tools/
 │   ├── cache_server.c       # 独立服务器可执行文件
-│   ├── import_book.c        # 电子书导入（MOBI/PDF/EPUB）
+│   ├── import_book.c        # 电子书导入（MOBI/AZW3/PDF）
 │   ├── import_github.py     # GitHub 源码导入
 │   └── vector_helper.py     # 向量搜索 Python helper
 └── tests/

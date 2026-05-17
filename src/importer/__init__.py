@@ -293,25 +293,6 @@ def parse_pdf(path: str) -> dict:
         }
 
 
-def parse_epub(path: str) -> dict:
-    """解析 EPUB 文件，返回文本和页数
-
-    底层复用 MuPDF 的文档解析能力，支持 EPUB/FB2 等格式。
-
-    Args:
-        path: 文件路径
-
-    Returns:
-        {"page_count": N, "text": "..."}
-    """
-    with PdfParser() as parser:
-        parser.open(path)
-        return {
-            "page_count": parser.page_count,
-            "text": parser.extract_text(),
-        }
-
-
 # ========================================================================
 # 测试
 # ========================================================================
@@ -355,11 +336,6 @@ if __name__ == "__main__":
             print(f"   Text length: {len(result['text'])} chars")
         elif ext == ".pdf":
             result = parse_pdf(filepath)
-            print(f"   Pages: {result['page_count']}")
-            print(f"   Text length: {len(result['text'])} chars")
-            print(f"   Preview: {result['text'][:200]}...")
-        elif ext == ".epub":
-            result = parse_epub(filepath)
             print(f"   Pages: {result['page_count']}")
             print(f"   Text length: {len(result['text'])} chars")
             print(f"   Preview: {result['text'][:200]}...")

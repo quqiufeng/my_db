@@ -13,7 +13,7 @@ typedef struct {
     size_t offset;  // MOBI: byte offset, PDF: page number
 } ChapterInfo;
 
-// 简单的分块函数：将文本按段落分成多个块
+// 分块函数：将文本按段落或固定长度分成多个块
 static int split_into_paragraphs(const char* text, size_t text_len,
                                   char*** out_paragraphs, int max_paragraphs) {
     int count = 0;
@@ -23,6 +23,7 @@ static int split_into_paragraphs(const char* text, size_t text_len,
     char** paragraphs = (char**)malloc(sizeof(char*) * max_paragraphs);
     if (!paragraphs) return 0;
     
+    // 首先尝试按换行分段
     while (p < end && count < max_paragraphs) {
         // 跳过空白
         while (p < end && (*p == '\n' || *p == '\r' || *p == ' ' || *p == '\t')) p++;
@@ -44,7 +45,7 @@ static int split_into_paragraphs(const char* text, size_t text_len,
         }
         
         size_t len = para_end - p;
-        if (len > 0) {
+        if (len > 10) {  // 至少10个字符才算有效段落
             paragraphs[count] = (char*)malloc(len + 1);
             if (paragraphs[count]) {
                 memcpy(paragraphs[count], p, len);
@@ -57,6 +58,54 @@ static int split_into_paragraphs(const char* text, size_t text_len,
         while (p < end && (*p == '\n' || *p == '\r')) p++;
     }
     
+    // 如果段落太少（每个章节少于3段），使用固定长度分段
+    if (count > 0 && count < 3) {
+        // 释放之前的段落
+        for (int i = 0; i < count; i++) {
+            free(paragraphs[i]);
+        }
+        count = 0;
+        
+        const char* p = text;
+        size_t chunk_size = 500;  // 每段约500字符
+        
+        while (p < end && count < max_paragraphs) {
+            // 跳过空白
+            while (p < end && (*p == '\n' || *p == '\r' || *p == ' ' || *p == '\t')) p++;
+            if (p >= end) break;
+            
+            // 找段落结束：优先在句号后断行
+            const char* para_end = p;
+            size_t current_size = 0;
+            const char* last_period = NULL;
+            
+            while (para_end < end && current_size < chunk_size) {
+                if (*para_end == '。' || *para_end == '.' || *para_end == '！' || *para_end == '？') {
+                    last_period = para_end;
+                }
+                para_end++;
+                current_size++;
+            }
+            
+            // 如果在句号后断行更好
+            if (last_period && last_period > p + 100) {
+                para_end = last_period + 1;
+            }
+            
+            size_t len = para_end - p;
+            if (len > 10) {
+                paragraphs[count] = (char*)malloc(len + 1);
+                if (paragraphs[count]) {
+                    memcpy(paragraphs[count], p, len);
+                    paragraphs[count][len] = '\0';
+                    count++;
+                }
+            }
+            
+            p = para_end;
+        }
+    }
+    
     *out_paragraphs = paragraphs;
     return count;
 }
@@ -67,6 +116,30 @@ static void free_paragraphs(char** paragraphs, int count) {
         free(paragraphs[i]);
     }
     free(paragraphs);
+}
+
+// 检查段落是否是 CSS 样式
+static int is_css_content(const char* text) {
+    // CSS 特征：包含 .class 或 { ... } 或 @media 等
+    if (strstr(text, "{") && strstr(text, "}")) return 1;
+    if (strstr(text, "@media")) return 1;
+    if (strstr(text, "@-webkit-")) return 1;
+    if (strstr(text, ".calibre")) return 1;
+    // 检查是否全是 CSS 属性（如 margin:、padding:、font- 等）
+    int css_props = 0;
+    const char* css_keywords[] = {"margin", "padding", "font-", "display:", "text-align:", "text-indent:", "line-height:", "height:", "width:", "color:", "background", "border", "position:", NULL};
+    for (int i = 0; css_keywords[i]; i++) {
+        if (strstr(text, css_keywords[i])) css_props++;
+    }
+    if (css_props >= 2) return 1;
+    return 0;
+}
+
+// 检查段落是否是 HTML 标签残留
+static int is_html_markup(const char* text) {
+    // 如果以 < 开头且包含 >，可能是 HTML
+    if (text[0] == '<' && strchr(text, '>')) return 1;
+    return 0;
 }
 
 // 存储章节内容到 cache
@@ -85,21 +158,38 @@ static int import_chapter(cache_t* cache, const char* chapter_ns,
     char** paragraphs = NULL;
     int para_count = split_into_paragraphs(text, text_len, &paragraphs, 1000);
     
-    printf("  Chapter '%s': %d paragraphs\n", title, para_count);
-    
+    int valid_count = 0;
     for (int i = 0; i < para_count; i++) {
-        snprintf(key, sizeof(key), "%s/content/p%04d", chapter_ns, i);
+        if (!is_css_content(paragraphs[i]) && !is_html_markup(paragraphs[i])) {
+            valid_count++;
+        }
+    }
+    
+    printf("  Chapter '%s': %d paragraphs (%d valid)\n", title, para_count, valid_count);
+    if (para_count == 0) {
+        printf("  WARNING: No paragraphs found!\n");
+    }
+    
+    int idx = 0;
+    for (int i = 0; i < para_count; i++) {
+        // 跳过 CSS 和 HTML 内容
+        if (is_css_content(paragraphs[i]) || is_html_markup(paragraphs[i])) {
+            continue;
+        }
+        
+        snprintf(key, sizeof(key), "%s/content/p%04d", chapter_ns, idx);
         
         // JSON value
         snprintf(value, sizeof(value),
                  "{\"t\":\"paragraph\",\"c\":\"%.900s\",\"idx\":%d,\"total\":%d}",
-                 paragraphs[i], i, para_count);
+                 paragraphs[i], idx, valid_count);
         
         int ret = cache_set(cache, key, value, 0);
         if (ret != CACHE_OK) {
-            printf("    Failed to set paragraph %d: %d\n", i, ret);
+            printf("    Failed to set paragraph %d: %d\n", idx, ret);
         }
         total_paragraphs++;
+        idx++;
     }
     
     free_paragraphs(paragraphs, para_count);
@@ -138,6 +228,8 @@ static int import_book_chapters(cache_t* cache, const char* namespace,
     
     int total_paragraphs = 0;
     
+    printf("DEBUG: Starting chapter loop\n");
+    
     if (chapter_count <= 1) {
         // 没有章节信息，整本书作为一个章节
         char chapter_ns[512];
@@ -163,30 +255,63 @@ static int import_book_chapters(cache_t* cache, const char* namespace,
             snprintf(chapter_ns, sizeof(chapter_ns), "%s/chapters/%02d-%s", 
                      namespace, i + 1, safe_title);
             
-            // 计算章节文本范围
+            // 计算章节文本范围：在文本中搜索章节标题位置
             const char* chapter_text = text;
             size_t chapter_len = text_len;
             
-            if (i < chapter_count - 1) {
-                // 使用下一个章节的偏移作为结束
-                // 简化处理：MOBI 用字节偏移，PDF 用页码
-                // 这里我们简单地将文本按章节数均分
-                size_t start = (i * text_len) / chapter_count;
-                size_t end = ((i + 1) * text_len) / chapter_count;
-                chapter_text = text + start;
-                chapter_len = end - start;
-            } else {
-                // 最后一个章节
-                size_t start = (i * text_len) / chapter_count;
-                chapter_text = text + start;
-                chapter_len = text_len - start;
+            if (chapter_count > 1) {
+                // 方法：查找所有匹配该标题的位置，选择正文中的那个（后面有大量正文）
+                const char* best_pos = NULL;
+                size_t best_body_len = 0;
+                
+                const char* search_start = text;
+                while (search_start < text + text_len) {
+                    const char* found = strstr(search_start, chapters[i].title);
+                    if (!found) break;
+                    
+                    // 计算该位置后面的正文长度（到下一个章节标题或文本结束）
+                    size_t body_len = text_len - (found - text);
+                    if (i < chapter_count - 1) {
+                        const char* next = strstr(found + 1, chapters[i+1].title);
+                        if (next) {
+                            body_len = next - found;
+                        }
+                    }
+                    
+                    // 选择正文最长的位置（跳过目录中的短匹配）
+                    if (body_len > best_body_len) {
+                        best_body_len = body_len;
+                        best_pos = found;
+                    }
+                    
+                    search_start = found + 1;
+                }
+                
+                if (best_pos) {
+                    chapter_text = best_pos;
+                    chapter_len = best_body_len;
+                } else {
+                    // 回退到均分
+                    size_t start = (i * text_len) / chapter_count;
+                    if (i < chapter_count - 1) {
+                        size_t end = ((i + 1) * text_len) / chapter_count;
+                        chapter_text = text + start;
+                        chapter_len = end - start;
+                    } else {
+                        chapter_text = text + start;
+                        chapter_len = text_len - start;
+                    }
+                }
             }
             
+            printf("DEBUG: Importing chapter %d/%d: %s\n", i+1, chapter_count, chapters[i].title);
             total_paragraphs += import_chapter(cache, chapter_ns, chapters[i].title, 
                                                   chapter_text, chapter_len);
+            printf("DEBUG: Chapter %d done\n", i+1);
         }
     }
     
+    printf("DEBUG: All chapters done\n");
     return total_paragraphs;
 }
 
@@ -276,6 +401,7 @@ int main(int argc, char* argv[]) {
         
         void* (*mobi_open)(const char*) = dlsym(lib, "mobi_open");
         int (*mobi_extract_text)(void*, char**, size_t*) = dlsym(lib, "mobi_extract_text");
+        int (*mobi_get_chapter_text)(void*, int, char**, size_t*) = dlsym(lib, "mobi_get_chapter_text");
         int (*mobi_get_metadata)(void*, char*, size_t, char*, size_t) = dlsym(lib, "mobi_get_metadata");
         int (*mobi_get_chapters)(void*, void**, int*) = dlsym(lib, "mobi_get_chapters");
         void (*mobi_close)(void*) = dlsym(lib, "mobi_close");
@@ -291,13 +417,8 @@ int main(int argc, char* argv[]) {
         char title[512] = {0}, author[512] = {0};
         mobi_get_metadata(handle, title, sizeof(title), author, sizeof(author));
         
-        char* text = NULL;
-        size_t text_len = 0;
-        mobi_extract_text(handle, &text, &text_len);
-        
         printf("Title: %s\n", title);
         printf("Author: %s\n", author);
-        printf("Text length: %zu\n", text_len);
         
         // 获取章节列表
         ChapterInfo* chapters = NULL;
@@ -311,15 +432,23 @@ int main(int argc, char* argv[]) {
             printf("  [%d] %s (level=%d)\n", i + 1, chapters[i].title, chapters[i].level);
         }
         
-        if (text && text_len > 0) {
-            paragraphs = import_book_chapters(cache, namespace, title, author, 
-                                               text, text_len, chapters, chapter_count);
+        // 使用 mobi_extract_text 提取整本书文本，然后按标题切分
+        if (mobi_extract_text) {
+            char* text = NULL;
+            size_t text_len = 0;
+            mobi_extract_text(handle, &text, &text_len);
+            printf("Text length: %zu\n", text_len);
+            
+            if (text && text_len > 0) {
+                paragraphs = import_book_chapters(cache, namespace, title, author, 
+                                                   text, text_len, chapters, chapter_count);
+            }
         }
         
         mobi_close(handle);
         dlclose(lib);
         
-    } else if (strcasecmp(ext, ".pdf") == 0 || strcasecmp(ext, ".epub") == 0) {
+    } else if (strcasecmp(ext, ".pdf") == 0) {
         void* lib = load_pdf_lib();
         if (!lib) {
             cache_close(cache);
