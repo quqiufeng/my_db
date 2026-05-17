@@ -265,7 +265,7 @@ int main(int argc, char* argv[]) {
     // 解析并导入
     int paragraphs = 0;
     
-    if (strcasecmp(ext, ".mobi") == 0 || strcasecmp(ext, ".azw") == 0) {
+    if (strcasecmp(ext, ".mobi") == 0 || strcasecmp(ext, ".azw") == 0 || strcasecmp(ext, ".azw3") == 0) {
         void* lib = load_mobi_lib();
         if (!lib) {
             cache_close(cache);
