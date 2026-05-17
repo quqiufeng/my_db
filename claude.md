@@ -403,6 +403,259 @@ idx->data_offset = hash_create(&t->index_pool);
 
 ---
 
+## 11. KV Cache 审计最佳实践（三轮代码审查经验）
+
+### 11.1 栈分配优于堆分配
+
+**问题**: `cache_find_entry()` 每次查询都 `malloc(sizeof(cache_entry_t))`，在 `cache_get` 返回后 caller 忘记 `free`，造成每查询一次的内存泄漏。
+
+**修复**:
+```c
+// ❌ 错误：内部 malloc，caller 容易忘记 free
+cache_entry_t* cache_find_entry(cache_t* cache, const char* key) {
+    cache_entry_t* entry = malloc(sizeof(cache_entry_t));  // 泄漏！
+    cache_entry_parse(cache, offset, entry);
+    return entry;
+}
+const char* cache_get(...) {
+    cache_entry_t* entry = cache_find_entry(cache, key);
+    // ... 使用 entry ...
+    // 忘记 free(entry) → 泄漏
+}
+
+// ✅ 正确：调用者提供栈上的结构体
+static int cache_find_entry(cache_t* cache, const char* key, cache_entry_t* out_entry) {
+    cache_entry_parse(cache, offset, out_entry);
+    return 1;
+}
+const char* cache_get(...) {
+    cache_entry_t entry;  // 栈上分配
+    if (!cache_find_entry(cache, key, &entry)) return NULL;
+    // ... 使用 entry ...
+    // 自动释放，无需 free
+}
+```
+
+**实践**: 对于不超过 64 bytes 的临时结构体，优先使用栈分配；如果必须堆分配，确保 `malloc` 和 `free` 在同一函数的同一缩进层级。
+
+### 11.2 多索引一致性：删除/更新时同步所有索引
+
+**问题**: `cache_del` 或 LRU 淘汰时只从部分索引（hash + sorted + namespace）移除，遗漏了 tag_index、vector_index、hot_cache，导致这些索引指向已删除/已释放的 entry。
+
+**修复**:
+```c
+// ❌ 错误：只移除了部分索引
+cache_hash_remove(cache, key, key_len);
+cache_sorted_remove(cache, key, key_len);
+cache_ns_remove(cache, key);
+// 遗漏：tag_index, vector_index, hot_cache 仍指向已删除的 entry
+
+// ✅ 正确：统一维护所有索引
+cache_hash_remove(cache, key, key_len);
+cache_sorted_remove(cache, key, key_len);
+cache_ns_remove(cache, key);
+cache_tag_index_remove(cache, entry_offset, value, value_len);  // 不要遗漏
+cache_vector_index_remove(cache, entry_offset);                 // 不要遗漏
+hot_cache_invalidate(cache, key, key_len);                      // 不要遗漏
+```
+
+**实践**: 每次删除 entry 时，写一个 "索引维护清单"，确保 hash、sorted、namespace、tag、vector、hot_cache 全部更新。新增索引时必须同步更新删除路径。
+
+### 11.3 先创建主体再分配辅助数据
+
+**问题**: `cache_set_vector()` 先在 pool 中分配向量数据，再调用 `cache_set()` 创建 entry。如果 `cache_set()` 失败（内存不足），向量数据已写入 pool 但无任何 entry 引用，成为永久孤儿数据。
+
+**修复**:
+```c
+// ❌ 错误：先分配向量，再创建 entry → 孤儿数据
+size_t vector_offset = alloc_vector_data(cache, vector, dim);  // pool 已分配
+int ret = cache_set(cache, key, value, ttl_ms);  // 失败 → 向量孤儿
+
+// ✅ 正确：先创建 entry，成功后再分配向量
+int ret = cache_set(cache, key, value, ttl_ms);  // 先确保 entry 创建成功
+if (ret != CACHE_OK) return ret;
+size_t vector_offset = alloc_vector_data(cache, vector, dim);  // 再分配向量
+```
+
+**实践**: 遵循"主体优先"原则——先创建可被引用的主体对象，再创建依赖于主体的辅助数据。
+
+### 11.4 循环条件避免双重计算
+
+**问题**: LRU 淘汰循环中，`memory_used` 已在每次淘汰后递减，但循环条件仍使用 `memory_max - evicted`，导致 `evicted` 被重复计算，循环可能提前结束或过度淘汰。
+
+**修复**:
+```c
+// ❌ 错误：evicted 被重复计算（memory_used 已递减 + memory_max - evicted）
+for (size_t i = 0; i < candidate_count && 
+     cache->memory_used + aligned_size > cache->memory_max - evicted; i++) {
+    // memory_used 在这里 -= c->total_size
+    // evicted 又在这里 += c->total_size
+    // 双重计算！
+}
+
+// ✅ 正确：memory_used 已实时更新，无需再减去 evicted
+for (size_t i = 0; i < candidate_count && 
+     cache->memory_used + aligned_size > cache->memory_max; i++) {
+    cache->memory_used -= c->total_size;  // 直接递减即可
+}
+```
+
+**实践**: 循环条件中不要维护一个"已处理总量"变量，除非原始值不会被修改。优先使用实时更新的状态值作为判断依据。
+
+### 11.5 边界检查：malloc(0) 和空 key
+
+**问题**: 
+- `malloc(sizeof(x) * 0)` 的返回值是未定义行为（C 标准允许返回 NULL 或有效指针）
+- `cache_set_ns()` 未检查空 key（`key_len == 0`），导致分配了 `ns_len + 2` 字节但实际写入空字符串
+
+**修复**:
+```c
+// ❌ 错误：未检查 entry_count == 0
+evict_candidate_t* candidates = malloc(sizeof(evict_candidate_t) * cache->entry_count);
+// entry_count == 0 时，malloc(0) 行为未定义
+
+// ✅ 正确：前置检查
+if (cache->entry_count == 0) return CACHE_ERR_NOMEM;
+evict_candidate_t* candidates = malloc(sizeof(evict_candidate_t) * cache->entry_count);
+
+// ❌ 错误：未检查空 key
+size_t key_len = strlen(key);
+char* full_key = malloc(ns_len + 1 + key_len + 1);
+
+// ✅ 正确：前置验证
+if (key_len == 0) return CACHE_ERR_INVAL;
+```
+
+**实践**: 
+- `malloc(N * count)` 前检查 `count > 0`
+- 所有字符串参数使用前检查 `strlen > 0`
+- 文件加载时的尺寸字段也要验证合理范围
+
+### 11.6 扫描时跳过非目标数据用 continue，不用 break
+
+**问题**: `cache_purge_expired()` 遇到 `key_len == 0` 时使用 `break`，但 pool 中 hash bucket 数组的初始内存也可能为 0，导致扫描提前中断，遗漏后面的过期条目。
+
+**修复**:
+```c
+// ❌ 错误：遇到 0 就 break，可能提前中断
+while (offset < pool.used) {
+    cache_entry_header_t* h = CACHE_PTR(cache, offset);
+    if (h->key_len == 0) break;  // hash bucket 也可能是 0！
+    // 处理 entry ...
+}
+
+// ✅ 正确：用 continue + 固定步进跳过非 entry 数据
+while (offset + sizeof(cache_entry_header_t) <= pool.used) {
+    cache_entry_header_t* h = CACHE_PTR(cache, offset);
+    if (h->key_len == 0 || h->key_len > MAX_KEY_LEN || h->value_len > MAX_VALUE_LEN) {
+        offset += MYDB_ALIGN;  // 跳过对齐大小（可能是 hash bucket）
+        continue;
+    }
+    // 处理 entry ...
+    offset += cache_entry_total_size(h);
+}
+```
+
+**实践**: 扫描持久化数据时，始终使用 `continue` 跳过非目标数据，只在越界时使用 `break`。同时验证 `offset + header_size <= used` 防止越界读取。
+
+### 11.7 避免不必要的字符串拷贝
+
+**问题**: `cache_search_regex()` 对每个 entry 都 `malloc(key_len + 1)` 复制 key，但实际上 key 在 pool 中已以 `\0` 结尾，可以直接传给 `regexec()`。
+
+**修复**:
+```c
+// ❌ 错误：不必要的 malloc/free
+char* key_copy = malloc(key_len + 1);
+memcpy(key_copy, key, key_len);
+key_copy[key_len] = '\0';
+int match = (regexec(&regex, key_copy, ...) == 0);
+free(key_copy);
+
+// ✅ 正确：pool 中的 key 已 null-terminated，直接使用
+int match = (regexec(&regex, key, ...) == 0);
+```
+
+**实践**: 当数据存储在 pool/mmap 中时，确认 layout 中已包含 null-terminator，避免无谓的拷贝。写入时确保 `key_ptr[key_len] = '\0'`。
+
+### 11.8 批量操作必须更新所有索引
+
+**问题**: `cache_batch_set()` 优化性能时，添加了 hash、sorted、namespace 索引更新，但遗漏了 tag_index。导致批量插入的条目无法通过 tag 搜索找到。
+
+**修复**:
+```c
+// ❌ 错误：batch set 遗漏 tag 索引
+for (size_t i = 0; i < count; i++) {
+    cache_hash_insert(cache, offsets[i], key, key_len);
+    cache_ns_add(cache, key, offsets[i]);
+}
+
+// ✅ 正确：batch set 更新所有索引
+for (size_t i = 0; i < count; i++) {
+    cache_hash_insert(cache, offsets[i], key, key_len);
+    cache_ns_add(cache, key, offsets[i]);
+    cache_tag_index_add(cache, offsets[i], value, value_len);  // 不要遗漏
+}
+```
+
+**实践**: 批量操作优化时，逐一检查所有索引类型。新增索引时，同步更新 batch、single-insert、recovery 三条路径。
+
+### 11.9 重启时必须重建所有内存索引
+
+**问题**: `cache_open()` 恢复时扫描所有 entry 重建 hash、sorted、namespace 索引，但遗漏了 tag_index。重启后 tag 搜索退化为 O(n) 全表扫描。
+
+**修复**:
+```c
+// ❌ 错误：恢复时遗漏 tag 索引
+if (!(header->flags & CACHE_ENTRY_DELETED)) {
+    cache_hash_insert(cache, offset, key, header->key_len);
+    cache_sorted_insert(cache, offset);
+    cache_ns_add(cache, key, offset);
+    // 遗漏 cache_tag_index_add
+}
+
+// ✅ 正确：恢复时重建所有内存索引
+if (!(header->flags & CACHE_ENTRY_DELETED)) {
+    const char* value = key + header->key_len + 1;
+    cache_hash_insert(cache, offset, key, header->key_len);
+    cache_sorted_insert(cache, offset);
+    cache_ns_add(cache, key, offset);
+    cache_tag_index_add(cache, offset, value, header->value_len);  // 不要遗漏
+}
+```
+
+**实践**: 所有"内存中构建、不持久化"的索引（sorted array、tag index、vector index、hot cache、skip list），必须在 `cache_open` 的恢复扫描中重建。新增此类索引时，同步更新恢复逻辑。
+
+### 11.10 跳表/排序数组的一致性
+
+**问题**: `cache_sorted_remove()` 找到条目并从 sorted array 删除后，跳表删除代码放在了"未找到"分支中（死代码），导致跳表永远得不到更新，积累大量已删除节点。
+
+**修复**:
+```c
+// ❌ 错误：skiplist_remove 在未找到分支中（死代码）
+if (found) {
+    sorted->offsets[mid] = sorted->offsets[count - 1];
+    sorted->count--;
+    return 0;  // 找到并删除，但没有更新跳表
+}
+if (sorted->skiplist) {
+    cache_skiplist_remove(sorted->skiplist, key, key_len);  // 死代码
+}
+
+// ✅ 正确：找到并删除后立即更新跳表
+if (found) {
+    sorted->offsets[mid] = sorted->offsets[count - 1];
+    sorted->count--;
+    if (sorted->skiplist) {
+        cache_skiplist_remove(sorted->skiplist, key, key_len);  // 正确位置
+    }
+    return 0;
+}
+```
+
+**实践**: 复合索引结构（sorted array + skip list）中，每种索引的删除操作必须在同一代码路径中处理。删除前先确认该路径确实会被执行到。
+
+---
+
 ## 总结
 
 ### 最重要的 5 条原则
@@ -413,7 +666,17 @@ idx->data_offset = hash_create(&t->index_pool);
 4. **版本控制文件格式** - magic + version + used 的文件头，加载时严格验证
 5. **测试覆盖边界** - 空表、越界、重复、泄漏、性能，每个场景都有断言
 
+### KV Cache 审计追加原则
+
+6. **栈分配 > 堆分配** - 小于 64 bytes 的临时结构体全部用栈，避免泄漏
+7. **删除维护清单** - 每次删除 entry 时，逐一检查 hash/sorted/ns/tag/vector/hot 六个索引
+8. **主体优先** - 先创建可引用的主体对象，再分配依赖于主体的辅助数据
+9. **继续而非中断** - 扫描 pool 时遇到非目标数据用 `continue`，仅在越界时 `break`
+10. **批量一致** - batch API 必须更新所有索引，新增索引时同步更新 batch/recovery/single-insert 三条路径
+11. **重启重建** - 所有"内存中构建"的索引必须在 `cache_open` 恢复时重建
+12. **条件正确性** - 循环条件中避免维护"已处理总量"，使用实时更新的状态值
+
 ---
 
-*文档生成时间: 2026-05-16*
-*基于提交: 2a354bb .. 97a8a17*
+*文档生成时间: 2026-05-17*
+*基于提交: 2a354bb .. 4294ebf (含三轮 KV Cache 审计)*
