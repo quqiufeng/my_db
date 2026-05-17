@@ -61,6 +61,7 @@ typedef struct {
     size_t* offsets;            // entry offset 数组（按 key 字典序排列）
     size_t count;               // 当前数量
     size_t capacity;            // 数组容量
+    int dirty;                  // 1 = 需要重新排序（延迟排序优化）
 } cache_sorted_array_t;
 
 // ====== Namespace 索引 ======
@@ -82,6 +83,15 @@ struct cache_iter {
     size_t ns_prefix_len;       // namespace 前缀长度
 };
 
+// ====== Hot Cache（热点缓存，加速重复读取）======
+#define CACHE_HOT_SIZE 64
+
+typedef struct {
+    uint64_t key_hash;          // key 的 FNV hash
+    size_t entry_offset;        // entry 在 pool 中的 offset
+    uint64_t access_time;       // 最后访问时间
+} cache_hot_entry_t;
+
 // ====== Cache 实例 ======
 struct cache {
     db_pool_t pool;             // mmap pool（复用 my_db）
@@ -90,6 +100,10 @@ struct cache {
     cache_hash_index_t hash;    // Hash 索引：key → entry_offset
     cache_sorted_array_t sorted; // 排序数组：按 key 字典序排列
     cache_ns_node_t* ns_root;   // Namespace 树
+    
+    // 热点缓存
+    cache_hot_entry_t hot_cache[CACHE_HOT_SIZE];
+    size_t hot_count;
     
     // 统计
     size_t entry_count;         // 总条目数（不含已删除）

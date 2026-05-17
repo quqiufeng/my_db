@@ -50,33 +50,31 @@ static int hash_resize(cache_t* cache) {
     
     // 遍历旧 bucket，重新分配到新 bucket
     for (size_t i = 0; i < old_count; i++) {
-        size_t entry_offset = old_buckets[i].entry_offset;
-        while (entry_offset) {
-            cache_entry_header_t* header = (cache_entry_header_t*)CACHE_PTR(cache, entry_offset);
-            char* key = (char*)CACHE_PTR(cache, entry_offset + sizeof(cache_entry_header_t));
+        size_t node_offset = old_buckets[i].entry_offset;
+        while (node_offset) {
+            cache_hash_bucket_t* node = (cache_hash_bucket_t*)CACHE_PTR(cache, node_offset);
+            cache_entry_header_t* header = (cache_entry_header_t*)CACHE_PTR(cache, node->entry_offset);
+            char* key = (char*)CACHE_PTR(cache, node->entry_offset + sizeof(cache_entry_header_t));
             
             // 计算新 hash
             uint64_t h = hash_fnv1a(key, header->key_len);
             size_t idx = h % new_count;
             
-            // 保存 next（在旧链中的下一个）
-            size_t next_offset = old_buckets[i].next_offset;
+            // 保存 next（在当前节点中）
+            size_t next_offset = node->next_offset;
             
-            // 头插法插入新 bucket
+            // 插入新 bucket 链尾部
             cache_hash_bucket_t* new_bucket = &new_buckets[idx];
-            
-            // 找到新 bucket 链的尾部
             size_t* p = &new_bucket->entry_offset;
             while (*p) {
                 cache_hash_bucket_t* b = (cache_hash_bucket_t*)CACHE_PTR(cache, *p);
                 p = &b->next_offset;
             }
+            *p = node_offset;
+            node->next_offset = 0;  // 切断旧链接，避免循环
             
-            // 在新链末尾添加
-            *p = entry_offset;
-            
-            // 更新旧链继续遍历
-            entry_offset = next_offset;
+            // 继续遍历旧链
+            node_offset = next_offset;
         }
     }
     
