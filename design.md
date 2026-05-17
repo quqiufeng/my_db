@@ -1108,6 +1108,13 @@ db_select_by_pk(table, id, &u, sizeof(u));  // 拷贝到栈上
   - **性能**：5000 向量时比暴力搜索快 4x，召回率 >95%
   - **Fallback**：<1000 向量时自动回退到暴力精确搜索
 
+**索引持久化策略**
+- **当前实现**：所有索引（Hash、Sorted Array、Tag、Namespace、Vector、HNSW）均为**内存索引**，不单独持久化
+- **重建机制**：`cache_open()` 时扫描所有 entry（O(n)），实时重建所有索引
+- **重建性能**：<10 万条时 <100ms；>100 万条时可能需要几秒
+- **设计理由**：简单可靠，索引与数据永远一致，避免漂移
+- **未来优化**：可考虑将 Sorted Array、HNSW 图保存到 `.index` 文件以加速启动
+
 ### 11.2 TCP 远程操作层
 - [x] **文本协议服务器**：Redis-like 简单协议
 - [x] **命令集**：PING / SET / GET / DEL / EXISTS / COUNT / SEARCH / STATS / SYNC / QUIT

@@ -83,6 +83,38 @@
 - **Python FFI**：`mydb/cache.py` 提供类 dict 接口
 - **TCP 远程操作**：文本协议服务器，支持端口远程访问
 
+### 索引体系与搜索对照
+
+**8 种搜索方式，各解决不同问题：**
+
+| 搜索方式 | 索引结构 | 查询维度 | 适用场景 | 时间复杂度 |
+|---------|---------|---------|---------|-----------|
+| **Exact** (`get`) | Hash 表 | Key 完全相等 | 精确查找某条记忆 | O(1) |
+| **Prefix** | Sorted Array + Skip List | Key 前缀 | 浏览 namespace，如 `/coding/cpp/*` | O(log n) ~ O(1) |
+| **Range** | Sorted Array + Skip List | Key 区间 | 分页、区间扫描 | O(log n) |
+| **Regex** | 扫描 Sorted Array | Key 模式匹配 | 复杂 key 过滤，如 `user_\d+` | O(n) |
+| **Fuzzy** | 扫描 Sorted Array | Key 近似匹配 | 拼写容错，如 "recieve" → "receive" | O(n) |
+| **Tag** | Hash 反向索引 | Value 标签字段 | 分类过滤，如所有带 "async" 标签的条目 | O(1) |
+| **Vector** | HNSW 图索引 | Value 语义向量 | 语义相似，如 "并发" 和 "多线程" | O(log n) |
+| **AST** | 扫描 Value | 代码符号 | 搜索函数名、类名 | O(n) |
+
+**索引持久化说明**
+
+> ⚠️ **所有索引在重启时实时重建，不单独持久化。**
+>
+> 只有 `cache.bin`（entry 数据）持久化到磁盘。重启时 `cache_open()` 会：
+> 1. 读取 `cache.bin` 中的 entry 数据
+> 2. 扫描所有 entry（O(n)）
+> 3. 重建 Hash、Sorted Array、Tag、Namespace、Vector 等所有索引
+> 4. 如果 Vector 数量 > 1000，自动构建 HNSW 图
+>
+> **为什么这样设计？**
+> - **简单可靠**：索引和数据永远一致，不会漂移
+> - **数据量 < 10 万条**：重建耗时 < 100ms，完全可接受
+> - **数据量 > 100 万条**：可能需要几秒，建议保持进程常驻或使用热加载
+>
+> 如果未来需要索引持久化，可考虑将 Sorted Array、HNSW 图等保存到 `.index` 文件。
+
 ### 快速开始
 
 ```python
