@@ -247,7 +247,8 @@ cache_t* cache_open(const char* db_dir, size_t max_memory) {
     }
     
     // 初始化索引
-    if (cache_hash_init(cache) < 0 || cache_sorted_init(cache) < 0 || cache_ns_init(cache) < 0) {
+    if (cache_hash_init(cache) < 0 || cache_sorted_init(cache) < 0 || 
+        cache_ns_init(cache) < 0 || cache_tag_index_init(cache) < 0) {
         pool_close(&cache->pool);
         free(cache);
         return NULL;
@@ -303,6 +304,9 @@ void cache_close(cache_t* cache) {
     
     // 释放 namespace 索引
     cache_ns_destroy(cache);
+    
+    // 释放 tag 索引
+    cache_tag_index_destroy(cache);
     
     free(cache);
 }
@@ -451,6 +455,10 @@ int cache_set(cache_t* cache, const char* key, const char* value, uint64_t ttl_m
             cache_sorted_remove(cache, key, key_len);
             cache_ns_remove(cache, key);
             
+            // 从 tag 索引中移除
+            const char* old_value = (const char*)CACHE_PTR(cache, old_offset + sizeof(cache_entry_header_t) + old_header->key_len + 1);
+            cache_tag_index_remove(cache, old_offset, old_value, old_header->value_len);
+            
             // 从 hot cache 中移除
             hot_cache_invalidate(cache, key, key_len);
         }
@@ -486,6 +494,7 @@ int cache_set(cache_t* cache, const char* key, const char* value, uint64_t ttl_m
     cache_hash_insert(cache, offset, key, key_len);
     cache_sorted_insert(cache, offset);
     cache_ns_add(cache, key, offset);
+    cache_tag_index_add(cache, offset, value, value_len);
     
     return CACHE_OK;
 }
@@ -635,8 +644,13 @@ int cache_del(cache_t* cache, const char* key) {
     cache_entry_t* entry = cache_find_entry(cache, key);
     if (!entry) return CACHE_ERR_NOENT;
     
-    // 标记删除
     cache_entry_header_t* header = (cache_entry_header_t*)CACHE_PTR(cache, entry->offset);
+    
+    // 从 tag 索引中移除（在标记删除前）
+    const char* value = (const char*)CACHE_PTR(cache, entry->offset + sizeof(cache_entry_header_t) + header->key_len + 1);
+    cache_tag_index_remove(cache, entry->offset, value, header->value_len);
+    
+    // 标记删除
     header->flags |= CACHE_ENTRY_DELETED;
     
     cache->entry_count--;

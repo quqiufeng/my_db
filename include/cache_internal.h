@@ -83,6 +83,23 @@ struct cache_iter {
     size_t ns_prefix_len;       // namespace 前缀长度
 };
 
+// ====== Tag 反向索引 ======
+#define CACHE_TAG_INDEX_SIZE 64  // tag hash 表大小（2 的幂）
+
+typedef struct cache_tag_entry {
+    char* tag;                  // tag 字符串（堆上分配）
+    size_t* offsets;            // entry offset 数组
+    size_t count;               // 当前数量
+    size_t capacity;            // 数组容量
+    struct cache_tag_entry* next;  // 冲突链
+} cache_tag_entry_t;
+
+typedef struct {
+    cache_tag_entry_t** buckets;  // hash bucket 数组
+    size_t bucket_count;          // bucket 数量
+    size_t size;                  // 总 tag 数量
+} cache_tag_index_t;
+
 // ====== Hot Cache（热点缓存，加速重复读取）======
 #define CACHE_HOT_SIZE 64
 
@@ -100,6 +117,7 @@ struct cache {
     cache_hash_index_t hash;    // Hash 索引：key → entry_offset
     cache_sorted_array_t sorted; // 排序数组：按 key 字典序排列
     cache_ns_node_t* ns_root;   // Namespace 树
+    cache_tag_index_t tag_index; // Tag 反向索引：tag → [entry_offsets]
     
     // 热点缓存
     cache_hot_entry_t hot_cache[CACHE_HOT_SIZE];
@@ -153,7 +171,15 @@ int cache_search_internal_regex(cache_t* cache, const char* pattern,
                                 const cache_search_options_t* options,
                                 cache_result_t** out_results, size_t* out_count);
 int cache_search_internal_fuzzy(cache_t* cache, const char* query,
-                                const cache_search_options_t* options,
-                                cache_result_t** out_results, size_t* out_count);
+                                 const cache_search_options_t* options,
+                                 cache_result_t** out_results, size_t* out_count);
+
+// Tag 索引操作
+int cache_tag_index_init(cache_t* cache);
+void cache_tag_index_destroy(cache_t* cache);
+int cache_tag_index_add(cache_t* cache, size_t entry_offset, const char* value, size_t value_len);
+int cache_tag_index_remove(cache_t* cache, size_t entry_offset, const char* value, size_t value_len);
+int cache_tag_index_search(cache_t* cache, const char* tag, size_t** out_offsets, size_t* out_count);
+void cache_tag_index_rebuild(cache_t* cache);
 
 #endif /* CACHE_INTERNAL_H */

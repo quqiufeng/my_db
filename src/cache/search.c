@@ -368,6 +368,37 @@ int cache_search_tag(cache_t* cache, const char* tag,
     size_t result_count = 0;
     size_t result_cap = 0;
     
+    // 先尝试用 tag 索引（O(1) 查找）
+    size_t* indexed_offsets = NULL;
+    size_t indexed_count = 0;
+    int use_index = (cache_tag_index_search(cache, tag, &indexed_offsets, &indexed_count) == CACHE_OK);
+    
+    if (use_index && indexed_count > 0) {
+        // 使用索引结果
+        for (size_t i = 0; i < indexed_count; i++) {
+            size_t offset = indexed_offsets[i];
+            if (!offset) continue;
+            
+            if (!entry_is_valid(cache, offset, now)) continue;
+            if (!ns_filter_match(cache, offset, ns_filter)) continue;
+            
+            if (append_result(&results, &result_count, &result_cap, cache, offset, 1.0) < 0) {
+                free(results);
+                free(indexed_offsets);
+                return CACHE_ERR_NOMEM;
+            }
+            if (max_results > 0 && result_count >= (size_t)max_results) break;
+        }
+        free(indexed_offsets);
+        
+        *out_results = results;
+        *out_count = result_count;
+        return CACHE_OK;
+    }
+    
+    if (indexed_offsets) free(indexed_offsets);
+    
+    // 索引未命中或不可用，回退到全量扫描（O(n)）
     for (size_t i = 0; i < cache->sorted.count; i++) {
         size_t offset = cache_sorted_get(cache, i);
         if (!offset) continue;
