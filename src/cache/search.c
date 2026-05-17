@@ -270,18 +270,8 @@ int cache_search_regex(cache_t* cache, const char* pattern,
         size_t key_len;
         const char* key = entry_key(cache, offset, &key_len);
         
-        // 将 key 转为可安全使用的字符串（可能需要 null-terminate）
-        char* key_copy = malloc(key_len + 1);
-        if (!key_copy) {
-            regfree(&regex);
-            free(results);
-            return CACHE_ERR_NOMEM;
-        }
-        memcpy(key_copy, key, key_len);
-        key_copy[key_len] = '\0';
-        
-        int match = (regexec(&regex, key_copy, 0, NULL, 0) == 0);
-        free(key_copy);
+        // key 在 pool 中已以 '\0' 结尾，可直接使用
+        int match = (regexec(&regex, key, 0, NULL, 0) == 0);
         
         if (match) {
             if (append_result(&results, &result_count, &result_cap, cache, offset, 1.0) < 0) {

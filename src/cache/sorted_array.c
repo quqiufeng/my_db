@@ -137,13 +137,14 @@ int cache_sorted_remove(cache_t* cache, const char* key, size_t key_len) {
             sorted->offsets[mid] = sorted->offsets[sorted->count - 1];
             sorted->count--;
             sorted->dirty = 1;
+            
+            // 如果跳表已启用，也删除跳表节点
+            if (sorted->skiplist) {
+                cache_skiplist_remove(sorted->skiplist, key, key_len);
+            }
+            
             return 0;
         }
-    }
-    
-    // 如果跳表已启用，也删除跳表节点
-    if (sorted->skiplist) {
-        cache_skiplist_remove(sorted->skiplist, key, key_len);
     }
     
     return -1;  // 未找到

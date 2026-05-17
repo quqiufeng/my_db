@@ -722,9 +722,15 @@ size_t cache_purge_expired(cache_t* cache) {
     uint64_t now = cache_now_ms();
     size_t offset = CACHE_HEADER_SIZE;
     
-    while (offset < cache->pool.used) {
+    while (offset + sizeof(cache_entry_header_t) <= cache->pool.used) {
         cache_entry_header_t* header = (cache_entry_header_t*)CACHE_PTR(cache, offset);
-        if (header->key_len == 0) break;
+        
+        // 跳过非 entry 数据（如 hash bucket）
+        if (header->key_len == 0 || header->key_len > CACHE_MAX_KEY_LEN ||
+            header->value_len > CACHE_MAX_VALUE_LEN) {
+            offset += MYDB_ALIGN;
+            continue;
+        }
         
         if (!(header->flags & CACHE_ENTRY_DELETED) && header->expire_at > 0) {
             if (header->expire_at < now) {
