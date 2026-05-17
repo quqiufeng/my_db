@@ -1,5 +1,6 @@
 /**
- * PDF C Wrapper - 封装 MuPDF 为 C 接口供 Python ctypes 调用
+ * PDF/EPUB C Wrapper - 封装 MuPDF 为 C 接口供 Python ctypes 调用
+ * 支持章节提取
  */
 
 #include <cstdio>
@@ -12,12 +13,21 @@ extern "C" {
 
 #define API __attribute__((visibility("default")))
 
+// 章节信息结构
+struct PdfChapter {
+    char* title;
+    int level;
+    int page;
+};
+
 // Opaque handle
 struct PdfHandle {
     fz_context* ctx;
     fz_document* doc;
     char* text_cache;
     size_t text_cache_len;
+    PdfChapter* chapters;
+    int chapter_count;
 };
 
 /**
@@ -53,6 +63,8 @@ API void* pdf_open(const char* path) {
     handle->doc = doc;
     handle->text_cache = nullptr;
     handle->text_cache_len = 0;
+    handle->chapters = nullptr;
+    handle->chapter_count = 0;
 
     return handle;
 }
@@ -150,6 +162,85 @@ API int pdf_extract_text(void* handle, char** out_text, size_t* out_len) {
     return 0;
 }
 
+// 递归提取 outline 为章节列表
+static void extract_outlines(fz_context* ctx, fz_outline* outline, PdfChapter** chapters, int* count, int level) {
+    while (outline) {
+        PdfChapter* new_chapters = (PdfChapter*)realloc(*chapters, sizeof(PdfChapter) * (*count + 1));
+        if (!new_chapters) return;
+        *chapters = new_chapters;
+        
+        (*chapters)[*count].title = outline->title ? strdup(outline->title) : strdup("");
+        (*chapters)[*count].level = level;
+        (*chapters)[*count].page = outline->page.page;  // fz_location.page
+        (*count)++;
+        
+        // 递归处理子章节
+        if (outline->down) {
+            extract_outlines(ctx, outline->down, chapters, count, level + 1);
+        }
+        
+        outline = outline->next;
+    }
+}
+
+/**
+ * 提取章节列表（从 PDF outline/书签）
+ * @param handle pdf_open 返回的句柄
+ * @param out_chapters 输出章节数组（调用者需用 pdf_free_chapters 释放）
+ * @param out_count 输出章节数量
+ * @return 0 成功，-1 失败
+ */
+API int pdf_get_chapters(void* handle, PdfChapter** out_chapters, int* out_count) {
+    PdfHandle* h = static_cast<PdfHandle*>(handle);
+    if (!h || !h->doc) return -1;
+
+    // 如果已提取过，直接返回
+    if (h->chapters) {
+        *out_chapters = h->chapters;
+        *out_count = h->chapter_count;
+        return 0;
+    }
+
+    fz_outline* outline = nullptr;
+    fz_try(h->ctx) {
+        outline = fz_load_outline(h->ctx, h->doc);
+    }
+    fz_catch(h->ctx) {
+        *out_count = 0;
+        *out_chapters = nullptr;
+        return 0;  // 没有 outline 不算失败
+    }
+
+    if (!outline) {
+        *out_count = 0;
+        *out_chapters = nullptr;
+        return 0;
+    }
+
+    h->chapters = nullptr;
+    h->chapter_count = 0;
+    extract_outlines(h->ctx, outline, &h->chapters, &h->chapter_count, 0);
+    
+    fz_drop_outline(h->ctx, outline);
+
+    *out_chapters = h->chapters;
+    *out_count = h->chapter_count;
+    return 0;
+}
+
+/**
+ * 释放章节数组
+ * @param chapters pdf_get_chapters 返回的数组
+ * @param count 章节数量
+ */
+API void pdf_free_chapters(PdfChapter* chapters, int count) {
+    if (!chapters) return;
+    for (int i = 0; i < count; i++) {
+        free(chapters[i].title);
+    }
+    free(chapters);
+}
+
 /**
  * 释放 pdf_extract_text 返回的文本
  * @param text 文本指针
@@ -167,6 +258,9 @@ API void pdf_close(void* handle) {
     PdfHandle* h = static_cast<PdfHandle*>(handle);
     if (!h) return;
 
+    if (h->chapters) {
+        pdf_free_chapters(h->chapters, h->chapter_count);
+    }
     if (h->text_cache) {
         free(h->text_cache);
     }
