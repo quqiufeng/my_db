@@ -56,6 +56,12 @@
 - **内存回收**：`db_table_compact()` / `db_compact()` 回收已删除空间
 - **无锁设计**：类似 Redis，单线程/用户自行保证并发，简单高效
 - **极致性能**：单线程 50万+ 行/秒插入速度
+- **KV Cache**：Agent 记忆存储，支持 5 种搜索 + TTL/LRU
+- **Tag 索引**：Hash-based 反向索引，O(1) 标签搜索
+- **Skip List**：20 级跳表，数据量 > 100 万自动启用
+- **向量搜索**：Float embedding + 余弦相似度，语义搜索
+- **源码分析**：7 种语言 AST 提取（函数/类/结构体/导入）
+- **TCP 远程**：文本协议服务器，支持端口远程操作
 
 ## KV Cache（AI Agent 记忆存储）
 
@@ -65,10 +71,16 @@
 
 - **Namespace 层级**：`/` 分隔的路径式 key，如 `/coding/cpp/move-semantics`
 - **5 种搜索**：前缀、范围、正则、模糊（Levenshtein）、标签
-- **TTL + LRU**：自动过期 + 内存不足时淘汰最老条目
+- **Tag 反向索引**：Hash-based `tag → offsets`，O(1) 标签查找
+- **Skip List 跳表**：20 级跳表，数据量 > 100 万时自动启用 O(log n) 搜索
+- **向量相似度搜索**：Float embedding + 余弦相似度，支持 top-k 过滤
+- **源码语义分析**：7 种语言 AST 提取（函数/类/结构体/导入），自动语义标签
+- **TTL + LRU**：自动过期 + 内存不足时批量淘汰最老条目
+- **Hot Cache**：64-entry LRU 热点缓存，重复读取加速 2-3x
+- **批量插入**：`cache_batch_set()` 10K 条批量写入，2.5x 提速
 - **零拷贝持久化**：复用 my_db mmap 架构，内存 = 磁盘
 - **Python FFI**：`mydb/cache.py` 提供类 dict 接口
-- **TCP 远程操作**：可选的网络服务层，支持端口远程访问
+- **TCP 远程操作**：文本协议服务器，支持端口远程访问
 
 ### 快速开始
 
@@ -145,14 +157,81 @@ cache_data/
 
 ### 性能基准
 
-| 操作 | 性能 |
-|------|------|
-| Insert | ~6,757 ops/sec (5K entries, sorted array O(n)) |
-| Get | ~5,000,000 ops/sec (Hash 索引) |
-| Prefix Search | ~1,000,000 searches/sec |
-| Iterate | 遍历 5K 条目 < 1ms |
+| 操作 | 性能 | 说明 |
+|------|------|------|
+| Insert | ~7,000 ops/sec | 5K entries，sorted array O(n) |
+| Get | ~5,000,000 ops/sec | Hash 索引 + Hot Cache |
+| Prefix Search | ~1,000,000 searches/sec | 排序数组 lower_bound |
+| Tag Search | O(1) 索引查找 | Hash-based 反向索引 |
+| Vector Search | O(n) 暴力搜索 | 精确余弦相似度，适合 < 10万条 |
+| Skip List | O(log n) | 数据量 > 100万时自动启用 |
+| Iterate | < 1ms | 遍历 5K 条目 |
 
-*注：100K 条插入当前因 O(n) 排序数组较慢，Phase 10 将优化*
+**优化说明**：
+- **延迟排序**：sorted array 采用 O(1) append + 延迟 qsort，批量插入 2.5x 提速
+- **Hot Cache**：64-entry LRU 热点缓存，重复读取加速 2-3x
+- **跳表升级**：数据量 > 100万时自动启用 20 级跳表，前缀/范围搜索 O(log n)
+
+### 高级搜索
+
+**向量相似度搜索**（语义搜索）
+```c
+// C API
+float vector[384] = {...};  // embedding from sentence-transformers
+cache_set_vector(cache, "doc1", "content", vector, 384, 0);
+
+cache_result_t* results;
+cache_search_vector(cache, query_vector, 384, top_k=5, min_score=0.5, NULL, &results, &count);
+```
+
+```bash
+# Python helper
+python3 tools/vector_helper.py embed "text to embed"
+python3 tools/vector_helper.py store --key doc1 "content"
+python3 tools/vector_helper.py search "query text"
+```
+
+**源码语义分析**（AST 提取）
+```c
+// 分析源代码，自动提取函数/类/结构体/导入
+cache_ast_tree_t* tree = cache_analyze_source("main.c", source_code);
+char* json = cache_ast_to_json(tree, "main.c");
+// 输出: {"file":"main.c","nodes":[{"type":"function","name":"main"},...]}
+
+// 从源码提取语义标签
+cache_ast_extract_tags("main.c", source, &tags, &tag_count);
+// 输出: "func:main func:foo class:Bar import:stdio.h "
+```
+
+支持语言：C/C++, Python, JavaScript, Java, Go, Rust
+
+### TCP 远程服务器
+
+启动服务器：
+```bash
+./tools/cache_server --port 7777 --db ./cache_data
+```
+
+客户端 API（C）：
+```c
+#include "cache_server.h"
+
+cache_client_t* client = cache_client_connect("127.0.0.1", 7777);
+cache_client_ping(client);                          // PING → PONG
+cache_client_set(client, "key", "value", 0);        // SET
+cache_client_get(client, "key");                    // GET
+int count = cache_client_count(client);             // COUNT
+cache_client_disconnect(client);
+```
+
+协议（文本行协议，Redis-like）：
+```
+PING                    → +PONG
+SET "key" "value"       → +OK
+GET "key"               → $5\r\nvalue\r\n
+DEL "key"               → :1
+SEARCH prefix "/coding" → *OK 2\r\n...$key...$score...$value...
+```
 
 ### 导入工具
 
@@ -640,7 +719,39 @@ my_db/
     ├── test_wal.c           # WAL + Checkpoint 测试
     ├── test_ffi.lua         # LuaJIT FFI 测试
     └── test_ffi.py          # Python ctypes 测试
-```
+
+# KV Cache 子系统（Agent 记忆存储）
+├── kvCache.md               # KV Cache 设计文档
+├── include/
+│   ├── cache.h              # Cache 公共 API
+│   ├── cache_internal.h     # Cache 内部结构
+│   └── cache_server.h       # TCP 远程服务器 API
+├── src/cache/
+│   ├── cache.c              # 核心存储层（CRUD + LRU + Hot Cache）
+│   ├── hash_index.c         # Hash 索引
+│   ├── sorted_array.c       # 延迟排序数组
+│   ├── skip_list.c          # 20 级跳表
+│   ├── namespace.c          # Namespace 树形索引
+│   ├── search.c             # 5 种搜索实现
+│   ├── tag_index.c          # Tag 反向索引
+│   ├── source_analyzer.c    # 源码语义分析（7 种语言）
+│   ├── vector_index.c       # 向量相似度搜索
+│   ├── iter.c               # 迭代器
+│   └── server.c             # TCP 文本协议服务器
+├── mydb/
+│   ├── cache.py             # Python Cache FFI（dict-like 接口）
+│   └── cache_cli.py         # CLI 工具（cache 命令）
+├── tools/
+│   ├── cache_server.c       # 独立服务器可执行文件
+│   ├── import_book.c        # 电子书导入（MOBI/PDF/EPUB）
+│   ├── import_github.py     # GitHub 源码导入
+│   └── vector_helper.py     # 向量搜索 Python helper
+└── tests/
+    ├── test_cache.c         # Cache 基础测试
+    ├── test_cache_full.c    # Cache 完整测试（7 项）
+    ├── test_cache_perf.c    # Cache 性能基准
+    ├── test_vector.c        # 向量搜索测试
+    └── test_server.c        # TCP 服务器测试
 
 ## 许可证
 

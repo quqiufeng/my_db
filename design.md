@@ -33,13 +33,17 @@
 5. **零拷贝持久化**：mmap 让内存和磁盘是同一回事
 
 **明确排除（第一版不做）：**
-- ❌ TCP/网络服务层
 - ❌ 多进程并发访问
 - ❌ 分布式/集群
 - ❌ SQL 字符串解析
 
-**未来可能扩展（稳定后）：**
-- 可选的 TCP 服务层（兼容 Redis 协议或自定义协议）
+**已实现扩展：**
+- ✅ KV Cache 子系统（Agent 记忆存储）：前缀/范围/正则/模糊/标签搜索
+- ✅ Tag 反向索引：O(1) 标签查找
+- ✅ Skip List 跳表：数据量 > 100 万时自动启用
+- ✅ 源码语义分析：C/C++/Python/JS/Java/Go/Rust AST 提取
+- ✅ 向量相似度搜索：float 数组 + 余弦相似度
+- ✅ TCP 远程操作层：文本协议服务器（PING/SET/GET/DEL/SEARCH）
 - 但核心永远是单机嵌入，网络层只是包装
 
 ### 1.2 市场空白分析
@@ -1090,14 +1094,24 @@ db_select_by_pk(table, id, &u, sizeof(u));  // 拷贝到栈上
 - 默认 `max_rows = 10000`，超过返回 `DB_ERR_RESULT_TOO_LARGE`
 - 可配置：`db_config_max_rows(db, 50000)`
 
-## 11. 后续扩展
+## 11. 已实现扩展
 
-- [x] **内存回收**：Compact 机制（表级 + 全盘）
-- [x] **大结果集保护**：流式查询 + 默认行数限制
+### 11.1 KV Cache 高级索引
+- [x] **Tag 反向索引**：Hash-based `tag → [offsets]`，O(1) 标签搜索
+- [x] **Skip List 跳表**：20 级跳表，数据量 > 100 万时自动启用，前缀/范围搜索 O(log n)
+- [x] **源码语义分析**：Regex-based AST 提取，支持 7 种语言（函数/类/结构体/导入）
+- [x] **向量相似度搜索**：Float 数组存储 + 余弦相似度，支持 top-k 和 min_score 过滤
+
+### 11.2 TCP 远程操作层
+- [x] **文本协议服务器**：Redis-like 简单协议
+- [x] **命令集**：PING / SET / GET / DEL / EXISTS / COUNT / SEARCH / STATS / SYNC / QUIT
+- [x] **客户端库**：`cache_client_connect()` / `cache_client_set()` / `cache_client_get()`
+- [x] **单线程模型**：`accept() → handle_client() → close()` 顺序处理
+
+### 11.3 待实现
+- [ ] 快照：定期快照备份
+- [ ] 增量同步：GitHub webhook 自动更新
 - [ ] **自动 WAL 追踪**：`db_get()` 返回的指针被修改后，自动检测并写 WAL
 - [ ] 可选锁模块（表级锁/MVCC，作为插件供需要并发的用户使用）
-- [x] 查询优化器（简单规则：复合索引优先 → 单列索引 → 全表扫描）
-- [x] 复合索引（多列联合索引，第一版即支持）
 - [ ] 事务（BEGIN / COMMIT / ROLLBACK）
-- [ ] 网络服务层（RPC）
 - [ ] 在线备份（热拷贝 mmap 文件）
