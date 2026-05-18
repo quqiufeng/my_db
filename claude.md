@@ -678,5 +678,248 @@ if (found) {
 
 ---
 
-*文档生成时间: 2026-05-17*
-*基于提交: 2a354bb .. 4294ebf (含三轮 KV Cache 审计)*
+## 12. 代码审查复盘：15 个问题修复经验（2026-05-18）
+
+### 12.1 UTF-8 必须按完整字符处理，不能按字节
+
+**问题**: `is_cjk()` 按单字节判断 `0x4E-0x9F`，但 UTF-8 的 CJK 字符是 3-4 字节序列（首字节 `0xE4-0xEF` 或 `0xF0`）。导致中文分词完全失效，所有中文字符被错误处理。
+
+**修复**:
+```c
+// ❌ 错误：按单字节判断，只适用于 GBK
+static int is_cjk(char c) {
+    unsigned char u = (unsigned char)c;
+    return (u >= 0x4E && u <= 0x9F);  // 这是 GBK 编码，不是 UTF-8
+}
+
+// ✅ 正确：按 UTF-8 首字节判断，返回字符字节数
+static int is_cjk_utf8(const char* p) {
+    unsigned char c = (unsigned char)*p;
+    // CJK Unified Ideographs: U+4E00-U+9FFF (UTF-8: E4 B8 80 - E9 BF BF)
+    if (c >= 0xE4 && c <= 0xE9) return 3;
+    // CJK Extension B: U+20000-U+2A6DF (UTF-8: F0 A0 80 80 - F0 AA 9B 9F)
+    if (c == 0xF0) {
+        unsigned char c2 = (unsigned char)*(p+1);
+        if (c2 >= 0xA0 && c2 <= 0xAA) return 4;
+    }
+    return 0;  // 不是 CJK
+}
+```
+
+**实践**: 处理多字节字符编码时，始终按完整字符序列操作，提取首字节判断字符类型，返回字节长度供调用者消费。
+
+### 12.2 内存统计必须在所有变更路径同步
+
+**问题**: `memory_used` 在 `cache_open`（已有文件）时未初始化，在 `cache_del`、`cache_purge_expired`、`cache_del_namespace` 时未递减。导致 LRU 逻辑完全失效（第一次插入不会触发淘汰，后续可能过度淘汰）。
+
+**修复**:
+```c
+// ❌ 错误：cache_open 时 memory_used = 0（calloc），不反映已有数据
+// ❌ 错误：cache_del 时只递减 entry_count，不递减 memory_used
+
+// ✅ 正确：cache_open 重建时累加有效 entry 大小
+cache->memory_used += total_size;  // 重建循环中
+
+// ✅ 正确：所有删除路径递减 memory_used
+cache->memory_used -= cache_entry_total_size(header);  // cache_del
+cache->memory_used -= cache_entry_total_size(header);  // purge_expired
+cache->memory_used -= cache_entry_total_size(header);  // del_namespace
+```
+
+**实践**: 每个与"资源占用"相关的统计字段（memory_used、entry_count、deleted_count），必须在分配/释放/重建/删除/淘汰的所有路径上同步更新。新增路径时检查是否遗漏统计更新。
+
+### 12.3 外部库的错误对象必须显式释放
+
+**问题**: ONNX Runtime 的 `OrtStatus*` 在错误检查后直接返回，未调用 `ReleaseStatus(status)`，导致每次推理失败都泄漏内存。
+
+**修复**:
+```c
+// ❌ 错误：status 泄漏
+status = g_ort->CreateEnv(...);
+if (status != NULL) {
+    set_error("Failed");
+    return -1;  // status 泄漏！
+}
+
+// ✅ 正确：释放 status
+status = g_ort->CreateEnv(...);
+if (status != NULL) {
+    set_error("Failed");
+    g_ort->ReleaseStatus(status);  // 必须释放
+    return -1;
+}
+```
+
+**实践**: 使用外部 C API 时，查阅文档确认所有返回的句柄/状态对象是否需要显式释放。错误处理分支中最容易遗漏释放操作。
+
+### 12.4 加载持久化数据前清理旧数据
+
+**问题**: `cache_index_load()` 直接覆盖 `cache->sorted.offsets`、`cache->vector_index.entries`、`cache->ns_root`，导致旧内存泄漏。特别是多次打开/关闭 cache 时，内存持续增长。
+
+**修复**:
+```c
+// ❌ 错误：直接覆盖，旧内存泄漏
+int cache_index_load(cache_t* cache) {
+    // ... 加载新索引直接覆盖旧指针
+    cache->sorted.offsets = new_offsets;  // 旧 offsets 泄漏！
+}
+
+// ✅ 正确：加载前清理旧数据
+int cache_index_load(cache_t* cache) {
+    if (cache->sorted.offsets) {
+        free(cache->sorted.offsets);
+        cache->sorted.offsets = NULL;
+    }
+    if (cache->vector_index.entries) {
+        free(cache->vector_index.entries);
+        cache->vector_index.entries = NULL;
+    }
+    if (cache->ns_root) {
+        cache_ns_destroy(cache);  // 递归释放树
+    }
+    // ... 然后加载新索引
+}
+```
+
+**实践**: 任何"加载/重建"操作，必须先释放旧资源再分配新资源。特别是对于指针数组、树结构、链表等复合数据结构。
+
+### 12.5 网络 I/O 避免逐字节系统调用
+
+**问题**: HTTP 服务器读取请求头时 `recv(fd, buf + total, 1, 0)` 每次读 1 字节，处理一个请求需要 ~500 次系统调用，性能极差。
+
+**修复**:
+```c
+// ❌ 错误：逐字节读取
+while (total < sizeof(buf) - 1) {
+    n = recv(fd, buf + total, 1, 0);  // 每次 1 字节！
+    if (strstr(buf, "\r\n\r\n")) break;
+}
+
+// ✅ 正确：批量读取
+while (total < sizeof(buf) - 1) {
+    n = recv(fd, buf + total, sizeof(buf) - 1 - total, 0);  // 尽可能多读
+    if (strstr(buf, "\r\n\r\n")) break;
+}
+```
+
+**实践**: 网络 I/O 总是批量读取，利用内核缓冲减少系统调用次数。只在需要精确控制读取边界时才逐字节处理（如解析固定长度字段）。
+
+### 12.6 缓存常用计算结果避免重复遍历
+
+**问题**: `hnsw_search()` 每次搜索都遍历所有节点计算 `valid_count`，O(n) 开销。当数据量 < 1000 时 fallback 到暴力搜索，但这个判断本身就要 O(n)。
+
+**修复**:
+```c
+// ❌ 错误：每次搜索遍历所有节点
+size_t valid_count = 0;
+for (size_t i = 0; i < idx->node_count; i++) {
+    if (idx->nodes[i].valid) valid_count++;
+}
+if (valid_count < 1000) { ... }
+
+// ✅ 正确：维护 valid_count，O(1) 查询
+struct hnsw_index {
+    // ...
+    size_t valid_count;       // 缓存有效节点数
+    int valid_count_dirty;    // 1 = 需要重新计算
+};
+
+// 插入时递增
+idx->valid_count++;
+
+// 删除时递减
+if (idx->valid_count > 0) idx->valid_count--;
+
+// 搜索时直接使用
+if (idx->valid_count < 1000) { ... }
+```
+
+**实践**: 当某个值需要频繁读取但很少变更时，缓存该值并在变更点同步更新，避免重复计算。
+
+### 12.7 严格验证解析输入，不要假设格式正确
+
+**问题**: `cache_vector_index_rebuild()` 使用 `strstr(value, "\"__vector_offset\":")` 查找 JSON 字段，然后 `sscanf` 解析。如果 value 中包含这个字符串但不是元数据（如用户数据），会误解析导致越界访问。
+
+**修复**:
+```c
+// ❌ 错误：strstr 模糊匹配，可能误解析
+const char* vec_off_str = strstr(value, "\"__vector_offset\":");
+sscanf(vec_off_str + 18, "%zu", &vector_offset);
+
+// ✅ 正确：严格前缀匹配 + 边界检查
+if (value[0] == '{' && strncmp(value + 1, "\"__vector_offset\":" , 18) == 0) {
+    const char* p = value + 19;
+    size_t vector_offset = 0;
+    while (*p >= '0' && *p <= '9') {
+        vector_offset = vector_offset * 10 + (*p - '0');
+        p++;
+    }
+    // 验证向量数据在 pool 范围内
+    size_t vector_end = vector_offset + sizeof(float) * vector_dim;
+    if (vector_end <= cache->pool.used) {
+        // 安全使用
+    }
+}
+```
+
+**实践**: 解析外部输入（文件、网络、用户数据）时，使用严格的格式验证（前缀匹配、长度检查、范围检查），避免依赖 `strstr`/`sscanf` 的模糊匹配。
+
+### 12.8 Batch API 需要支持内存限制和 LRU
+
+**问题**: `cache_batch_set()` 只检查内存上限，超出时直接返回 `CACHE_ERR_NOMEM`，不触发 LRU 淘汰。与 `cache_set()` 行为不一致，调用者需要手动处理内存不足。
+
+**修复**:
+```c
+// ❌ 错误：超出内存直接失败
+if (cache->memory_used + total_aligned > cache->memory_max) {
+    return CACHE_ERR_NOMEM;  // 不触发 LRU
+}
+
+// ✅ 正确：尝试 LRU 淘汰，不足时回退到逐条 cache_set
+if (cache->memory_used + total_aligned > cache->memory_max) {
+    size_t need = cache->memory_used + total_aligned - cache->memory_max;
+    size_t evicted = lru_evict(cache, need);  // 尝试淘汰
+    if (evicted < need) {
+        // 回退到逐条 cache_set（更保守的内存管理）
+        for (size_t i = 0; i < count; i++) {
+            int ret = cache_set(cache, items[i].key, items[i].value, items[i].ttl_ms);
+            if (ret != CACHE_OK) return ret;
+        }
+        return CACHE_OK;
+    }
+}
+```
+
+**实践**: Batch API 应与 Single API 保持一致的内存管理策略（LRU、淘汰、回退）。如果 batch 优化无法处理边界情况，回退到单条操作保证正确性。
+
+### 12.9 反序列化时处理分配失败
+
+**问题**: `hnsw_deserialize()` 中 `node->vector = malloc(...)` 失败时，未标记节点无效，后续访问该节点会 segfault。
+
+**修复**:
+```c
+// ❌ 错误：malloc 失败不处理
+node->vector = malloc(sizeof(float) * idx->dim);
+if (node->vector) {
+    memcpy(node->vector, p, sizeof(float) * idx->dim);
+    p += sizeof(float) * idx->dim;
+}
+// node->valid 仍为 1，后续访问 segfault
+
+// ✅ 正确：失败时标记无效，保持流位置
+node->vector = malloc(sizeof(float) * idx->dim);
+if (node->vector) {
+    memcpy(node->vector, p, sizeof(float) * idx->dim);
+    p += sizeof(float) * idx->dim;
+} else {
+    node->valid = 0;  // 标记无效
+    p += sizeof(float) * idx->dim;  // 仍要跳过数据保持流位置
+}
+```
+
+**实践**: 反序列化/解析外部数据时，每个 `malloc` 都要处理失败情况。失败时既要标记对象无效，又要正确推进流位置（跳过已读取的数据），防止后续解析错位。
+
+---
+
+*文档生成时间: 2026-05-18*
+*基于提交: 405bf96 (代码审查复盘：15 个问题修复)*
