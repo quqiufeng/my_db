@@ -177,8 +177,14 @@ static size_t write_hash_index(cache_t* cache, void* buf) {
 }
 
 // Write sorted array data to buffer
+// Forward declaration from sorted_array.c
+extern void cache_sorted_ensure_sorted(cache_t* cache);
+
 static size_t write_sorted_index(cache_t* cache, void* buf) {
     if (cache->sorted.count == 0) return 0;
+    
+    // Ensure sorted before saving
+    cache_sorted_ensure_sorted(cache);
     
     char* p = (char*)buf;
     

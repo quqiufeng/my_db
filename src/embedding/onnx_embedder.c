@@ -5,6 +5,7 @@
 #include <string.h>
 #include <math.h>
 #include <ctype.h>
+#include <dlfcn.h>
 
 #define MAX_VOCAB_SIZE 50000
 #define MAX_TOKEN_LEN 64
@@ -53,8 +54,17 @@ const char* onnx_embedder_error(void) {
 }
 
 // Initialize ONNX Runtime API
+// Use RTLD_GLOBAL so provider libraries can find symbols in the main library
 static int init_ort_api(void) {
     if (g_ort) return 0;
+    
+    // Load ONNX Runtime with RTLD_GLOBAL for provider symbol visibility
+    void* handle = dlopen("libonnxruntime.so.1", RTLD_NOW | RTLD_GLOBAL);
+    if (!handle) {
+        // Try alternate name
+        handle = dlopen("libonnxruntime_gpu.so", RTLD_NOW | RTLD_GLOBAL);
+    }
+    // Note: handle intentionally not stored - library remains loaded for session lifetime
     
     const OrtApiBase* base = OrtGetApiBase();
     if (!base) {
@@ -427,6 +437,44 @@ onnx_embedder_t* onnx_embedder_init(const char* model_path, const char* vocab_pa
         g_ort->ReleaseStatus(status);
         onnx_embedder_free(e);
         return NULL;
+    }
+    
+    // 尝试添加 TensorRT Execution Provider (RTX 3080)
+    // TensorRT 比 CUDA 更快（通常 2-5x）
+    OrtTensorRTProviderOptions trt_options;
+    memset(&trt_options, 0, sizeof(trt_options));
+    trt_options.device_id = 0;
+    trt_options.trt_max_partition_iterations = 1000;
+    trt_options.trt_min_subgraph_size = 1;
+    trt_options.trt_max_workspace_size = 6ULL * 1024 * 1024 * 1024;  // 6GB workspace
+    trt_options.trt_fp16_enable = 1;  // 启用 FP16，加速 2x
+    trt_options.trt_int8_enable = 0;
+    trt_options.trt_engine_cache_enable = 1;  // 缓存 engine，下次启动更快
+    trt_options.trt_engine_cache_path = "./trt_cache";  // engine 缓存路径
+    trt_options.trt_dump_subgraphs = 0;
+    
+    status = g_ort->SessionOptionsAppendExecutionProvider_TensorRT(session_options, &trt_options);
+    if (status != NULL) {
+        // TensorRT 不可用，回退到 CUDA
+        g_ort->ReleaseStatus(status);
+        
+        OrtCUDAProviderOptions cuda_options;
+        memset(&cuda_options, 0, sizeof(cuda_options));
+        cuda_options.device_id = 0;
+        cuda_options.arena_extend_strategy = 0;
+        cuda_options.gpu_mem_limit = 8ULL * 1024 * 1024 * 1024;
+        cuda_options.cudnn_conv_algo_search = OrtCudnnConvAlgoSearchHeuristic;
+        cuda_options.do_copy_in_default_stream = 1;
+        
+        status = g_ort->SessionOptionsAppendExecutionProvider_CUDA(session_options, &cuda_options);
+        if (status != NULL) {
+            printf("  CUDA not available, falling back to CPU\n");
+            g_ort->ReleaseStatus(status);
+        } else {
+            printf("  Using CUDA GPU acceleration\n");
+        }
+    } else {
+        printf("  Using TensorRT GPU acceleration (FP16)\n");
     }
     
     status = g_ort->CreateSession(e->env, model_path, session_options, &e->session);

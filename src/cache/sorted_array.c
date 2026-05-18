@@ -60,7 +60,7 @@ static int ensure_capacity(cache_sorted_array_t* sorted, size_t need) {
 }
 
 // 确保排序数组已排序（延迟排序）
-static void ensure_sorted(cache_t* cache) {
+void cache_sorted_ensure_sorted(cache_t* cache) {
     if (!cache || !cache->sorted.dirty) return;
     
     cache_sorted_array_t* sorted = &cache->sorted;
@@ -74,6 +74,11 @@ static void ensure_sorted(cache_t* cache) {
     g_qsort_cache = NULL;
     
     sorted->dirty = 0;
+}
+
+// 内部使用的静态包装
+static void ensure_sorted(cache_t* cache) {
+    cache_sorted_ensure_sorted(cache);
 }
 
 // ========================================================================

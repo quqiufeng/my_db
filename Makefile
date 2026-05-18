@@ -3,9 +3,11 @@ CFLAGS = -Wall -Wextra -O2 -fPIC -I./include
 LDFLAGS = -shared
 
 
+# Use GPU ONNX Runtime (RTX 3080 CUDA support)
+# GPU library copied from anaconda env
 ONNX_CFLAGS = -I/opt/piper-src/build/p/src/piper_phonemize_external/lib/onnxruntime-linux-x64-1.14.1/include
-ONNX_LIB = /opt/piper-src/build/p/src/piper_phonemize_external/lib/onnxruntime-linux-x64-1.14.1/lib
-ONNX_LDFLAGS = -L$(ONNX_LIB) -lonnxruntime -Wl,-rpath,$(ONNX_LIB)
+ONNX_LIB = .
+ONNX_LDFLAGS = -L$(ONNX_LIB) -lonnxruntime_gpu -Wl,-rpath,$(ONNX_LIB)
 
 SRC_DIR = src
 OBJ_DIR = obj
@@ -147,7 +149,7 @@ $(ONNX_EMBEDDER_OBJ): $(SRC_DIR)/embedding/onnx_embedder.c
 	$(CC) $(CFLAGS) $(ONNX_CFLAGS) -c -o $@ $^
 
 $(ONNX_EMBEDDER_LIB): $(ONNX_EMBEDDER_OBJ)
-	$(CC) -shared -o $@ $< $(ONNX_LDFLAGS) -lm
+	$(CC) -shared -o $@ $< $(ONNX_LDFLAGS) -lm -ldl
 
 example: $(LIB)
 	$(CC) $(CFLAGS) -o $(EXAMPLE_C) $(EXAMPLE_DIR)/example.c -L. -lmydb -Wl,-rpath,.

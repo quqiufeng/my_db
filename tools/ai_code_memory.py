@@ -31,10 +31,13 @@ import subprocess
 import tempfile
 import shutil
 import re
+import time
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
 from dataclasses import dataclass
 from urllib.parse import urlparse
+from concurrent.futures import ProcessPoolExecutor, as_completed
+import multiprocessing
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from mydb.cache import open_cache
@@ -42,6 +45,11 @@ from mydb.cache import open_cache
 # ========================================================================
 # 配置
 # ========================================================================
+
+# 与 cache.h 中的限制保持一致
+CACHE_MAX_KEY_LEN = 1024
+CACHE_MAX_VALUE_LEN = 1024 * 1024
+MAX_CONTENT_LEN = 80000  # content 字段最大长度，超过则截断
 
 DEFAULT_EXCLUDES = [
     '.git', 'node_modules', 'vendor', 'build', 'dist', 'target',
@@ -67,6 +75,64 @@ SOURCE_EXTENSIONS = {
 }
 
 # ========================================================================
+# 并发辅助函数（必须在全局作用域，供多进程使用）
+# ========================================================================
+
+def _run_ctags_worker(repo_path: str, dir_path: str) -> List[dict]:
+    """在指定目录运行 ctags（供多进程使用）"""
+    import os
+    import json
+    import subprocess
+    
+    # 查找 ctags
+    ctags_cmd = 'ctags'
+    for cmd in ['ctags-universal', 'uctags', 'ctags']:
+        try:
+            result = subprocess.run([cmd, '--version'], capture_output=True, text=True, timeout=5)
+            if result.returncode == 0 and 'Universal' in result.stdout:
+                ctags_cmd = cmd
+                break
+        except:
+            continue
+    
+    cmd = [
+        ctags_cmd,
+        '--output-format=json',
+        '--fields=+nKzS',
+        '--extras=+r+f',
+        '--sort=no',
+        '-R', '.',
+    ]
+    
+    # 宏前缀
+    for prefix in ['SD_API', 'GGML_API', 'GGML_CALL', 'EXTERN_C']:
+        cmd.extend(['-I', prefix])
+    
+    # 排除模式
+    for pat in DEFAULT_EXCLUDES:
+        cmd.extend(['--exclude=' + pat])
+    
+    try:
+        result = subprocess.run(cmd, cwd=dir_path, capture_output=True, text=True, timeout=300)
+        tags = []
+        for line in result.stdout.strip().split('\n'):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                tag = json.loads(line)
+                if 'path' in tag:
+                    # 转换为相对路径
+                    abs_path = os.path.join(dir_path, tag['path'])
+                    tag['path'] = os.path.relpath(abs_path, repo_path)
+                tags.append(tag)
+            except:
+                continue
+        return tags
+    except Exception as e:
+        return []
+
+# ========================================================================
 # 代码解析引擎（复用之前的）
 # ========================================================================
 
@@ -86,6 +152,9 @@ class CodeParser:
         return 'ctags'
     
     def run_ctags(self):
+        # 常见宏前缀，ctags 需要忽略才能正确解析函数
+        macro_prefixes = ['SD_API', 'GGML_API', 'GGML_CALL', 'EXTERN_C']
+        
         cmd = [
             self.ctags_cmd,
             '--output-format=json',
@@ -94,6 +163,11 @@ class CodeParser:
             '--sort=no',
             '-R', '.',
         ]
+        
+        # 告诉 ctags 忽略这些宏前缀
+        for prefix in macro_prefixes:
+            cmd.extend(['-I', prefix])
+        
         for pat in DEFAULT_EXCLUDES:
             cmd.extend(['--exclude=' + pat])
         
@@ -221,8 +295,19 @@ class AICodeMemory:
     # 摄取代码（Ingest）
     # ========================================================================
     
-    def ingest(self, repo_url: str, namespace: str = None) -> bool:
-        """摄取代码仓库，建立 namespace 层级索引"""
+    def ingest(self, repo_url: str, namespace: str = None, skip_vectors: bool = False) -> bool:
+        """摄取代码仓库，建立 namespace 层级索引
+        
+        默认行为：
+        1. 生成轻量级索引（函数签名+位置）—— 快速
+        2. 生成调用图（who-calls-whom）—— 快速
+        3. 生成语义向量（用于自然语言搜索）—— 较慢但核心功能
+        
+        Args:
+            repo_url: 仓库URL或本地路径
+            namespace: 自定义命名空间
+            skip_vectors: 是否跳过语义向量生成（仅当确定不需要语义搜索时使用）
+        """
         
         # 解析仓库名
         if repo_url.startswith('http'):
@@ -239,6 +324,7 @@ class AICodeMemory:
         print(f"\n{'='*60}")
         print(f"AI Code Memory Ingest: {owner}/{repo}")
         print(f"Namespace: {namespace}")
+        print(f"Skip vectors: {skip_vectors}")
         print(f"{'='*60}\n")
         
         tmpdir = tempfile.mkdtemp(prefix='ai_code_')
@@ -252,7 +338,7 @@ class AICodeMemory:
             self.parser = CodeParser(repo_path)
             
             print("Phase 1: Parsing symbols with ctags...")
-            tags = self.parser.run_ctags()
+            tags = self._run_ctags_fast(repo_path)
             print(f"  Found {len(tags)} raw tags")
             
             print("Phase 2: Computing scope ranges...")
@@ -272,8 +358,11 @@ class AICodeMemory:
             print("Phase 6: Storing to memory...")
             self._store_to_cache(chunks, symbols, refs, namespace, repo_path)
             
-            print("Phase 7: Generating semantic vectors...")
-            self._generate_vectors(chunks, namespace)
+            if not skip_vectors:
+                print("Phase 7: Generating semantic vectors...")
+                self._generate_vectors(chunks, namespace)
+            else:
+                print("Phase 7: Skipping semantic vectors (run 'index-vectors' later to enable)")
             
             self.cache.sync()
             print(f"\n{'='*60}")
@@ -288,6 +377,62 @@ class AICodeMemory:
         finally:
             if repo_url.startswith('http'):
                 shutil.rmtree(tmpdir, ignore_errors=True)
+    
+    def _run_ctags_fast(self, repo_path: str) -> List[dict]:
+        """快速并发 ctags 解析"""
+        import multiprocessing
+        from concurrent.futures import ProcessPoolExecutor, as_completed
+        
+        workers = min(multiprocessing.cpu_count(), 8)
+        
+        # 发现源码目录
+        source_dirs = self._discover_source_dirs(repo_path)
+        
+        # 串行模式（避免多进程问题）
+        print(f"  Discovered {len(source_dirs)} source directories, processing sequentially")
+        
+        all_tags = []
+        self.parser = CodeParser(repo_path)
+        
+        for dir_path in source_dirs:
+            try:
+                tags = _run_ctags_worker(repo_path, dir_path)
+                all_tags.extend(tags)
+                print(f"    [{len(all_tags)}] {os.path.basename(dir_path)}: {len(tags)} tags")
+            except Exception as e:
+                print(f"    Error: {os.path.basename(dir_path)}: {e}")
+        
+        return all_tags
+    
+    def _discover_source_dirs(self, repo_path: str) -> List[str]:
+        """发现仓库中的源码目录"""
+        source_dirs = []
+        source_exts = {'.c', '.cpp', '.cc', '.cxx', '.h', '.hpp', 
+                       '.py', '.go', '.rs', '.java', '.js', '.ts'}
+        
+        for entry in os.listdir(repo_path):
+            if entry.startswith('.') or entry in DEFAULT_EXCLUDES:
+                continue
+            
+            entry_path = os.path.join(repo_path, entry)
+            if not os.path.isdir(entry_path):
+                continue
+            
+            # 检查是否包含源码文件
+            has_source = False
+            for root, dirs, files in os.walk(entry_path):
+                dirs[:] = [d for d in dirs if d not in DEFAULT_EXCLUDES and not d.startswith('.')]
+                for f in files:
+                    if any(f.endswith(ext) for ext in source_exts):
+                        has_source = True
+                        break
+                if has_source:
+                    break
+            
+            if has_source:
+                source_dirs.append(entry_path)
+        
+        return source_dirs
     
     def _clone_repo(self, repo_url: str, tmpdir: str):
         cmd = ['git', 'clone', '--depth', '1', repo_url, tmpdir]
@@ -388,18 +533,93 @@ class AICodeMemory:
         return refs
     
     def _store_to_cache(self, chunks, symbols, refs, namespace, repo_path):
+        """
+        轻量级存储：只存函数签名和位置元数据，不存具体实现
+        
+        存储结构：
+        - /code/{repo}/_meta/info           仓库元数据
+        - /code/{repo}/symbols/{name}       符号索引（文件、行号、签名）
+        - /code/{repo}/files/{filepath}     文件索引（该文件的所有符号列表）
+        - /code/{repo}/refs/{name}          引用关系（调用者列表）
+        
+        AI 根据文件路径和行号自己去查看具体实现
+        """
+        def safe_set_json(key, value, ttl=0):
+            json_str = json.dumps(value, ensure_ascii=False)
+            if len(json_str.encode('utf-8')) >= CACHE_MAX_VALUE_LEN:
+                print(f"  [WARN] Value too large, skipping: {key}")
+                return False
+            return self.cache.set_json(key, value, ttl)
+        
         # 1. 元数据
-        self.cache.set_json(f"{namespace}/_meta/info", {
+        safe_set_json(f"{namespace}/_meta/info", {
             "type": "code_repo",
             "chunk_count": len(chunks),
             "symbol_count": len(symbols),
             "languages": list(set(c['language'] for c in chunks)),
+            "repo_path": repo_path,
         }, 0)
         
-        # 2. 代码片段（namespace 路径：/code/{repo}/chunks/{filepath}/{func_name}）
+        # 2. 符号索引（核心：函数名 -> 文件、行号、签名）
+        # 按名称分组（处理重载）
+        symbol_groups = {}
         for chunk in chunks:
-            key = f"{namespace}/chunks/{chunk['file']}/{chunk['name']}"
-            self.cache.set_json(key, {
+            name = chunk['name']
+            if name not in symbol_groups:
+                symbol_groups[name] = []
+            
+            symbol_groups[name].append({
+                "name": name,
+                "kind": chunk['kind'],
+                "file": chunk['file'],
+                "line": chunk['line_start'],
+                "signature": chunk['signature'],
+                "language": chunk['language'],
+            })
+        
+        for name, entries in symbol_groups.items():
+            safe_set_json(f"{namespace}/symbols/{name}", entries, 0)
+        
+        # 3. 调用图索引（who-calls-whom）
+        # callers: 谁调用了这个函数
+        # callees: 这个函数调用了谁
+        callers_map = {}  # func_name -> [caller_names]
+        callees_map = {}  # func_name -> [callee_names]
+        
+        for chunk in chunks:
+            func_name = chunk['name']
+            # 这个函数调用了谁
+            callees_map[func_name] = chunk.get('calls', [])
+            # 谁调用了这个函数
+            for callee in chunk.get('calls', []):
+                if callee not in callers_map:
+                    callers_map[callee] = []
+                callers_map[callee].append(func_name)
+        
+        # 保存调用关系（去重，限制数量）
+        for func_name, caller_list in callers_map.items():
+            unique_callers = list(dict.fromkeys(caller_list))[:50]  # 去重，最多50个
+            if unique_callers:
+                safe_set_json(f"{namespace}/callers/{func_name}", {
+                    "count": len(unique_callers),
+                    "callers": unique_callers,
+                }, 0)
+        
+        for func_name, callee_list in callees_map.items():
+            unique_callees = list(dict.fromkeys(callee_list))[:50]  # 去重，最多50个
+            if unique_callees:
+                safe_set_json(f"{namespace}/callees/{func_name}", {
+                    "count": len(unique_callees),
+                    "callees": unique_callees,
+                }, 0)
+        
+        # 4. 保存精简版 chunks（轻量级：只存前10行作为预览）
+        # AI 根据文件路径和行号自己去读完整源码
+        for chunk in chunks:
+            text = f"{chunk['signature']}\n{chunk['docstring']}\n"
+            text += '\n'.join(chunk['content'].split('\n')[:10])  # 前10行
+            
+            safe_set_json(f"{namespace}/chunks/{chunk['file']}/{chunk['name']}", {
                 "id": chunk['id'],
                 "kind": chunk['kind'],
                 "line_start": chunk['line_start'],
@@ -407,79 +627,443 @@ class AICodeMemory:
                 "language": chunk['language'],
                 "signature": chunk['signature'],
                 "docstring": chunk['docstring'],
-                "content": chunk['content'],
-                "calls": chunk['calls'],
-                "called_by": refs.get(chunk['name'], []),
+                "content": text[:2000],  # 限制长度
             }, 0)
         
-        # 3. 符号索引
-        symbol_groups = {}
-        for name, sym in symbols.items():
-            if name not in symbol_groups:
-                symbol_groups[name] = []
-            symbol_groups[name].append(sym)
-        
-        for name, entries in symbol_groups.items():
-            self.cache.set_json(f"{namespace}/symbols/{name}", entries, 0)
-        
-        # 4. 文件索引
-        file_chunks = {}
+        # 5. 保存文件索引
+        file_groups = {}
         for chunk in chunks:
-            if chunk['file'] not in file_chunks:
-                file_chunks[chunk['file']] = []
-            file_chunks[chunk['file']].append({
+            filepath = chunk['file']
+            if filepath not in file_groups:
+                file_groups[filepath] = []
+            file_groups[filepath].append({
                 "name": chunk['name'],
                 "kind": chunk['kind'],
                 "line": chunk['line_start'],
-                "chunk_id": chunk['id'],
+                "signature": chunk['signature'],
             })
         
-        for filepath, entries in file_chunks.items():
-            self.cache.set_json(f"{namespace}/files/{filepath}", {
-                "language": self.parser.get_language(filepath),
-                "symbols": entries,
+        for filepath, syms in file_groups.items():
+            safe_set_json(f"{namespace}/files/{filepath}", {
+                "path": filepath,
+                "symbols": syms,
             }, 0)
         
-        # 5. 引用关系
-        for name, caller_ids in refs.items():
-            self.cache.set_json(f"{namespace}/refs/{name}", caller_ids, 0)
+        print(f"  Stored {len(symbol_groups)} symbols")
+        print(f"  Built call graph: {len(callers_map)} callers, {len(callees_map)} callees")
+        print(f"  Saved {len(file_groups)} file indexes")
+    
+    def generate_vectors_for_repo(self, repo: str, batch_size: int = 100) -> bool:
+        """
+        为仓库按需生成语义向量（用于自然语言搜索）
+        
+        直接从 chunks 中读取内容生成向量，不依赖 _text/ 键
+        
+        Args:
+            repo: 仓库 namespace，如 /code/local/stable-diffusion.cpp
+            batch_size: 每批处理的符号数
+        
+        Returns:
+            bool: 是否成功
+        """
+        try:
+            from mydb.onnx_embedder import OnnxEmbedder
+            embedder = OnnxEmbedder()
+            
+            # 获取所有待生成向量的符号（从 chunks 中读取）
+            prefix = f"{repo}/chunks/"
+            items = []
+            
+            # 遍历所有 key 查找 chunks
+            for key, value in self.cache.items():
+                if not key.startswith(prefix):
+                    continue
+                try:
+                    data = json.loads(value)
+                    func_name = key.split('/')[-1]
+                    
+                    # 检查是否已有向量
+                    vec_key = f"{repo}/vectors/{func_name}"
+                    if not self.cache.get(vec_key):
+                        # 构建文本：签名 + 文档 + 内容预览
+                        text = f"{data.get('signature', '')}\n{data.get('docstring', '')}\n{data.get('content', '')[:500]}"
+                        if text.strip():
+                            items.append((func_name, text))
+                except:
+                    pass
+            
+            if not items:
+                print("No new vectors to generate")
+                return True
+            
+            print(f"Generating vectors for {len(items)} symbols...")
+            start_time = time.time()
+            
+            for i in range(0, len(items), batch_size):
+                batch = items[i:i+batch_size]
+                
+                for func_name, text in batch:
+                    if not text.strip():
+                        continue
+                    
+                    try:
+                        vector = embedder.encode(text)
+                        
+                        # 存储向量
+                        vec_key = f"{repo}/vectors/{func_name}"
+                        self.cache.set(vec_key, json.dumps({
+                            "name": func_name,
+                            "vector": vector,
+                        }), 0)
+                    except Exception as e:
+                        print(f"  Failed to encode {func_name}: {e}")
+                        continue
+                
+                elapsed = time.time() - start_time
+                rate = (i + len(batch)) / elapsed if elapsed > 0 else 0
+                print(f"  Progress: {min(i + batch_size, len(items))}/{len(items)} ({rate:.1f} items/s)")
+            
+            embedder.close()
+            total_time = time.time() - start_time
+            print(f"Vector generation complete! {len(items)} vectors in {total_time:.1f}s ({len(items)/total_time:.1f} items/s)")
+            return True
+            
+        except ImportError:
+            print("ONNX embedder not available")
+            return False
+        except Exception as e:
+            print(f"Vector generation failed: {e}")
+            return False
+    
+    def semantic_search(self, query: str, repo: str, top_k: int = 5) -> List[Dict]:
+        """
+        语义搜索 - 根据自然语言描述查找相关函数
+        
+        示例:
+            semantic_search("图像生成函数", "/code/local/stable-diffusion.cpp")
+            semantic_search("初始化上下文", "/code/local/stable-diffusion.cpp")
+        
+        Args:
+            query: 自然语言查询，如 "图像生成函数"
+            repo: 仓库 namespace
+            top_k: 返回结果数量
+        
+        Returns:
+            相关函数列表，按相似度排序
+        """
+        try:
+            from mydb.onnx_embedder import OnnxEmbedder
+            embedder = OnnxEmbedder()
+            
+            # 生成查询向量
+            query_vector = embedder.encode(query)
+            embedder.close()
+            
+            # 搜索仓库内的所有向量
+            prefix = f"{repo}/vectors/"
+            results = []
+            
+            for key, value in self.cache.items():
+                if key.startswith(prefix):
+                    try:
+                        data = json.loads(value)
+                        func_name = data.get('name', '')
+                        vector = data.get('vector', [])
+                        
+                        if not vector or len(vector) != len(query_vector):
+                            continue
+                        
+                        # 计算余弦相似度
+                        dot_product = sum(a * b for a, b in zip(query_vector, vector))
+                        norm_a = sum(a * a for a in query_vector) ** 0.5
+                        norm_b = sum(b * b for b in vector) ** 0.5
+                        
+                        if norm_a == 0 or norm_b == 0:
+                            continue
+                        
+                        similarity = dot_product / (norm_a * norm_b)
+                        
+                        # 获取符号信息
+                        sym_key = f"{repo}/symbols/{func_name}"
+                        sym_value = self.cache.get(sym_key)
+                        if sym_value:
+                            sym_data = json.loads(sym_value)
+                            if sym_data:
+                                primary = sym_data[0]
+                                results.append({
+                                    "name": func_name,
+                                    "file": primary.get('file', ''),
+                                    "line": primary.get('line', 0),
+                                    "signature": primary.get('signature', ''),
+                                    "similarity": similarity,
+                                })
+                    except:
+                        continue
+            
+            # 按相似度排序
+            results.sort(key=lambda x: x['similarity'], reverse=True)
+            return results[:top_k]
+            
+        except ImportError:
+            print("ONNX embedder not available")
+            return []
+        except Exception as e:
+            print(f"Semantic search failed: {e}")
+            return []
+    
+    def get_callers(self, func_name: str, repo: str) -> List[Dict]:
+        """
+        获取调用指定函数的函数列表（who calls this function）
+        
+        示例:
+            get_callers("generate_image", "/code/local/stable-diffusion.cpp")
+        
+        Returns:
+            [{
+                "name": "main",
+                "file": "examples/main.cpp",
+                "line": 45,
+                "signature": "int main(int argc, char** argv)"
+            }]
+        """
+        key = f"{repo}/callers/{func_name}"
+        value = self.cache.get(key)
+        
+        if not value:
+            return []
+        
+        try:
+            data = json.loads(value)
+            caller_names = data.get('callers', [])
+        except:
+            return []
+        
+        results = []
+        for caller_name in caller_names:
+            # 获取调用者的符号信息
+            sym_key = f"{repo}/symbols/{caller_name}"
+            sym_value = self.cache.get(sym_key)
+            if sym_value:
+                try:
+                    sym_data = json.loads(sym_value)
+                    if sym_data:
+                        primary = sym_data[0]
+                        results.append({
+                            "name": caller_name,
+                            "file": primary.get('file', ''),
+                            "line": primary.get('line', 0),
+                            "signature": primary.get('signature', ''),
+                        })
+                except:
+                    continue
+        
+        return results
+    
+    def get_callees(self, func_name: str, repo: str) -> List[Dict]:
+        """
+        获取指定函数调用的函数列表（this function calls whom）
+        
+        示例:
+            get_callees("main", "/code/local/stable-diffusion.cpp")
+        
+        Returns:
+            [{
+                "name": "generate_image",
+                "file": "src/stable-diffusion.cpp",
+                "line": 3394,
+                "signature": "sd_image_t* generate_image(...)"
+            }]
+        """
+        key = f"{repo}/callees/{func_name}"
+        value = self.cache.get(key)
+        
+        if not value:
+            return []
+        
+        try:
+            data = json.loads(value)
+            callee_names = data.get('callees', [])
+        except:
+            return []
+        
+        results = []
+        for callee_name in callee_names:
+            sym_key = f"{repo}/symbols/{callee_name}"
+            sym_value = self.cache.get(sym_key)
+            if sym_value:
+                try:
+                    sym_data = json.loads(sym_value)
+                    if sym_data:
+                        primary = sym_data[0]
+                        results.append({
+                            "name": callee_name,
+                            "file": primary.get('file', ''),
+                            "line": primary.get('line', 0),
+                            "signature": primary.get('signature', ''),
+                        })
+                except:
+                    continue
+        
+        return results
     
     def _generate_vectors(self, chunks, namespace):
-        """使用 C 端 ONNX embedder 生成向量（复用电子书实现）"""
+        """使用 C++ 多线程批量生成向量"""
+        import struct
+        import subprocess
+        import tempfile
+        
+        # 检查 C++ 工具是否存在（优先使用 V2）
+        tool_path = os.path.join(os.path.dirname(__file__), 'vector_indexer_v2')
+        if not os.path.exists(tool_path):
+            tool_path = os.path.join(os.path.dirname(__file__), 'vector_indexer')
+        
+        if not os.path.exists(tool_path):
+            print(f"  C++ vector indexer not found: {tool_path}")
+            print("  Falling back to Python (slower)...")
+            self._generate_vectors_python(chunks, namespace)
+            return
+        
+        try:
+            print(f"  Generating embeddings for {len(chunks)} symbols (C++ multi-threaded)...")
+            
+            # 1. 准备输入数据（二进制格式）
+            fd, input_bin = tempfile.mkstemp(suffix='.bin', prefix='vectors_in_')
+            
+            valid_chunks = []
+            with os.fdopen(fd, 'wb') as f:
+                # 先写入数量（稍后更新）
+                count_pos = f.tell()
+                f.write(struct.pack('I', 0))
+                
+                for chunk in chunks:
+                    text = f"{chunk['signature']}\n{chunk['docstring']}\n"
+                    text += '\n'.join(chunk['content'].split('\n')[:5])
+                    
+                    if not text.strip():
+                        continue
+                    
+                    name_bytes = chunk['name'].encode('utf-8')
+                    text_bytes = text.encode('utf-8')
+                    file_bytes = chunk['file'].encode('utf-8')
+                    
+                    f.write(struct.pack('I', len(name_bytes)))
+                    f.write(name_bytes)
+                    f.write(struct.pack('I', len(text_bytes)))
+                    f.write(text_bytes)
+                    f.write(struct.pack('I', len(file_bytes)))
+                    f.write(file_bytes)
+                    f.write(struct.pack('i', chunk['line_start']))
+                    
+                    valid_chunks.append(chunk)
+                
+                # 更新数量
+                f.seek(count_pos)
+                f.write(struct.pack('I', len(valid_chunks)))
+            
+            # 2. 运行 C++ 编码器
+            output_bin = input_bin.replace('.bin', '_out.bin')
+            
+            cmd = [tool_path, input_bin, output_bin]
+            num_threads = min(multiprocessing.cpu_count(), 8)
+            cmd.extend(['--threads', str(num_threads)])
+            
+            start_time = time.time()
+            env = os.environ.copy()
+            env['LD_LIBRARY_PATH'] = '/home/dministrator/my_db:/home/dministrator/anaconda3/envs/dl/lib'
+            result = subprocess.run(cmd, capture_output=True, text=True, env=env)
+            elapsed = time.time() - start_time
+            
+            if result.returncode != 0:
+                print(f"  C++ encoder failed (code {result.returncode})")
+                print(f"  Stderr: {result.stderr[:500]}")
+                print("  Falling back to Python...")
+                self._generate_vectors_python(chunks, namespace)
+                os.unlink(input_bin)
+                return
+            
+            print(f"  C++ encoder output:\n{result.stdout[:500]}")
+            
+            # 3. 读取输出并导入 cache
+            imported = 0
+            dim = 384
+            
+            with open(output_bin, 'rb') as f:
+                while True:
+                    name_len_bytes = f.read(4)
+                    if len(name_len_bytes) < 4:
+                        break
+                    
+                    name_len = struct.unpack('I', name_len_bytes)[0]
+                    if name_len > 1024:
+                        break
+                    
+                    name = f.read(name_len).decode('utf-8')
+                    
+                    vector_data = f.read(dim * 4)
+                    if len(vector_data) < dim * 4:
+                        break
+                    
+                    vector = struct.unpack(f'{dim}f', vector_data)
+                    
+                    key = f"{namespace}/vectors/{name}"
+                    self.cache.set(key, json.dumps({
+                        'name': name,
+                        'vector': list(vector),
+                    }), 0)
+                    imported += 1
+            
+            print(f"  Generated {imported} vectors in {elapsed:.1f}s "
+                  f"({imported/elapsed:.1f} items/s)")
+            
+            # 清理临时文件
+            os.unlink(input_bin)
+            os.unlink(output_bin)
+            
+        except Exception as e:
+            print(f"  Vector generation failed: {e}")
+            print("  Falling back to Python...")
+            self._generate_vectors_python(chunks, namespace)
+    
+    def _generate_vectors_python(self, chunks, namespace):
+        """Python 回退方案（逐个编码）"""
         try:
             from mydb.onnx_embedder import OnnxEmbedder
             
             embedder = OnnxEmbedder()
-            print(f"  Generating embeddings for {len(chunks)} chunks...")
+            print(f"  Generating embeddings (Python fallback)...")
+            
+            start_time = time.time()
+            generated = 0
             
             for i, chunk in enumerate(chunks):
-                # 构建文本（签名 + 文档 + 代码前 5 行）
                 text = f"{chunk['signature']}\n{chunk['docstring']}\n"
                 text += '\n'.join(chunk['content'].split('\n')[:5])
                 
-                # C 端 ONNX 推理
-                vector = embedder.encode(text)
+                if not text.strip():
+                    continue
                 
-                # 存储向量到 cache
-                key = f"{namespace}/vectors/{chunk['id']}"
-                value = json.dumps({
-                    "chunk_id": chunk['id'],
-                    "file": chunk['file'],
-                    "name": chunk['name'],
-                    "vector": vector,  # 384 维浮点数组
-                })
-                self.cache.set(key, value, 0)
+                try:
+                    vector = embedder.encode(text)
+                    key = f"{namespace}/vectors/{chunk['name']}"
+                    self.cache.set(key, json.dumps({
+                        'name': chunk['name'],
+                        'vector': vector,
+                    }), 0)
+                    generated += 1
+                except:
+                    pass
                 
                 if (i + 1) % 100 == 0:
-                    print(f"    Processed {i + 1}/{len(chunks)}")
+                    elapsed = time.time() - start_time
+                    print(f"    Progress: {i + 1}/{len(chunks)} ({elapsed:.1f}s)")
             
             embedder.close()
-            print(f"  Generated {len(chunks)} embeddings (dim={embedder.dim})")
+            print(f"  Generated {generated} vectors")
             
         except ImportError:
-            print("  ONNX embedder not available, skipping vector generation")
+            print("  ONNX embedder not available")
         except Exception as e:
-            print(f"  Vector generation failed: {e}")
+            print(f"  Error: {e}")
     
     # ========================================================================
     # AI Agent 查询 API - 按精准度排序
@@ -903,6 +1487,7 @@ def main():
     ingest_parser = subparsers.add_parser('ingest', help='Ingest a repository')
     ingest_parser.add_argument('repo_url', help='GitHub URL or local path')
     ingest_parser.add_argument('--namespace', '-n', help='Override namespace')
+    ingest_parser.add_argument('--skip-vectors', action='store_true', help='Skip semantic vector generation (faster)')
     
     # exact
     exact_parser = subparsers.add_parser('exact', help='Exact namespace path lookup')
@@ -936,13 +1521,34 @@ def main():
     # stats
     subparsers.add_parser('stats', help='Show statistics')
     
+    # index-vectors (按需生成向量)
+    index_vec_parser = subparsers.add_parser('index-vectors', help='Generate semantic vectors for a repo')
+    index_vec_parser.add_argument('repo', help='Repository namespace like /code/local/stable-diffusion.cpp')
+    index_vec_parser.add_argument('--batch-size', '-b', type=int, default=100, help='Batch size for vector generation')
+    
+    # semantic-search (语义搜索)
+    sem_search_parser = subparsers.add_parser('semantic-search', help='Search functions by natural language description')
+    sem_search_parser.add_argument('query', help='Natural language query like "image generation function"')
+    sem_search_parser.add_argument('repo', help='Repository namespace')
+    sem_search_parser.add_argument('--top-k', '-k', type=int, default=5, help='Number of results')
+    
+    # callers (谁调用了这个函数)
+    callers_parser = subparsers.add_parser('callers', help='Show who calls this function')
+    callers_parser.add_argument('symbol', help='Function name')
+    callers_parser.add_argument('repo', help='Repository namespace')
+    
+    # callees (这个函数调用了谁)
+    callees_parser = subparsers.add_parser('callees', help='Show functions called by this function')
+    callees_parser.add_argument('symbol', help='Function name')
+    callees_parser.add_argument('repo', help='Repository namespace')
+    
     args = parser.parse_args()
     
     memory = AICodeMemory(args.cache_dir)
     
     try:
         if args.command == 'ingest':
-            success = memory.ingest(args.repo_url, args.namespace)
+            success = memory.ingest(args.repo_url, args.namespace, skip_vectors=args.skip_vectors)
             sys.exit(0 if success else 1)
         
         elif args.command == 'exact':
@@ -1026,6 +1632,52 @@ def main():
             print(f"  Entries: {stats['entries']}")
             print(f"  Memory: {stats['memory_used_mb']:.1f} / {stats['memory_max_mb']:.1f} MB")
             print(f"  Repos: {len(stats['repos'])}")
+        
+        elif args.command == 'index-vectors':
+            print(f"\nGenerating semantic vectors for {args.repo}...")
+            success = memory.generate_vectors_for_repo(args.repo, args.batch_size)
+            sys.exit(0 if success else 1)
+        
+        elif args.command == 'semantic-search':
+            print(f"\nSemantic search: '{args.query}' in {args.repo}")
+            results = memory.semantic_search(args.query, args.repo, args.top_k)
+            print(f"Found {len(results)} results:\n")
+            for i, r in enumerate(results, 1):
+                sim_pct = r['similarity'] * 100
+                print(f"[{i}] {r['name']}")
+                print(f"    Similarity: {sim_pct:.1f}%")
+                print(f"    Location: {r['file']}:{r['line']}")
+                if r.get('signature'):
+                    print(f"    Signature: {r['signature']}")
+                print()
+        
+        elif args.command == 'callers':
+            print(f"\nWho calls '{args.symbol}' in {args.repo}?\n")
+            results = memory.get_callers(args.symbol, args.repo)
+            if not results:
+                print("  No callers found (or function not indexed)")
+            else:
+                print(f"  Found {len(results)} callers:\n")
+                for i, r in enumerate(results, 1):
+                    print(f"  {i}. {r['name']}")
+                    print(f"      Location: {r['file']}:{r['line']}")
+                    if r.get('signature'):
+                        print(f"      Signature: {r['signature']}")
+                    print()
+        
+        elif args.command == 'callees':
+            print(f"\nWhat does '{args.symbol}' call in {args.repo}?\n")
+            results = memory.get_callees(args.symbol, args.repo)
+            if not results:
+                print("  No callees found (or function not indexed)")
+            else:
+                print(f"  Found {len(results)} callees:\n")
+                for i, r in enumerate(results, 1):
+                    print(f"  {i}. {r['name']}")
+                    print(f"      Location: {r['file']}:{r['line']}")
+                    if r.get('signature'):
+                        print(f"      Signature: {r['signature']}")
+                    print()
         
         else:
             parser.print_help()

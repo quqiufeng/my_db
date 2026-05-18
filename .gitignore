@@ -38,3 +38,18 @@ __pycache__/
 src/importer/libs/*.so
 models/
 *.onnx
+
+# Libraries
+*.so
+*.so.*
+
+# TensorRT cache
+trt_cache/
+
+# Vector indexer binaries
+tools/vector_indexer
+tools/vector_indexer_v2
+tools/vector_generator
+
+# Temporary files
+/tmp/

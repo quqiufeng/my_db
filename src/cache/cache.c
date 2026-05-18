@@ -243,7 +243,9 @@ cache_t* cache_open(const char* db_dir, size_t max_memory) {
             // 读取统计信息
             void* base = cache->pool.base;
             cache->entry_count = *(uint64_t*)((char*)base + 16);
-            cache->hash.buckets_offset = *(uint64_t*)((char*)base + 24);
+            // 注意：hash 索引将在下面通过 cache_hash_init() 重新初始化
+            // 旧 header 中的 hash 数据不可信（持久化索引会重新加载或重建）
+            cache->hash.buckets_offset = 0;
             cache->hash.bucket_count = 0;
             cache->hash.size = 0;
         }

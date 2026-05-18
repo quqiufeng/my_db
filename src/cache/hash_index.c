@@ -87,6 +87,11 @@ static int hash_resize(cache_t* cache) {
 int cache_hash_insert(cache_t* cache, size_t entry_offset, const char* key, size_t key_len) {
     if (!cache || !entry_offset || !key || key_len == 0) return -1;
     
+    // 自动初始化 hash 表（防御性编程）
+    if (cache->hash.bucket_count == 0) {
+        if (cache_hash_init(cache) < 0) return -1;
+    }
+    
     // 检查负载因子
     if (cache->hash.size > 0 && cache->hash.size >= cache->hash.bucket_count * 3 / 4) {
         if (hash_resize(cache) < 0) {
