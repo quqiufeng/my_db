@@ -1,8 +1,9 @@
 CC = gcc
 CFLAGS = -Wall -Wextra -O2 -fPIC -I./include
 LDFLAGS = -shared
-ONNX_CFLAGS = -I/opt/piper-src/build/p/src/piper_phonemize_external/lib/onnxruntime-linux-x64-1.14.1/include
 
+
+ONNX_CFLAGS = -I/opt/piper-src/build/p/src/piper_phonemize_external/lib/onnxruntime-linux-x64-1.14.1/include
 ONNX_LIB = /opt/piper-src/build/p/src/piper_phonemize_external/lib/onnxruntime-linux-x64-1.14.1/lib
 ONNX_LDFLAGS = -L$(ONNX_LIB) -lonnxruntime -Wl,-rpath,$(ONNX_LIB)
 

@@ -1,0 +1,385 @@
+#include "cache_index.h"
+#include "cache_internal.h"
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <errno.h>
+
+#define INDEX_FILE_NAME "index.bin"
+
+// Calculate total size needed for all indexes
+static size_t calculate_index_size(cache_t* cache, size_t* hash_size,
+                                   size_t* sorted_size, size_t* vector_size) {
+    *hash_size = 0;
+    *sorted_size = 0;
+    *vector_size = 0;
+    
+    // Hash index
+    if (cache->hash.bucket_count > 0) {
+        *hash_size = 16 + cache->hash.bucket_count * sizeof(cache_hash_bucket_t);
+    }
+    
+    // Sorted array
+    if (cache->sorted.count > 0) {
+        *sorted_size = 24 + cache->sorted.count * sizeof(size_t);
+    }
+    
+    // Vector index
+    if (cache->vector_index.count > 0) {
+        *vector_size = 16 + cache->vector_index.count * sizeof(cache_vector_entry_t);
+    }
+    
+    // Header + entries
+    size_t header_size = sizeof(cache_index_file_header_t);
+    int index_count = 0;
+    if (*hash_size > 0) index_count++;
+    if (*sorted_size > 0) index_count++;
+    if (*vector_size > 0) index_count++;
+    
+    size_t entries_size = index_count * sizeof(cache_index_entry_t);
+    size_t data_size = *hash_size + *sorted_size + *vector_size;
+    
+    return header_size + entries_size + data_size;
+}
+
+// Write hash index data to buffer
+// Returns number of bytes written
+static size_t write_hash_index(cache_t* cache, void* buf) {
+    if (cache->hash.bucket_count == 0) return 0;
+    
+    char* p = (char*)buf;
+    
+    // bucket_count
+    *(size_t*)p = cache->hash.bucket_count;
+    p += 8;
+    
+    // size
+    *(size_t*)p = cache->hash.size;
+    p += 8;
+    
+    // buckets array
+    if (cache->hash.buckets_offset > 0) {
+        cache_hash_bucket_t* buckets = (cache_hash_bucket_t*)
+            ((char*)cache->pool.base + cache->hash.buckets_offset);
+        memcpy(p, buckets, cache->hash.bucket_count * sizeof(cache_hash_bucket_t));
+        p += cache->hash.bucket_count * sizeof(cache_hash_bucket_t);
+    }
+    
+    return p - (char*)buf;
+}
+
+// Write sorted array data to buffer
+static size_t write_sorted_index(cache_t* cache, void* buf) {
+    if (cache->sorted.count == 0) return 0;
+    
+    char* p = (char*)buf;
+    
+    *(size_t*)p = cache->sorted.count;
+    p += 8;
+    
+    *(size_t*)p = cache->sorted.capacity;
+    p += 8;
+    
+    *(uint32_t*)p = 0;  // dirty = 0 (already sorted)
+    p += 4;
+    
+    *(uint32_t*)p = 0;  // padding
+    p += 4;
+    
+    memcpy(p, cache->sorted.offsets, cache->sorted.count * sizeof(size_t));
+    p += cache->sorted.count * sizeof(size_t);
+    
+    return p - (char*)buf;
+}
+
+// Write vector index data to buffer
+static size_t write_vector_index(cache_t* cache, void* buf) {
+    if (cache->vector_index.count == 0) return 0;
+    
+    char* p = (char*)buf;
+    
+    *(size_t*)p = cache->vector_index.count;
+    p += 8;
+    
+    *(size_t*)p = cache->vector_index.capacity;
+    p += 8;
+    
+    memcpy(p, cache->vector_index.entries,
+           cache->vector_index.count * sizeof(cache_vector_entry_t));
+    p += cache->vector_index.count * sizeof(cache_vector_entry_t);
+    
+    return p - (char*)buf;
+}
+
+int cache_index_save(cache_t* cache) {
+    if (!cache) return -1;
+    
+    char path[512];
+    char tmp_path[520];
+    snprintf(path, sizeof(path), "%s/%s", cache->db_dir, INDEX_FILE_NAME);
+    snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", path);
+    
+    size_t hash_size, sorted_size, vector_size;
+    size_t total_size = calculate_index_size(cache, &hash_size, &sorted_size, &vector_size);
+    
+    if (total_size <= sizeof(cache_index_file_header_t)) {
+        // Nothing to save
+        return 0;
+    }
+    
+    // Create temp file
+    int fd = open(tmp_path, O_RDWR | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0) {
+        fprintf(stderr, "[CACHE] Failed to create index temp file: %s\n", strerror(errno));
+        return -1;
+    }
+    
+    // Set file size
+    if (ftruncate(fd, total_size) < 0) {
+        close(fd);
+        unlink(tmp_path);
+        return -1;
+    }
+    
+    // mmap for writing
+    void* base = mmap(NULL, total_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    close(fd);
+    
+    if (base == MAP_FAILED) {
+        unlink(tmp_path);
+        return -1;
+    }
+    
+    // Write file header
+    cache_index_file_header_t* header = (cache_index_file_header_t*)base;
+    header->magic = CACHE_INDEX_MAGIC;
+    header->version = CACHE_INDEX_VERSION;
+    header->total_size = total_size;
+    header->reserved = 0;
+    
+    // Count indexes
+    int index_count = 0;
+    if (hash_size > 0) index_count++;
+    if (sorted_size > 0) index_count++;
+    if (vector_size > 0) index_count++;
+    header->index_count = index_count;
+    
+    // Index entries start after header
+    cache_index_entry_t* entries = (cache_index_entry_t*)
+        ((char*)base + sizeof(cache_index_file_header_t));
+    
+    // Data starts after all entries
+    char* data_ptr = (char*)base + sizeof(cache_index_file_header_t)
+        + index_count * sizeof(cache_index_entry_t);
+    
+    int entry_idx = 0;
+    
+    // Write hash index
+    if (hash_size > 0) {
+        cache_index_entry_t* entry = &entries[entry_idx++];
+        entry->type = INDEX_TYPE_HASH;
+        entry->data_offset = data_ptr - (char*)base;
+        entry->data_size = hash_size;
+        entry->entry_count = cache->hash.bucket_count;
+        entry->reserved = 0;
+        entry->reserved2 = 0;
+        
+        size_t written = write_hash_index(cache, data_ptr);
+        data_ptr += written;
+    }
+    
+    // Write sorted array
+    if (sorted_size > 0) {
+        cache_index_entry_t* entry = &entries[entry_idx++];
+        entry->type = INDEX_TYPE_SORTED;
+        entry->data_offset = data_ptr - (char*)base;
+        entry->data_size = sorted_size;
+        entry->entry_count = cache->sorted.count;
+        entry->reserved = 0;
+        entry->reserved2 = 0;
+        
+        size_t written = write_sorted_index(cache, data_ptr);
+        data_ptr += written;
+    }
+    
+    // Write vector index
+    if (vector_size > 0) {
+        cache_index_entry_t* entry = &entries[entry_idx++];
+        entry->type = INDEX_TYPE_VECTOR;
+        entry->data_offset = data_ptr - (char*)base;
+        entry->data_size = vector_size;
+        entry->entry_count = cache->vector_index.count;
+        entry->reserved = 0;
+        entry->reserved2 = 0;
+        
+        size_t written = write_vector_index(cache, data_ptr);
+        data_ptr += written;
+    }
+    
+    // Sync to disk
+    msync(base, total_size, MS_SYNC);
+    munmap(base, total_size);
+    
+    // Atomic rename
+    if (rename(tmp_path, path) < 0) {
+        unlink(tmp_path);
+        return -1;
+    }
+    
+    printf("[CACHE] Index saved: %s (%zu bytes, %d indexes)\n", path, total_size, index_count);
+    
+    return 0;
+}
+
+int cache_index_load(cache_t* cache) {
+    if (!cache) return -1;
+    
+    char path[512];
+    snprintf(path, sizeof(path), "%s/%s", cache->db_dir, INDEX_FILE_NAME);
+    
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) {
+        // No index file, not an error - will rebuild
+        return -1;
+    }
+    
+    struct stat st;
+    if (fstat(fd, &st) < 0) {
+        close(fd);
+        return -1;
+    }
+    
+    size_t file_size = st.st_size;
+    if (file_size < sizeof(cache_index_file_header_t)) {
+        close(fd);
+        return -1;
+    }
+    
+    // mmap the entire file
+    void* base = mmap(NULL, file_size, PROT_READ, MAP_SHARED, fd, 0);
+    close(fd);
+    
+    if (base == MAP_FAILED) {
+        return -1;
+    }
+    
+    // Validate header
+    cache_index_file_header_t* header = (cache_index_file_header_t*)base;
+    if (header->magic != CACHE_INDEX_MAGIC || header->version != CACHE_INDEX_VERSION) {
+        munmap(base, file_size);
+        return -1;
+    }
+    
+    if (header->total_size != file_size) {
+        munmap(base, file_size);
+        return -1;
+    }
+    
+    uint32_t index_count = header->index_count;
+    
+    // Process each index entry
+    cache_index_entry_t* entries = (cache_index_entry_t*)
+        ((char*)base + sizeof(cache_index_file_header_t));
+    
+    for (uint32_t i = 0; i < index_count; i++) {
+        cache_index_entry_t* entry = &entries[i];
+        void* data = (char*)base + entry->data_offset;
+        
+        switch (entry->type) {
+            case INDEX_TYPE_HASH: {
+                if (entry->data_size >= 16 && entry->entry_count > 0) {
+                    size_t bucket_count = *(size_t*)data;
+                    size_t hash_size = *(size_t*)((char*)data + 8);
+                    size_t buckets_data_size = bucket_count * sizeof(cache_hash_bucket_t);
+                    
+                    // Allocate buckets in pool (since existing code uses CACHE_PTR)
+                    size_t pool_offset = pool_alloc_offset(&cache->pool, buckets_data_size);
+                    if (pool_offset) {
+                        void* pool_buckets = (char*)cache->pool.base + pool_offset;
+                        memcpy(pool_buckets, (char*)data + 16, buckets_data_size);
+                        cache->hash.bucket_count = bucket_count;
+                        cache->hash.size = hash_size;
+                        cache->hash.buckets_offset = pool_offset;
+                    }
+                }
+                break;
+            }
+            
+            case INDEX_TYPE_SORTED: {
+                if (entry->data_size >= 24 && entry->entry_count > 0) {
+                    size_t count = *(size_t*)data;
+                    size_t offsets_size = count * sizeof(size_t);
+                    
+                    // Allocate offsets array (malloc, like original)
+                    size_t* offsets = malloc(offsets_size);
+                    if (offsets) {
+                        memcpy(offsets, (char*)data + 24, offsets_size);
+                        cache->sorted.count = count;
+                        cache->sorted.capacity = count;
+                        cache->sorted.dirty = 0;
+                        cache->sorted.offsets = offsets;
+                    }
+                }
+                break;
+            }
+            
+            case INDEX_TYPE_VECTOR: {
+                if (entry->data_size >= 16 && entry->entry_count > 0) {
+                    size_t count = *(size_t*)data;
+                    size_t entries_size = count * sizeof(cache_vector_entry_t);
+                    
+                    // Allocate entries array (malloc, like original)
+                    cache_vector_entry_t* entries = malloc(entries_size);
+                    if (entries) {
+                        memcpy(entries, (char*)data + 16, entries_size);
+                        cache->vector_index.count = count;
+                        cache->vector_index.capacity = count;
+                        cache->vector_index.entries = entries;
+                    }
+                }
+                break;
+            }
+            
+            default:
+                fprintf(stderr, "[CACHE] Unknown index type: %d\n", entry->type);
+                break;
+        }
+    }
+    
+    // Store mmap info for cleanup
+    cache->index_mmap_base = base;
+    cache->index_mmap_size = file_size;
+    cache->index_loaded = 1;
+    
+    printf("[CACHE] Index loaded from %s (%zu bytes, %d indexes)\n",
+           path, file_size, index_count);
+    
+    return 0;
+}
+
+void cache_index_unload(cache_t* cache) {
+    if (!cache) return;
+    
+    if (cache->index_mmap_base && cache->index_mmap_size > 0) {
+        munmap(cache->index_mmap_base, cache->index_mmap_size);
+        cache->index_mmap_base = NULL;
+        cache->index_mmap_size = 0;
+    }
+    
+    cache->index_loaded = 0;
+}
+
+int cache_index_exists(const char* db_dir) {
+    if (!db_dir) return 0;
+    
+    char path[512];
+    snprintf(path, sizeof(path), "%s/%s", db_dir, INDEX_FILE_NAME);
+    
+    struct stat st;
+    return stat(path, &st) == 0 && S_ISREG(st.st_mode);
+}

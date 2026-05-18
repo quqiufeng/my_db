@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "cache_internal.h"
+#include "cache_index.h"
 #include <string.h>
 #include <stdio.h>
 #include <time.h>
@@ -258,40 +259,49 @@ cache_t* cache_open(const char* db_dir, size_t max_memory) {
     }
 
     if (!is_new) {
-        // 已有文件：重建 hash 索引
-        // 扫描所有 entry（通过 key_len 识别有效的 entry）
-        size_t offset = CACHE_HEADER_SIZE;
-        size_t valid_count = 0;
-        while (offset + sizeof(cache_entry_header_t) <= cache->pool.used) {
-            cache_entry_header_t* header = (cache_entry_header_t*)CACHE_PTR(cache, offset);
+        // 已有文件：尝试加载持久化索引（零拷贝）
+        if (cache_index_load(cache) == 0) {
+            // 索引加载成功，验证 entry_count 一致性
+            // 注意：mmap 的索引直接使用，不需要重建
+            printf("[CACHE] Loaded persisted indexes, skipping rebuild\n");
+        } else {
+            // 加载失败，回退到扫描重建
+            printf("[CACHE] No persisted index found, rebuilding...\n");
             
-            // 检查是否是有效的 entry header
-            if (header->key_len == 0 || header->key_len > CACHE_MAX_KEY_LEN ||
-                header->value_len > CACHE_MAX_VALUE_LEN) {
-                // 不是 entry，跳过对齐大小
-                offset += MYDB_ALIGN;
-                continue;
+            // 扫描所有 entry（通过 key_len 识别有效的 entry）
+            size_t offset = CACHE_HEADER_SIZE;
+            size_t valid_count = 0;
+            while (offset + sizeof(cache_entry_header_t) <= cache->pool.used) {
+                cache_entry_header_t* header = (cache_entry_header_t*)CACHE_PTR(cache, offset);
+                
+                // 检查是否是有效的 entry header
+                if (header->key_len == 0 || header->key_len > CACHE_MAX_KEY_LEN ||
+                    header->value_len > CACHE_MAX_VALUE_LEN) {
+                    // 不是 entry，跳过对齐大小
+                    offset += MYDB_ALIGN;
+                    continue;
+                }
+                
+                size_t total_size = cache_entry_total_size(header);
+                if (offset + total_size > cache->pool.used) break;
+                
+                if (!(header->flags & CACHE_ENTRY_DELETED)) {
+                    char* key = (char*)CACHE_PTR(cache, offset + sizeof(cache_entry_header_t));
+                    cache_hash_insert(cache, offset, key, header->key_len);
+                    cache_sorted_insert(cache, offset);
+                    cache_ns_add(cache, key, offset);
+                    // 跳过 tag 索引重建（电子书内容不需要 tag 搜索）
+                    // cache_tag_index_add(cache, offset, value, header->value_len);
+                    valid_count++;
+                }
+                
+                offset += total_size;
             }
+            cache->entry_count = valid_count;
             
-            size_t total_size = cache_entry_total_size(header);
-            if (offset + total_size > cache->pool.used) break;
-            
-            if (!(header->flags & CACHE_ENTRY_DELETED)) {
-                char* key = (char*)CACHE_PTR(cache, offset + sizeof(cache_entry_header_t));
-                cache_hash_insert(cache, offset, key, header->key_len);
-                cache_sorted_insert(cache, offset);
-                cache_ns_add(cache, key, offset);
-                // 跳过 tag 索引重建（电子书内容不需要 tag 搜索）
-                // cache_tag_index_add(cache, offset, value, header->value_len);
-                valid_count++;
-            }
-            
-            offset += total_size;
+            // 重建向量索引
+            cache_vector_index_rebuild(cache);
         }
-        cache->entry_count = valid_count;
-        
-        // 重建向量索引
-        cache_vector_index_rebuild(cache);
     }
     
     return cache;
@@ -299,6 +309,9 @@ cache_t* cache_open(const char* db_dir, size_t max_memory) {
 
 void cache_close(cache_t* cache) {
     if (!cache) return;
+    
+    // 保存索引（如果数据有变化）
+    cache_index_save(cache);
     
     // 保存 header
     cache_header_save(cache);
@@ -319,13 +332,23 @@ void cache_close(cache_t* cache) {
     // 释放向量索引
     cache_vector_index_destroy(cache);
     
+    // 释放索引 mmap
+    cache_index_unload(cache);
+    
     free(cache);
 }
 
 int cache_sync(cache_t* cache) {
     if (!cache) return CACHE_ERR_INVAL;
     cache_header_save(cache);
-    return pool_sync(&cache->pool) < 0 ? CACHE_ERR_IO : CACHE_OK;
+    int ret = pool_sync(&cache->pool) < 0 ? CACHE_ERR_IO : CACHE_OK;
+    
+    // 同时保存索引
+    if (ret == CACHE_OK) {
+        cache_index_save(cache);
+    }
+    
+    return ret;
 }
 
 int cache_set(cache_t* cache, const char* key, const char* value, uint64_t ttl_ms) {

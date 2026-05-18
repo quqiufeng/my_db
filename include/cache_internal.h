@@ -173,6 +173,11 @@ struct cache {
     
     // 状态
     char db_dir[256];           // 数据库目录
+    
+    // 索引持久化（mmap）
+    void* index_mmap_base;      // index.bin mmap base
+    size_t index_mmap_size;     // mmap size
+    int index_loaded;           // 1 = loaded from file, 0 = rebuilt
 };
 
 // ====== 内部函数（其他模块使用）======
