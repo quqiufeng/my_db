@@ -38,6 +38,7 @@ typedef struct {
     int max_results;        // 最大返回数量（0 = 无限制）
     int case_sensitive;     // 大小写敏感（默认 0）
     const char* ns_filter;  // namespace 过滤（可选）
+    const char* query_text; // 原始查询文本（用于混合评分，可选）
 } cache_search_options_t;
 
 // ====== 默认搜索选项 ======

@@ -153,8 +153,68 @@ static int vocab_lookup(vocab_hash_entry_t* hash_table, int hash_size, const cha
     return -1;
 }
 
-// Simple WordPiece tokenization
-// Returns number of tokens, fills token_ids array (int64_t)
+// Unicode character classification
+static int is_cjk(char c) {
+    // CJK Unified Ideographs: 0x4E00-0x9FFF
+    // CJK Unified Ideographs Extension A: 0x3400-0x4DBF
+    unsigned char u = (unsigned char)c;
+    return (u >= 0x4E && u <= 0x9F) || (u >= 0x34 && u <= 0x4D);
+}
+
+static int is_punctuation(char c) {
+    return c == '。' || c == '，' || c == '、' || c == '；' || c == '：' ||
+           c == '？' || c == '！' || c == '"' || c == '"' || c == ''' || c == ''' ||
+           c == '（' || c == '）' || c == '【' || c == '】' || c == '《' || c == '》' ||
+           c == '…' || c == '—' || c == '～' || c == '·' ||
+           c == '.' || c == ',' || c == '!' || c == '?' || c == ';' || c == ':' ||
+           c == '(' || c == ')' || c == '[' || c == ']' || c == '{' || c == '}' ||
+           c == '"' || c == '\'' || c == '`' || c == '-' || c == '_' ||
+           c == '+' || c == '=' || c == '*' || c == '/' || c == '\\' ||
+           c == '<' || c == '>' || c == '|' || c == '&' || c == '%' || c == '$' ||
+           c == '#' || c == '@' || c == '^' || c == '~';
+}
+
+// Extract next token from text
+// Returns bytes consumed, fills token buffer
+static int extract_next_token(const char* text, char* token, int max_len) {
+    if (!text || !*text) return 0;
+    
+    const char* p = text;
+    
+    // Skip whitespace
+    while (*p && isspace((unsigned char)*p)) p++;
+    if (!*p) return p - text;
+    
+    char c = *p;
+    
+    // CJK character: extract one character
+    if (is_cjk(c)) {
+        token[0] = c;
+        token[1] = '\0';
+        return p - text + 1;
+    }
+    
+    // Punctuation: skip it (don't tokenize)
+    if (is_punctuation(c)) {
+        return p - text + 1;  // Skip and return 0 tokens
+    }
+    
+    // ASCII word: extract until whitespace/punctuation/CJK
+    int wlen = 0;
+    while (*p && wlen < max_len - 1) {
+        char ch = *p;
+        if (isspace((unsigned char)ch) || is_punctuation(ch) || is_cjk(ch)) {
+            break;
+        }
+        token[wlen++] = ch;
+        p++;
+    }
+    token[wlen] = '\0';
+    
+    return p - text;
+}
+
+// WordPiece tokenization with Unicode support
 static int wordpiece_tokenize(onnx_embedder_t* e, const char* text, int64_t* token_ids, int max_tokens) {
     if (!text || !*text) {
         token_ids[0] = e->cls_id;
@@ -165,37 +225,30 @@ static int wordpiece_tokenize(onnx_embedder_t* e, const char* text, int64_t* tok
     int pos = 0;
     token_ids[pos++] = e->cls_id;
     
-    // Simple whitespace and punctuation splitting
     const char* p = text;
+    char word[256];
+    
     while (*p && pos < max_tokens - 1) {
-        // Skip whitespace
-        while (*p && isspace((unsigned char)*p)) p++;
-        if (!*p) break;
+        int consumed = extract_next_token(p, word, sizeof(word));
+        if (consumed == 0) break;
+        p += consumed;
         
-        // Extract word
-        char word[256];
-        int wlen = 0;
-        while (*p && !isspace((unsigned char)*p) && wlen < 255) {
-            word[wlen++] = *p++;
-        }
-        word[wlen] = '\0';
+        if (word[0] == '\0') continue;  // Skipped punctuation
         
-        if (wlen == 0) continue;
-        
-        // Convert to lowercase for vocab lookup
-        for (int i = 0; i < wlen; i++) {
+        // Convert to lowercase for ASCII letters
+        for (int i = 0; word[i]; i++) {
             word[i] = tolower((unsigned char)word[i]);
         }
         
-        // Try to tokenize using WordPiece algorithm
+        int wlen = strlen(word);
         int sub_pos = 0;
         int is_first = 1;
         
+        // WordPiece subword tokenization
         while (sub_pos < wlen && pos < max_tokens - 1) {
             int best_len = 0;
             int best_id = e->unk_id;
             
-            // Find longest matching token
             int max_try = wlen - sub_pos;
             if (!is_first && max_try > MAX_TOKEN_LEN - 3) max_try = MAX_TOKEN_LEN - 3;
             if (is_first && max_try > MAX_TOKEN_LEN - 1) max_try = MAX_TOKEN_LEN - 1;
@@ -216,12 +269,11 @@ static int wordpiece_tokenize(onnx_embedder_t* e, const char* text, int64_t* tok
                 if (id >= 0) {
                     best_len = try_len;
                     best_id = id;
-                    break;  // longest match (we try from longest)
+                    break;
                 }
             }
             
             if (best_len == 0) {
-                // No match found, use UNK and skip one char
                 token_ids[pos++] = e->unk_id;
                 sub_pos++;
             } else {

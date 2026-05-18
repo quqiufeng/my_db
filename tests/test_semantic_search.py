@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Test semantic search on embedded ebooks."""
+"""Test semantic search on embedded ebooks with hybrid scoring."""
 
 import sys
 import os
@@ -15,9 +15,19 @@ lib.cache_open.argtypes = [ctypes.c_char_p, ctypes.c_size_t]
 lib.cache_open.restype = ctypes.c_void_p
 lib.cache_close.argtypes = [ctypes.c_void_p]
 lib.cache_close.restype = None
+
+# cache_search_options_t structure
+class CacheSearchOptions(ctypes.Structure):
+    _fields_ = [
+        ("max_results", ctypes.c_int),
+        ("case_sensitive", ctypes.c_int),
+        ("ns_filter", ctypes.c_char_p),
+        ("query_text", ctypes.c_char_p),
+    ]
+
 lib.cache_search_vector.argtypes = [
     ctypes.c_void_p, ctypes.POINTER(ctypes.c_float), ctypes.c_size_t,
-    ctypes.c_int, ctypes.c_double, ctypes.c_void_p,
+    ctypes.c_int, ctypes.c_double, ctypes.POINTER(CacheSearchOptions),
     ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(ctypes.c_size_t)
 ]
 lib.cache_search_vector.restype = ctypes.c_int
@@ -39,12 +49,19 @@ def semantic_search(cache_dir, query, top_k=5):
         embedding = model.encode(query, convert_to_numpy=True)
         vector_arr = (ctypes.c_float * len(embedding))(*embedding.tolist())
         
+        # Create search options with query text for hybrid scoring
+        opts = CacheSearchOptions()
+        opts.max_results = top_k
+        opts.case_sensitive = 0
+        opts.ns_filter = None
+        opts.query_text = query.encode('utf-8')
+        
         results_ptr = ctypes.c_void_p()
         count = ctypes.c_size_t()
         
         ret = lib.cache_search_vector(
             cache, vector_arr, len(embedding),
-            top_k, 0.3, None,
+            top_k, 0.3, ctypes.byref(opts),
             ctypes.byref(results_ptr), ctypes.byref(count)
         )
         
@@ -59,7 +76,7 @@ def semantic_search(cache_dir, query, top_k=5):
         results = ctypes.cast(results_ptr, ctypes.POINTER(CacheResult))
         
         print(f"\nQuery: '{query}'")
-        print(f"Found {count.value} results:\n")
+        print(f"Found {count.value} results (hybrid scoring: semantic + title + keyword + position):\n")
         
         for i in range(min(count.value, top_k)):
             key = results[i].key.decode('utf-8') if results[i].key else "N/A"

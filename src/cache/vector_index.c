@@ -335,6 +335,87 @@ static int compare_vector_score(const void* a, const void* b) {
     return 0;
 }
 
+// ====== Hybrid Scoring (Semantic + Title + Keyword + Position) ======
+
+// Count how many query words appear in text (case-insensitive)
+static int count_keyword_matches(const char* query, const char* text) {
+    if (!query || !text) return 0;
+    
+    int matches = 0;
+    char query_lower[256];
+    char text_lower[1024];
+    
+    // Simple lowercase copy
+    int i = 0;
+    while (query[i] && i < 255) {
+        query_lower[i] = tolower((unsigned char)query[i]);
+        i++;
+    }
+    query_lower[i] = '\0';
+    
+    i = 0;
+    while (text[i] && i < 1023) {
+        text_lower[i] = tolower((unsigned char)text[i]);
+        i++;
+    }
+    text_lower[i] = '\0';
+    
+    // Check each word in query
+    char* q = query_lower;
+    char* word;
+    while ((word = strtok(q, " \t\n\r")) != NULL) {
+        q = NULL;  // For subsequent calls
+        if (strlen(word) >= 2 && strstr(text_lower, word)) {
+            matches++;
+        }
+    }
+    
+    return matches;
+}
+
+// Extract paragraph index from key like ".../content/p0123"
+static int get_paragraph_index(const char* key) {
+    const char* p = strstr(key, "/content/p");
+    if (!p) return 999;  // Not a paragraph, give low priority
+    return atoi(p + 10);
+}
+
+// Calculate hybrid score
+static double calculate_hybrid_score(cache_t* cache, size_t entry_offset,
+                                     double semantic_score, const char* query_text) {
+    size_t key_len, value_len;
+    const char* key = entry_key(cache, entry_offset, &key_len);
+    const char* value = entry_value(cache, entry_offset, &value_len);
+    
+    double score = semantic_score;
+    
+    // 1. Title bonus: exact key match or title entries get higher weight
+    if (strstr(key, "/title")) {
+        score *= 1.5;  // Title entries are more important
+    } else if (strstr(key, "/_meta/")) {
+        score *= 1.3;  // Metadata is also important
+    }
+    
+    // 2. Keyword frequency bonus
+    if (query_text && value) {
+        int keyword_matches = count_keyword_matches(query_text, value);
+        if (keyword_matches > 0) {
+            // Each matching keyword adds up to 10% bonus
+            double keyword_bonus = 1.0 + (keyword_matches * 0.1);
+            if (keyword_bonus > 1.5) keyword_bonus = 1.5;  // Cap at 50%
+            score *= keyword_bonus;
+        }
+    }
+    
+    // 3. Position bonus: earlier paragraphs in a chapter are more likely to be summaries
+    int para_idx = get_paragraph_index(key);
+    if (para_idx < 3) {
+        score *= 1.1;  // First 3 paragraphs get 10% bonus
+    }
+    
+    return score;
+}
+
 int cache_search_vector(cache_t* cache, const float* query_vector, size_t dim,
                         int top_k, double min_score,
                         cache_search_options_t* options,
@@ -393,6 +474,16 @@ int cache_search_vector(cache_t* cache, const float* query_vector, size_t dim,
             return CACHE_OK;
         }
         
+        // Apply hybrid scoring (semantic + title + keyword + position)
+        const char* query_text = options ? options->query_text : NULL;
+        for (size_t i = 0; i < valid_count; i++) {
+            valid_scores[i].score = calculate_hybrid_score(cache, valid_scores[i].entry_offset,
+                                                           valid_scores[i].score, query_text);
+        }
+        
+        // Re-sort by hybrid score
+        qsort(valid_scores, valid_count, sizeof(vector_score_t), compare_vector_score);
+        
         // 取前 top_k
         size_t result_count = valid_count < (size_t)max_results ? valid_count : (size_t)max_results;
         
@@ -445,7 +536,14 @@ int cache_search_vector(cache_t* cache, const float* query_vector, size_t dim,
         return CACHE_OK;
     }
     
-    // 按相似度排序（降序）
+    // Apply hybrid scoring
+    const char* query_text = options ? options->query_text : NULL;
+    for (size_t i = 0; i < score_count; i++) {
+        scores[i].score = calculate_hybrid_score(cache, scores[i].entry_offset,
+                                                  scores[i].score, query_text);
+    }
+    
+    // 按混合评分排序（降序）
     qsort(scores, score_count, sizeof(vector_score_t), compare_vector_score);
     
     // 取前top_k
