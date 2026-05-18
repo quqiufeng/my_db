@@ -216,18 +216,33 @@ int main(int argc, char** argv) {
     }
     
     // 批量编码
-    printf("Encoding...\n");
+    printf("Encoding with batch size %d...\n", BATCH_SIZE);
     float* vectors = malloc(item_count * DIM * sizeof(float));
     int processed = 0;
+    
+    // 分配文本指针数组
+    const char** texts = malloc(BATCH_SIZE * sizeof(char*));
     
     for (int i = 0; i < item_count; i += BATCH_SIZE) {
         int batch_end = i + BATCH_SIZE;
         if (batch_end > item_count) batch_end = item_count;
+        int batch_count = batch_end - i;
         
-        for (int j = i; j < batch_end; j++) {
-            int ret = onnx_embedder_encode(embedder, items[j].text, vectors + j * DIM);
-            if (ret == 0) {
-                processed++;
+        // 准备 batch 文本
+        for (int j = 0; j < batch_count; j++) {
+            texts[j] = items[i + j].text;
+        }
+        
+        // Batch encode
+        int ret = onnx_embedder_encode_batch(embedder, texts, batch_count, vectors + i * DIM);
+        if (ret == 0) {
+            processed += batch_count;
+        } else {
+            // Fallback to single encode on batch failure
+            for (int j = 0; j < batch_count; j++) {
+                if (onnx_embedder_encode(embedder, items[i + j].text, vectors + (i + j) * DIM) == 0) {
+                    processed++;
+                }
             }
         }
         
@@ -236,6 +251,7 @@ int main(int argc, char** argv) {
         }
     }
     
+    free(texts);
     printf("Encoded %d/%d items\n", processed, item_count);
     
     // 存储向量

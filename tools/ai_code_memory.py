@@ -544,12 +544,22 @@ class AICodeMemory:
         
         AI 根据文件路径和行号自己去查看具体实现
         """
+        total_keys = 0
+        SYNC_INTERVAL = 5000  # 每 5000 个 key sync 一次，避免 cache_close 时保存 index 卡死
+        
         def safe_set_json(key, value, ttl=0):
+            nonlocal total_keys
             json_str = json.dumps(value, ensure_ascii=False)
             if len(json_str.encode('utf-8')) >= CACHE_MAX_VALUE_LEN:
                 print(f"  [WARN] Value too large, skipping: {key}")
                 return False
-            return self.cache.set_json(key, value, ttl)
+            result = self.cache.set_json(key, value, ttl)
+            if result:
+                total_keys += 1
+                if total_keys % SYNC_INTERVAL == 0:
+                    self.cache.sync()
+                    print(f"  Synced at {total_keys} keys")
+            return result
         
         # 1. 元数据
         safe_set_json(f"{namespace}/_meta/info", {

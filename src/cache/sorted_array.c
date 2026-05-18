@@ -25,7 +25,9 @@ static int compare_entries_qsort(const void* a, const void* b) {
     size_t min_len = ha->key_len < hb->key_len ? ha->key_len : hb->key_len;
     int cmp = memcmp(key_a, key_b, min_len);
     if (cmp != 0) return cmp;
-    return (int)(ha->key_len - hb->key_len);
+    if (ha->key_len < hb->key_len) return -1;
+    if (ha->key_len > hb->key_len) return 1;
+    return 0;
 }
 
 static int compare_key_with_entry(const char* key, size_t key_len, cache_t* cache, size_t entry_offset) {

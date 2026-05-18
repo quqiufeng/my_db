@@ -579,6 +579,116 @@ int onnx_embedder_encode(onnx_embedder_t* e, const char* text, float* vector) {
     return 0;
 }
 
+// Batch encode multiple texts at once for better GPU utilization
+int onnx_embedder_encode_batch(onnx_embedder_t* e, const char** texts, int count, float* vectors) {
+    if (!e || !texts || !vectors || count <= 0) {
+        set_error("Invalid arguments");
+        return -1;
+    }
+    
+    // Allocate batch buffers
+    int64_t* batch_input_ids = (int64_t*)malloc(count * e->max_seq_length * sizeof(int64_t));
+    int64_t* batch_attention_mask = (int64_t*)malloc(count * e->max_seq_length * sizeof(int64_t));
+    if (!batch_input_ids || !batch_attention_mask) {
+        free(batch_input_ids);
+        free(batch_attention_mask);
+        set_error("Failed to allocate batch buffers");
+        return -1;
+    }
+    
+    // Tokenize all texts
+    for (int i = 0; i < count; i++) {
+        int64_t* ids = batch_input_ids + i * e->max_seq_length;
+        int64_t* mask = batch_attention_mask + i * e->max_seq_length;
+        
+        int token_count = wordpiece_tokenize(e, texts[i], ids, e->max_seq_length);
+        
+        // Pad and create attention mask
+        for (int j = 0; j < e->max_seq_length; j++) {
+            if (j < token_count) {
+                mask[j] = 1;
+            } else {
+                ids[j] = e->pad_id;
+                mask[j] = 0;
+            }
+        }
+    }
+    
+    // Create input tensors [count, max_seq_length]
+    int64_t input_shape[] = {count, e->max_seq_length};
+    OrtValue* input_tensor = NULL;
+    OrtValue* mask_tensor = NULL;
+    OrtStatus* status;
+    
+    status = g_ort->CreateTensorWithDataAsOrtValue(
+        e->memory_info, batch_input_ids, count * e->max_seq_length * sizeof(int64_t),
+        input_shape, 2, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64, &input_tensor);
+    if (status != NULL) {
+        set_error("Failed to create batch input tensor");
+        g_ort->ReleaseStatus(status);
+        free(batch_input_ids);
+        free(batch_attention_mask);
+        return -1;
+    }
+    
+    status = g_ort->CreateTensorWithDataAsOrtValue(
+        e->memory_info, batch_attention_mask, count * e->max_seq_length * sizeof(int64_t),
+        input_shape, 2, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64, &mask_tensor);
+    if (status != NULL) {
+        g_ort->ReleaseValue(input_tensor);
+        set_error("Failed to create batch mask tensor");
+        g_ort->ReleaseStatus(status);
+        free(batch_input_ids);
+        free(batch_attention_mask);
+        return -1;
+    }
+    
+    // Run inference
+    const char* input_names[] = {"input_ids", "attention_mask"};
+    const char* output_names[] = {"token_embeddings"};
+    OrtValue* output_tensor = NULL;
+    OrtValue* inputs[] = {input_tensor, mask_tensor};
+    
+    status = g_ort->Run(e->session, NULL, input_names, (const OrtValue* const*)inputs, 2, output_names, 1, &output_tensor);
+    
+    g_ort->ReleaseValue(input_tensor);
+    g_ort->ReleaseValue(mask_tensor);
+    
+    if (status != NULL) {
+        free(batch_input_ids);
+        free(batch_attention_mask);
+        set_error("ONNX batch inference failed");
+        g_ort->ReleaseStatus(status);
+        return -1;
+    }
+    
+    // Get output data
+    float* output_data;
+    status = g_ort->GetTensorMutableData(output_tensor, (void**)&output_data);
+    if (status != NULL) {
+        free(batch_input_ids);
+        free(batch_attention_mask);
+        g_ort->ReleaseValue(output_tensor);
+        set_error("Failed to get batch output data");
+        g_ort->ReleaseStatus(status);
+        return -1;
+    }
+    
+    // Extract vectors for each sample
+    // Output shape: [count, seq_length, dim]
+    for (int i = 0; i < count; i++) {
+        float* out = output_data + i * e->max_seq_length * e->dim;
+        int64_t* mask = batch_attention_mask + i * e->max_seq_length;
+        
+        mean_pool_and_normalize(out, mask, e->max_seq_length, e->dim, vectors + i * e->dim);
+    }
+    
+    free(batch_input_ids);
+    free(batch_attention_mask);
+    g_ort->ReleaseValue(output_tensor);
+    return 0;
+}
+
 void onnx_embedder_free(onnx_embedder_t* e) {
     if (!e) return;
     

@@ -21,6 +21,13 @@ onnx_embedder_t* onnx_embedder_init(const char* model_path, const char* vocab_pa
 // Returns 0 on success, -1 on error
 int onnx_embedder_encode(onnx_embedder_t* embedder, const char* text, float* vector);
 
+// Generate embeddings for a batch of texts
+// texts: array of text strings
+// count: number of texts (batch size)
+// vectors: output buffer, size must be >= count * dim
+// Returns 0 on success, -1 on error
+int onnx_embedder_encode_batch(onnx_embedder_t* embedder, const char** texts, int count, float* vectors);
+
 // Free embedder resources
 void onnx_embedder_free(onnx_embedder_t* embedder);
 

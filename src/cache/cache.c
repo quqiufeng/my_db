@@ -92,11 +92,16 @@ static uint64_t hash_key_fnv(const char* key, size_t key_len) {
 }
 
 static void hot_cache_invalidate(cache_t* cache, const char* key, size_t key_len) {
+    if (!cache || !key || key_len == 0) return;
+    
     uint64_t h = hash_key_fnv(key, key_len);
-    for (size_t i = 0; i < cache->hot_count; i++) {
+    size_t count = cache->hot_count;
+    if (count > CACHE_HOT_SIZE) count = CACHE_HOT_SIZE;
+    
+    for (size_t i = 0; i < count; i++) {
         if (cache->hot_cache[i].key_hash == h) {
             // Swap with last and pop
-            cache->hot_cache[i] = cache->hot_cache[cache->hot_count - 1];
+            cache->hot_cache[i] = cache->hot_cache[count - 1];
             cache->hot_count--;
             return;
         }
@@ -104,11 +109,17 @@ static void hot_cache_invalidate(cache_t* cache, const char* key, size_t key_len
 }
 
 static void hot_cache_update(cache_t* cache, const char* key, size_t key_len, size_t entry_offset) {
+    if (!cache || !key || key_len == 0) return;
+    
     uint64_t h = hash_key_fnv(key, key_len);
     uint64_t now = cache_now_ms();
     
+    // Defensive
+    size_t count = cache->hot_count;
+    if (count > CACHE_HOT_SIZE) count = CACHE_HOT_SIZE;
+    
     // 查找是否已存在
-    for (size_t i = 0; i < cache->hot_count; i++) {
+    for (size_t i = 0; i < count; i++) {
         if (cache->hot_cache[i].key_hash == h) {
             cache->hot_cache[i].entry_offset = entry_offset;
             cache->hot_cache[i].access_time = now;
@@ -117,9 +128,9 @@ static void hot_cache_update(cache_t* cache, const char* key, size_t key_len, si
     }
     
     // 插入新条目（如果未满）或替换最老的
-    size_t idx = cache->hot_count;
-    if (cache->hot_count < CACHE_HOT_SIZE) {
-        cache->hot_count++;
+    size_t idx = count;
+    if (count < CACHE_HOT_SIZE) {
+        cache->hot_count = count + 1;
     } else {
         // 找到最老的替换
         uint64_t oldest = now;
@@ -137,10 +148,16 @@ static void hot_cache_update(cache_t* cache, const char* key, size_t key_len, si
 }
 
 static size_t hot_cache_lookup(cache_t* cache, const char* key, size_t key_len) {
+    if (!cache || !key || key_len == 0) return 0;
+    
     uint64_t h = hash_key_fnv(key, key_len);
     uint64_t now = cache_now_ms();
     
-    for (size_t i = 0; i < cache->hot_count; i++) {
+    // Defensive: hot_count should never exceed CACHE_HOT_SIZE
+    size_t count = cache->hot_count;
+    if (count > CACHE_HOT_SIZE) count = CACHE_HOT_SIZE;
+    
+    for (size_t i = 0; i < count; i++) {
         if (cache->hot_cache[i].key_hash == h) {
             cache_entry_header_t* header = (cache_entry_header_t*)CACHE_PTR(cache, cache->hot_cache[i].entry_offset);
             if (!(header->flags & CACHE_ENTRY_DELETED) &&
