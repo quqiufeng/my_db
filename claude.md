@@ -919,7 +919,79 @@ if (node->vector) {
 
 **实践**: 反序列化/解析外部数据时，每个 `malloc` 都要处理失败情况。失败时既要标记对象无效，又要正确推进流位置（跳过已读取的数据），防止后续解析错位。
 
+### 12.10 格式化输出超出栈 buffer 时用动态分配
+
+**问题**: `snprintf` 到栈上固定大小 buffer 时，如果输入数据长度不可控（如用户提供的 JSON、URL、key），编译器产生 `-Wformat-truncation` 和 `-Wstringop-truncation` 警告，且实际运行时会截断数据。
+
+**修复**:
+```c
+// ❌ 错误：固定大小栈 buffer，可能截断
+char json[512];
+snprintf(json, sizeof(json), "{\"status\":\"error\",\"msg\":\"%s\"}", message);
+
+// ✅ 正确：根据内容长度动态分配
+size_t json_len = 32 + strlen(message);  // 计算精确长度
+char* json = malloc(json_len);
+if (!json) { /* 错误处理 */ }
+snprintf(json, json_len, "{\"status\":\"error\",\"msg\":\"%s\"}", message);
+// ... 使用 ...
+free(json);
+```
+
+**实践**: 当格式化字符串包含用户输入且总长度不可控时，先计算所需长度再 `malloc`，避免栈 buffer 截断。简单固定长度输出（如 HTTP header）可保留栈分配。
+
+### 12.11 排序算法选择：小规模用 qsort，不用手写选择排序
+
+**问题**: `hnsw_search_exact()` 手写选择排序找 top_k，代码冗长且性能不如 `qsort`（O(n*k) vs O(n log n)）。
+
+**修复**:
+```c
+// ❌ 错误：手写选择排序，代码冗长
+for (size_t i = 0; i < count && i < (size_t)top_k; i++) {
+    size_t min_idx = i;
+    for (size_t j = i + 1; j < count; j++) {
+        if (scores[j].dist < scores[min_idx].dist) min_idx = j;
+    }
+    score_t tmp = scores[i]; scores[i] = scores[min_idx]; scores[min_idx] = tmp;
+}
+
+// ✅ 正确：qsort 全量排序，然后取前 top_k
+int compare_score(const void* a, const void* b) {
+    float da = ((const score_t*)a)->dist;
+    float db = ((const score_t*)b)->dist;
+    return (da < db) ? -1 : (da > db) ? 1 : 0;
+}
+qsort(scores, count, sizeof(score_t), compare_score);
+// 取前 top_k 个
+```
+
+**实践**: 对于数百到数千元素规模的排序，优先使用标准库的 `qsort`，代码更简洁且通常比手写排序快。只有在超大规模（百万级）或特殊场景（部分排序、top-k 只需少量）时才考虑自定义算法。
+
+### 12.12 避免过度优化：不要重复实现库已提供的功能
+
+**问题**: `cache_batch_set()` 中尝试"预检查 hash 表是否需要扩容"，通过额外遍历所有 key 计算 `total_new_keys`，然后手动调用 `hash_resize()`。但实际上 `cache_hash_insert()` 内部已经有负载因子检查和自动扩容逻辑，导致重复代码且引入隐式声明错误。
+
+**修复**:
+```c
+// ❌ 错误：重复实现 hash 扩容逻辑，且需要访问内部函数
+size_t total_new_keys = 0;
+for (size_t i = 0; i < count; i++) {
+    if (!cache_hash_lookup(cache, items[i].key, strlen(items[i].key))) {
+        total_new_keys++;
+    }
+}
+// 手动扩容...
+hash_resize(cache);  // 内部函数，不应在模块外调用
+
+// ✅ 正确：直接调用插入函数，让内部逻辑处理扩容
+for (size_t i = 0; i < count; i++) {
+    cache_hash_insert(cache, offsets[i], key, key_len);  // 内部自动扩容
+}
+```
+
+**实践**: 不要重复实现已有函数的内部逻辑。如果某个操作（如扩容、分配、验证）在底层函数中已经处理，上层调用者不应再"提前优化"。遵循"单次职责"原则，让数据结构的内部函数自己管理自身状态。
+
 ---
 
 *文档生成时间: 2026-05-18*
-*基于提交: 405bf96 (代码审查复盘：15 个问题修复)*
+*基于提交: 568a8f8 (代码审查复盘：18 个问题修复，全部完成)*
