@@ -100,20 +100,42 @@
 
 **索引持久化说明**
 
-> ⚠️ **所有索引在重启时实时重建，不单独持久化。**
+> ✅ **索引已自动持久化到 `index.bin`，重启时零拷贝加载。**
 >
-> 只有 `cache.bin`（entry 数据）持久化到磁盘。重启时 `cache_open()` 会：
-> 1. 读取 `cache.bin` 中的 entry 数据
-> 2. 扫描所有 entry（O(n)）
-> 3. 重建 Hash、Sorted Array、Tag、Namespace、Vector 等所有索引
-> 4. 如果 Vector 数量 > 1000，自动构建 HNSW 图
+> 每次 `cache_close()` 或 `cache_sync()` 会自动保存所有索引到 `{db_dir}/index.bin`：
+> - **Hash 索引**：bucket 数组 + 冲突链，直接二进制 dump
+> - **Sorted Array**：有序 offset 数组，加载后直接使用
+> - **Vector 索引**：entry 映射数组，加载后直接使用
+> - **HNSW 图**：完整图结构（节点 + 向量 + 邻居），加载后直接使用
+> - **Namespace 树**：递归树结构，加载后直接使用
 >
-> **为什么这样设计？**
-> - **简单可靠**：索引和数据永远一致，不会漂移
-> - **数据量 < 10 万条**：重建耗时 < 100ms，完全可接受
-> - **数据量 > 100 万条**：可能需要几秒，建议保持进程常驻或使用热加载
+> 重启时 `cache_open()` 会：
+> 1. 尝试加载 `index.bin`（mmap 零拷贝，~4ms）
+> 2. 如果加载失败或损坏，自动回退到扫描重建（O(n)，~890ms）
+> 3. 重建完成后自动保存新的 `index.bin`
 >
-> 如果未来需要索引持久化，可考虑将 Sorted Array、HNSW 图等保存到 `.index` 文件。
+> **性能对比**（1261 条目）：
+> | 方式 | 时间 | 加速 |
+> |------|------|------|
+> | 持久化加载 | ~4ms | **209x** |
+> | 扫描重建 | ~890ms | - |
+>
+> **Snapshot 工具**（零拷贝导出/导入）：
+> ```bash
+> # 导出（sendfile 零拷贝）
+> ./tools/cache_snapshot export ./my_cache ./snapshot
+>
+> # 导入
+> ./tools/cache_snapshot import ./snapshot ./new_cache
+>
+> # 验证
+> ./tools/cache_snapshot verify ./snapshot
+> ```
+>
+> **设计原则**：
+> - 电子书/知识库只追加不修改，`index.bin` 与 `cache.bin` 永远一致
+> - 不需要版本号，重建失败自动回退
+> - 所有索引一次性保存/加载，原子性 rename
 
 ### 快速开始
 
@@ -170,6 +192,11 @@ cache purge
 cache import-book ~/book.mobi /books/cpp
 cache import-github https://github.com/redis/redis
 
+# 快照（零拷贝导出/导入）
+cache_snapshot export ./my_cache ./snapshot      # 导出
+cache_snapshot import ./snapshot ./new_cache     # 导入
+cache_snapshot verify ./snapshot                 # 验证
+
 # 启动 TCP 服务器（远程操作）
 cache_server --port 7777 --db ./cache_data
 
@@ -183,10 +210,18 @@ cache_server --port 7777 --db ./cache_data
 
 ```
 cache_data/
-└── cache.bin          # mmap 零拷贝存储
-    # Entry: [header][key][\0][value][\0]
-    # Header: key_len, value_len, expire_at, access_time, flags
+├── cache.bin          # mmap 零拷贝存储（entry 数据）
+│   # Entry: [header][key][\0][value][\0]
+│   # Header: key_len, value_len, expire_at, access_time, flags
+└── index.bin          # 索引持久化文件（5 个索引）
+    # [Magic][Version][Index Headers...][Hash Data][Sorted Data]
+    # [Vector Data][HNSW Graph][Namespace Tree]
 ```
+
+**index.bin 结构**：
+- 文件头：Magic "MYIX" + 版本 + 总大小 + 索引数量
+- 索引条目：类型 + 数据偏移 + 数据大小 + 条目数量
+- 数据区：各索引的二进制 dump，加载时直接 memcpy 到内存
 
 ### 性能基准
 
@@ -195,6 +230,9 @@ cache_data/
 | Insert | ~7,000 ops/sec | 5K entries，sorted array O(n) |
 | Get | ~5,000,000 ops/sec | Hash 索引 + Hot Cache |
 | Prefix Search | ~1,000,000 searches/sec | 排序数组 lower_bound |
+| **Cache 启动** | **~4ms** | **加载 index.bin（5 个索引），1261 条目** |
+| Cache 启动（无索引）| ~890ms | 扫描重建所有索引 |
+| 语义搜索 | ~10ms | HNSW 近似搜索，384 维向量 |
 | Tag Search | O(1) 索引查找 | Hash-based 反向索引 |
 | Vector Search | O(n) 暴力搜索 | 精确余弦相似度，适合 < 10万条 |
 | Skip List | O(log n) | 数据量 > 100万时自动启用 |
