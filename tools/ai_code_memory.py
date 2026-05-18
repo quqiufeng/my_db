@@ -445,32 +445,39 @@ class AICodeMemory:
             self.cache.set_json(f"{namespace}/refs/{name}", caller_ids, 0)
     
     def _generate_vectors(self, chunks, namespace):
+        """使用 C 端 ONNX embedder 生成向量（复用电子书实现）"""
         try:
-            from sentence_transformers import SentenceTransformer
-            model = SentenceTransformer('all-MiniLM-L6-v2')
+            from mydb.onnx_embedder import OnnxEmbedder
             
+            embedder = OnnxEmbedder()
             print(f"  Generating embeddings for {len(chunks)} chunks...")
             
-            texts = []
-            for chunk in chunks:
+            for i, chunk in enumerate(chunks):
+                # 构建文本（签名 + 文档 + 代码前 5 行）
                 text = f"{chunk['signature']}\n{chunk['docstring']}\n"
                 text += '\n'.join(chunk['content'].split('\n')[:5])
-                texts.append(text)
-            
-            embeddings = model.encode(texts, batch_size=32, show_progress_bar=True)
-            
-            for chunk, embedding in zip(chunks, embeddings):
+                
+                # C 端 ONNX 推理
+                vector = embedder.encode(text)
+                
+                # 存储向量到 cache
                 key = f"{namespace}/vectors/{chunk['id']}"
                 value = json.dumps({
                     "chunk_id": chunk['id'],
                     "file": chunk['file'],
                     "name": chunk['name'],
+                    "vector": vector,  # 384 维浮点数组
                 })
                 self.cache.set(key, value, 0)
+                
+                if (i + 1) % 100 == 0:
+                    print(f"    Processed {i + 1}/{len(chunks)}")
             
-            print(f"  Generated {len(embeddings)} embeddings")
+            embedder.close()
+            print(f"  Generated {len(chunks)} embeddings (dim={embedder.dim})")
+            
         except ImportError:
-            print("  sentence-transformers not available, skipping")
+            print("  ONNX embedder not available, skipping vector generation")
         except Exception as e:
             print(f"  Vector generation failed: {e}")
     
