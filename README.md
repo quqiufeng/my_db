@@ -89,7 +89,7 @@
 
 | 搜索方式 | 索引结构 | 查询维度 | 适用场景 | 时间复杂度 |
 |---------|---------|---------|---------|-----------|
-| **Exact** (`get`) | Hash 表 | Key 完全相等 | 精确查找某条记忆 | O(1) |
+| **Exact** (`get`) | Hot Cache → Hash 表 | Key 完全相等 | 精确查找某条记忆 | O(1) |
 | **Prefix** | Sorted Array + Skip List | Key 前缀 | 浏览 namespace，如 `/coding/cpp/*` | O(log n) ~ O(1) |
 | **Range** | Sorted Array + Skip List | Key 区间 | 分页、区间扫描 | O(log n) |
 | **Regex** | 扫描 Sorted Array | Key 模式匹配 | 复杂 key 过滤，如 `user_\d+` | O(n) |
@@ -98,16 +98,130 @@
 | **Vector** | HNSW 图索引 | Value 语义向量 | 语义相似，如 "并发" 和 "多线程" | O(log n) |
 | **AST** | 扫描 Value | 代码符号 | 搜索函数名、类名 | O(n) |
 
-**索引持久化说明**
+### 索引协作机制
+
+**不同查询走不同索引，形成检索矩阵：**
+
+```
+查询意图 → 选择索引 → 执行搜索
+
+Exact Key:     Hot Cache (64-entry LRU) → Hash Index (O(1))
+Prefix/Range:  Skip List (if >1M) → Sorted Array lower_bound (O(log n))
+Vector:        HNSW (if >1000) → 暴力搜索 (O(log n) / O(n))
+Tag:           Tag Hash Index → offset list (O(1))
+Namespace:     Namespace Tree → 子树定位 (O(depth))
+```
+
+**协作示例**：语义搜索限定某本书
+```
+用户: "马斯克创办特斯拉" 在《硅谷钢铁侠》中
+
+1. 生成 query_vector (384 维)
+2. cache_search_vector(..., ns_filter="/books/硅谷钢铁侠")
+   ├─ HNSW 搜索 → 返回 Top-K 候选 (entry_offset)
+   ├─ 验证候选 key 是否以 "/books/硅谷钢铁侠" 开头
+   └─ 返回过滤后的结果
+
+3. 通过 entry_offset 读取 value
+   ├─ key: "/books/硅谷钢铁侠/chapters/07-.../content/p0026"
+   └─ value: {"t":"paragraph","c":"2008年，特斯拉推出Roadster..."}
+```
+
+**索引互补性：**
+
+| 查询意图 | 首选索引 | 为什么 |
+|---------|---------|--------|
+| 我知道 exact key | Hash | O(1) 最快 |
+| 我想浏览某目录 | Sorted Array | 按键序排列，天然适合前缀 |
+| 我记不太清关键词 | HNSW | 理解语义，同义词也能找到 |
+| 我要过滤特定标签 | Tag | O(1) 反向查找 |
+| 我想看某书某章 | Namespace + Hash | 先定位 namespace，再精确查找 |
+
+### 索引文件结构（`index.bin`）
+
+所有索引保存到**单个文件**，原子性 rename：
+
+```
+index.bin (3.5MB for 1261 entries)
+├─ File Header (24 bytes)
+│   Magic "MYIX"      (4 bytes)
+│   Version 1         (4 bytes)
+│   Total Size        (8 bytes)
+│   Index Count 5     (4 bytes)
+│   Reserved          (4 bytes)
+│
+├─ Index Entry Headers (36 bytes × 5)
+│   [Hash]     type=1, offset, size, entry_count
+│   [Sorted]   type=2, offset, size, entry_count
+│   [Vector]   type=3, offset, size, entry_count
+│   [HNSW]     type=5, offset, size, entry_count
+│   [Namespace] type=6, offset, size, entry_count
+│
+└─ Data Section (连续存放)
+    [Hash Buckets]       → bucket_count + size + bucket_array[]
+    [Sorted Offsets]     → count + capacity + dirty + offset_array[]
+    [Vector Entries]     → count + capacity + entry_array[]
+    [HNSW Graph]         → dim + M + nodes + vectors + neighbor_lists
+    [Namespace Tree]     → recursive: path + entries + children[]
+```
+
+**为什么放一个文件：**
+1. 原子性：`rename` 一次完成，不会读到半成品
+2. 简单：`mmap` 一次，解析 header 后直接指向各数据区
+3. 紧凑：比 5 个独立文件少 4 次 open/mmap 开销
+
+### 各索引内部布局
+
+**1. Hash 索引**
+```
+Data: [bucket_count:8][size:8][bucket_array[]]
+Bucket: [entry_offset:8][next_offset:8]  // 16 bytes each
+```
+- 使用 pool offset 而非指针，重启后仍然有效
+- 冲突链通过 `next_offset` 链接
+
+**2. Sorted Array**
+```
+Data: [count:8][capacity:8][dirty:4][padding:4][offsets[]]
+offsets[]: [entry_offset:8] × count  // 按 key 字典序排列
+```
+- `dirty=0` 表示已排序，可直接二分查找
+- 延迟排序：批量插入后统一 qsort
+
+**3. Vector 索引**
+```
+Data: [count:8][capacity:8][entries[]]
+Entry: [entry_offset:8][vector_offset:8][dim:2][padding:6]  // 24 bytes
+```
+- `vector_offset` 指向 `cache.bin` 中的向量数据
+- 不重复存储向量，节省空间
+
+**4. HNSW 图索引**
+```
+Data: [dim:8][M:4][M_max:4][ef:4][max_level:4][entry_point:8]
+      [node_count:8][nodes[]][vectors[]][neighbor_lists[]]
+
+Node: [id:8][level:4][valid:4][vector_offset:8]
+      [neighbor_offsets:8 × (level+1)]
+
+Neighbor List: [count:8][capacity:8][ids:8 × count]
+```
+- 自包含：向量数据也保存在 index.bin 中（不依赖 cache.bin）
+- 加载后直接重建内存中的 neighbor_list_t 结构
+
+**5. Namespace 树**
+```
+Node: [path_len:4][path[]][entry_count:8][offsets:8 × entry_count]
+      [child_count:8][children[]]  // 递归
+```
+- 根节点 path=""
+- 子节点 path 继承父节点：`/books/硅谷钢铁侠/chapters/07-...`
+
+### 索引持久化说明
 
 > ✅ **索引已自动持久化到 `index.bin`，重启时零拷贝加载。**
 >
-> 每次 `cache_close()` 或 `cache_sync()` 会自动保存所有索引到 `{db_dir}/index.bin`：
-> - **Hash 索引**：bucket 数组 + 冲突链，直接二进制 dump
-> - **Sorted Array**：有序 offset 数组，加载后直接使用
-> - **Vector 索引**：entry 映射数组，加载后直接使用
-> - **HNSW 图**：完整图结构（节点 + 向量 + 邻居），加载后直接使用
-> - **Namespace 树**：递归树结构，加载后直接使用
+> 每次 `cache_close()` 或 `cache_sync()` 自动保存所有 5 个索引到 `{db_dir}/index.bin`。
 >
 > 重启时 `cache_open()` 会：
 > 1. 尝试加载 `index.bin`（mmap 零拷贝，~4ms）
