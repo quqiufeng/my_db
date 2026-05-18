@@ -111,6 +111,14 @@ struct hnsw_index {
     size_t* free_list;
     size_t free_count;
     size_t free_capacity;
+    
+    // 缓存有效节点数（避免每次搜索遍历）
+    size_t valid_count;
+    int valid_count_dirty;  // 1 = 需要重新计算
+    
+    // 搜索优化：epoch-based visited array
+    uint32_t* visited_epochs;
+    uint32_t current_epoch;
 };
 
 // ====== 距离计算 ======
@@ -125,7 +133,7 @@ static float hnsw_distance(const hnsw_index_t* idx, const float* a, const float*
         norm_b += b[i] * b[i];
     }
     if (norm_a == 0.0 || norm_b == 0.0) return 1.0f;
-    double cosine = dot / (sqrt(norm_a) * sqrt(norm_b));
+    double cosine = dot / sqrt(norm_a * norm_b);
     // 映射到 [0, 1]，1=完全相同
     float sim = (float)((cosine + 1.0) / 2.0);
     return 1.0f - sim;  // 距离越小越相似
@@ -218,11 +226,35 @@ static int hnsw_search_layer_nearest(hnsw_index_t* idx, const float* query,
                                      size_t* out_ids, float* out_dists) {
     // BFS + 维护 ef 个最近节点
     min_pq_t* candidates = pq_create(ef * 2 + 1);
-    char* visited = calloc(idx->node_count, sizeof(char));
+    
+    // 使用 epoch-based visited array 避免每次 calloc
+    if (idx->node_capacity > 0 && (!idx->visited_epochs || idx->node_capacity > 0)) {
+        uint32_t* new_epochs = realloc(idx->visited_epochs, sizeof(uint32_t) * idx->node_capacity);
+        if (new_epochs) {
+            // 新分配的部分初始化为 0
+            if (idx->visited_epochs) {
+                // 扩展：只需清零新增部分
+                // 但这里我们不知道旧容量，简单清零全部
+            }
+            idx->visited_epochs = new_epochs;
+            memset(idx->visited_epochs, 0, sizeof(uint32_t) * idx->node_capacity);
+        }
+    }
+    
+    uint32_t epoch = ++idx->current_epoch;
+    if (epoch == 0) {
+        // 溢出：重置所有 epoch
+        if (idx->visited_epochs) {
+            memset(idx->visited_epochs, 0, sizeof(uint32_t) * idx->node_capacity);
+        }
+        epoch = idx->current_epoch = 1;
+    }
     
     float entry_dist = hnsw_distance(idx, query, idx->nodes[entry_id].vector);
     pq_push(candidates, entry_id, entry_dist);
-    visited[entry_id] = 1;
+    if (idx->visited_epochs && entry_id < idx->node_capacity) {
+        idx->visited_epochs[entry_id] = epoch;
+    }
     
     int found = 0;
     
@@ -241,15 +273,16 @@ static int hnsw_search_layer_nearest(hnsw_index_t* idx, const float* query,
         neighbor_list_t* nb = &node->neighbors[level];
         for (size_t i = 0; i < nb->count; i++) {
             size_t nid = nb->ids[i];
-            if (visited[nid] || !idx->nodes[nid].valid) continue;
-            visited[nid] = 1;
+            if (nid >= idx->node_capacity) continue;
+            if (idx->visited_epochs && idx->visited_epochs[nid] == epoch) continue;
+            if (!idx->nodes[nid].valid) continue;
+            if (idx->visited_epochs) idx->visited_epochs[nid] = epoch;
             
             float d = hnsw_distance(idx, query, idx->nodes[nid].vector);
             pq_push(candidates, nid, d);
         }
     }
     
-    free(visited);
     pq_destroy(candidates);
     return found;
 }
@@ -278,6 +311,10 @@ hnsw_index_t* hnsw_create(size_t dim) {
     
     idx->max_level = -1;
     idx->entry_point = (size_t)-1;
+    idx->valid_count = 0;
+    idx->valid_count_dirty = 0;
+    idx->visited_epochs = NULL;
+    idx->current_epoch = 1;
     
     return idx;
 }
@@ -297,6 +334,7 @@ void hnsw_destroy(hnsw_index_t* idx) {
     }
     free(idx->nodes);
     free(idx->free_list);
+    free(idx->visited_epochs);
     free(idx);
 }
 
@@ -329,6 +367,7 @@ int hnsw_insert(hnsw_index_t* idx, size_t id, const float* vector) {
             // 复用已删除的节点
             memcpy(idx->nodes[i].vector, vector, sizeof(float) * idx->dim);
             idx->nodes[i].valid = 1;
+            idx->valid_count++;
             return CACHE_OK;
         }
     }
@@ -356,6 +395,7 @@ int hnsw_insert(hnsw_index_t* idx, size_t id, const float* vector) {
     memcpy(node->vector, vector, sizeof(float) * idx->dim);
     node->level = hnsw_random_level(idx);
     node->valid = 1;
+    idx->valid_count++;
     
     // 分配邻居列表
     node->neighbors = calloc(node->level + 1, sizeof(neighbor_list_t));
@@ -477,6 +517,7 @@ void hnsw_remove(hnsw_index_t* idx, size_t id) {
     for (size_t i = 0; i < idx->node_count; i++) {
         if (idx->nodes[i].id == id && idx->nodes[i].valid) {
             idx->nodes[i].valid = 0;
+            if (idx->valid_count > 0) idx->valid_count--;
             
             // 加入 free list
             if (idx->free_count >= idx->free_capacity) {
@@ -507,11 +548,7 @@ size_t hnsw_search(hnsw_index_t* idx, const float* query, int top_k,
     if (idx->node_count == 0 || idx->entry_point == (size_t)-1) return 0;
     
     // 少量数据 fallback 到暴力搜索（< 1000 条）
-    size_t valid_count = 0;
-    for (size_t i = 0; i < idx->node_count; i++) {
-        if (idx->nodes[i].valid) valid_count++;
-    }
-    if (valid_count < 1000) {
+    if (idx->valid_count < 1000) {
         return hnsw_search_exact(idx, query, top_k, out_ids, out_scores);
     }
     
@@ -827,13 +864,17 @@ hnsw_index_t* hnsw_deserialize(const void* buf, size_t buf_size) {
             if (node->vector) {
                 memcpy(node->vector, p, sizeof(float) * idx->dim);
                 p += sizeof(float) * idx->dim;
+            } else {
+                // Memory allocation failed: mark invalid and skip data
+                node->valid = 0;
+                p += sizeof(float) * idx->dim;
             }
             
-            // Neighbors
+            // Neighbors (always read, even if vector failed, to keep stream position)
             int32_t num_levels = *(int32_t*)p;
             p += 4;
             
-            if (num_levels > 0) {
+            if (num_levels > 0 && node->valid) {
                 node->neighbors = calloc(num_levels, sizeof(neighbor_list_t));
                 if (node->neighbors) {
                     for (int l = 0; l < num_levels; l++) {
@@ -846,6 +887,13 @@ hnsw_index_t* hnsw_deserialize(const void* buf, size_t buf_size) {
                             p += sizeof(size_t) * count;
                         }
                     }
+                }
+            } else if (num_levels > 0) {
+                // Skip neighbor data for invalid nodes
+                for (int l = 0; l < num_levels; l++) {
+                    size_t count = *(size_t*)p;
+                    p += 8;
+                    p += sizeof(size_t) * count;
                 }
             }
         }

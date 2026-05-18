@@ -292,6 +292,7 @@ cache_t* cache_open(const char* db_dir, size_t max_memory) {
                     cache_ns_add(cache, key, offset);
                     // 跳过 tag 索引重建（电子书内容不需要 tag 搜索）
                     // cache_tag_index_add(cache, offset, value, header->value_len);
+                    cache->memory_used += total_size;
                     valid_count++;
                 }
                 
@@ -374,10 +375,13 @@ int cache_set(cache_t* cache, const char* key, const char* value, uint64_t ttl_m
             size_t total_size;
         } evict_candidate_t;
         
-        // 一次性扫描所有条目
+        // 一次性扫描所有条目，使用固定大小 buffer 避免大内存分配
         if (cache->entry_count == 0) return CACHE_ERR_NOMEM;
         
-        evict_candidate_t* candidates = malloc(sizeof(evict_candidate_t) * cache->entry_count);
+        #define MAX_EVICT_CANDIDATES 4096
+        size_t max_candidates = cache->entry_count < MAX_EVICT_CANDIDATES ? 
+                                cache->entry_count : MAX_EVICT_CANDIDATES;
+        evict_candidate_t* candidates = malloc(sizeof(evict_candidate_t) * max_candidates);
         if (!candidates) return CACHE_ERR_NOMEM;
         
         size_t candidate_count = 0;
@@ -396,11 +400,19 @@ int cache_set(cache_t* cache, const char* key, const char* value, uint64_t ttl_m
             if (offset + total_size > cache->pool.used) break;
             
             if (!(h->flags & CACHE_ENTRY_DELETED) && !(h->flags & CACHE_ENTRY_PERMANENT)) {
-                candidates[candidate_count].access_time = h->access_time;
-                candidates[candidate_count].offset = offset;
-                candidates[candidate_count].key_len = h->key_len;
-                candidates[candidate_count].total_size = total_size;
-                candidate_count++;
+                if (candidate_count < max_candidates) {
+                    candidates[candidate_count].access_time = h->access_time;
+                    candidates[candidate_count].offset = offset;
+                    candidates[candidate_count].key_len = h->key_len;
+                    candidates[candidate_count].total_size = total_size;
+                    candidate_count++;
+                } else if (h->access_time < candidates[max_candidates - 1].access_time) {
+                    // 如果比 buffer 中最新的还老，替换掉最新的（保持最老的）
+                    candidates[max_candidates - 1].access_time = h->access_time;
+                    candidates[max_candidates - 1].offset = offset;
+                    candidates[max_candidates - 1].key_len = h->key_len;
+                    candidates[max_candidates - 1].total_size = total_size;
+                }
             }
             
             offset += total_size;
@@ -412,8 +424,6 @@ int cache_set(cache_t* cache, const char* key, const char* value, uint64_t ttl_m
         }
         
         // 按 access_time 排序（升序，最老的在前）
-        // 使用简单选择排序（O(n²)，但 candidate_count 通常 < 1000，实际很快）
-        // 注意：evict_candidate_t 定义在函数内部，无法使用 qsort（需要文件级比较函数）
         for (size_t i = 0; i < candidate_count - 1; i++) {
             size_t min_idx = i;
             for (size_t j = i + 1; j < candidate_count; j++) {
@@ -545,17 +555,12 @@ int cache_set(cache_t* cache, const char* key, const char* value, uint64_t ttl_m
 }
 
 // 批量设置（性能优化：先批量写入 pool，最后统一排序数组 qsort）
+// 如果内存不足，会尝试 LRU 淘汰或回退到逐条 cache_set
 int cache_batch_set(cache_t* cache, const cache_batch_item_t* items, size_t count) {
     if (!cache || !items || count == 0) return CACHE_ERR_INVAL;
     
-    // 预分配 offset 数组
-    size_t* offsets = malloc(sizeof(size_t) * count);
-    if (!offsets) return CACHE_ERR_NOMEM;
-    
-    uint64_t now = cache_now_ms();
+    // 计算总大小
     size_t total_aligned = 0;
-    
-    // 第一遍：计算总大小并检查内存
     for (size_t i = 0; i < count; i++) {
         size_t key_len = strlen(items[i].key);
         size_t value_len = strlen(items[i].value);
@@ -564,13 +569,95 @@ int cache_batch_set(cache_t* cache, const cache_batch_item_t* items, size_t coun
         total_aligned += aligned_size;
     }
     
-    // 检查内存限制（简单检查，不考虑 LRU 淘汰）
+    // 如果内存不足，尝试 LRU 淘汰
     if (cache->memory_used + total_aligned > cache->memory_max) {
-        free(offsets);
-        return CACHE_ERR_NOMEM;
+        size_t need = cache->memory_used + total_aligned - cache->memory_max;
+        size_t evicted = 0;
+        
+        // 收集可淘汰的候选（非永久、未删除，按 access_time 升序）
+        typedef struct {
+            uint64_t access_time;
+            size_t offset;
+            size_t key_len;
+            size_t total_size;
+        } evict_candidate_t;
+        
+        evict_candidate_t* candidates = malloc(sizeof(evict_candidate_t) * cache->entry_count);
+        if (!candidates) return CACHE_ERR_NOMEM;
+        
+        size_t candidate_count = 0;
+        size_t offset = CACHE_HEADER_SIZE;
+        while (offset + sizeof(cache_entry_header_t) <= cache->pool.used) {
+            cache_entry_header_t* h = (cache_entry_header_t*)CACHE_PTR(cache, offset);
+            if (h->key_len == 0 || h->key_len > CACHE_MAX_KEY_LEN ||
+                h->value_len > CACHE_MAX_VALUE_LEN) {
+                offset += MYDB_ALIGN;
+                continue;
+            }
+            size_t total_size = cache_entry_total_size(h);
+            if (offset + total_size > cache->pool.used) break;
+            if (!(h->flags & CACHE_ENTRY_DELETED) && !(h->flags & CACHE_ENTRY_PERMANENT)) {
+                candidates[candidate_count].access_time = h->access_time;
+                candidates[candidate_count].offset = offset;
+                candidates[candidate_count].key_len = h->key_len;
+                candidates[candidate_count].total_size = total_size;
+                candidate_count++;
+            }
+            offset += total_size;
+        }
+        
+        // 选择排序（O(n²)，candidate_count 通常较小）
+        for (size_t i = 0; i < candidate_count - 1; i++) {
+            size_t min_idx = i;
+            for (size_t j = i + 1; j < candidate_count; j++) {
+                if (candidates[j].access_time < candidates[min_idx].access_time) {
+                    min_idx = j;
+                }
+            }
+            if (min_idx != i) {
+                evict_candidate_t tmp = candidates[i];
+                candidates[i] = candidates[min_idx];
+                candidates[min_idx] = tmp;
+            }
+        }
+        
+        // 批量淘汰直到有足够空间
+        for (size_t i = 0; i < candidate_count && evicted < need; i++) {
+            cache_entry_header_t* h = (cache_entry_header_t*)CACHE_PTR(cache, candidates[i].offset);
+            if (h->flags & CACHE_ENTRY_DELETED) continue;
+            char* key_ptr = (char*)CACHE_PTR(cache, candidates[i].offset + sizeof(cache_entry_header_t));
+            const char* value_ptr = key_ptr + candidates[i].key_len + 1;
+            h->flags |= CACHE_ENTRY_DELETED;
+            cache->entry_count--;
+            cache->deleted_count++;
+            cache->memory_used -= candidates[i].total_size;
+            evicted += candidates[i].total_size;
+            cache_hash_remove(cache, key_ptr, candidates[i].key_len);
+            cache_ns_remove(cache, key_ptr);
+            cache_tag_index_remove(cache, candidates[i].offset, value_ptr, h->value_len);
+            cache_vector_index_remove(cache, candidates[i].offset);
+            hot_cache_invalidate(cache, key_ptr, candidates[i].key_len);
+        }
+        
+        free(candidates);
+        
+        // 如果淘汰后空间仍不足，回退到逐条 cache_set（更保守）
+        if (cache->memory_used + total_aligned > cache->memory_max) {
+            for (size_t i = 0; i < count; i++) {
+                int ret = cache_set(cache, items[i].key, items[i].value, items[i].ttl_ms);
+                if (ret != CACHE_OK) return ret;
+            }
+            return CACHE_OK;
+        }
     }
     
-    // 第二遍：批量写入 pool
+    // 预分配 offset 数组
+    size_t* offsets = malloc(sizeof(size_t) * count);
+    if (!offsets) return CACHE_ERR_NOMEM;
+    
+    uint64_t now = cache_now_ms();
+    
+    // 批量写入 pool
     for (size_t i = 0; i < count; i++) {
         const char* key = items[i].key;
         const char* value = items[i].value;
@@ -610,25 +697,16 @@ int cache_batch_set(cache_t* cache, const cache_batch_item_t* items, size_t coun
         cache->memory_used += aligned_size;
     }
     
-    // 第三遍：批量更新 hash 索引
+    // 批量更新索引
     for (size_t i = 0; i < count; i++) {
         const char* key = items[i].key;
         size_t key_len = strlen(key);
         cache_hash_insert(cache, offsets[i], key, key_len);
+        cache_ns_add(cache, key, offsets[i]);
+        cache_tag_index_add(cache, offsets[i], items[i].value, strlen(items[i].value));
     }
     
-    // 第四遍：批量更新 namespace 索引
-    for (size_t i = 0; i < count; i++) {
-        cache_ns_add(cache, items[i].key, offsets[i]);
-    }
-    
-    // 第五遍：批量更新 tag 索引
-    for (size_t i = 0; i < count; i++) {
-        const char* value = items[i].value;
-        cache_tag_index_add(cache, offsets[i], value, strlen(value));
-    }
-    
-    // 第六遍：排序数组优化——直接追加到末尾，最后统一 qsort
+    // 排序数组优化
     cache_sorted_array_t* sorted = &cache->sorted;
     size_t new_count = sorted->count + count;
     
@@ -646,12 +724,10 @@ int cache_batch_set(cache_t* cache, const cache_batch_item_t* items, size_t coun
         sorted->capacity = new_cap;
     }
     
-    // 复制新 offsets 到数组末尾
     memcpy(&sorted->offsets[sorted->count], offsets, sizeof(size_t) * count);
     sorted->count = new_count;
     free(offsets);
     
-    // 统一排序（使用 cache_sorted_rebuild，O(N log N) 一次排序）
     cache_sorted_rebuild(cache);
     
     return CACHE_OK;
@@ -709,6 +785,7 @@ int cache_del(cache_t* cache, const char* key) {
     
     cache->entry_count--;
     cache->deleted_count++;
+    cache->memory_used -= cache_entry_total_size(header);
     
     // 更新索引
     size_t key_len = strlen(key);
@@ -744,8 +821,34 @@ size_t cache_memory_max(cache_t* cache) {
 
 size_t cache_compact(cache_t* cache) {
     if (!cache) return 0;
-    // TODO: 实现 compact - 重建 pool，移除已删除的 entry
-    return cache->deleted_count;
+    
+    size_t removed = 0;
+    uint64_t now = cache_now_ms();
+    
+    // 清理 sorted array 中的已删除/过期条目
+    size_t write = 0;
+    for (size_t i = 0; i < cache->sorted.count; i++) {
+        size_t offset = cache->sorted.offsets[i];
+        cache_entry_header_t* h = (cache_entry_header_t*)CACHE_PTR(cache, offset);
+        
+        if ((h->flags & CACHE_ENTRY_DELETED) || 
+            (h->expire_at > 0 && h->expire_at < now)) {
+            removed++;
+            continue;
+        }
+        
+        cache->sorted.offsets[write++] = offset;
+    }
+    
+    if (removed > 0) {
+        cache->sorted.count = write;
+        cache->sorted.dirty = 1;
+    }
+    
+    // 重置 hot cache
+    cache->hot_count = 0;
+    
+    return removed;
 }
 
 size_t cache_purge_expired(cache_t* cache) {
@@ -770,6 +873,7 @@ size_t cache_purge_expired(cache_t* cache) {
                 header->flags |= CACHE_ENTRY_DELETED;
                 cache->entry_count--;
                 cache->deleted_count++;
+                cache->memory_used -= cache_entry_total_size(header);
                 count++;
             }
         }
@@ -1027,15 +1131,33 @@ int cache_del_namespace(cache_t* cache, const char* ns) {
         const char* key = (const char*)CACHE_PTR(cache, offset + sizeof(cache_entry_header_t));
         if (strncmp(key, ns_prefix, prefix_len) != 0) continue;
         
+        // 从 tag 和向量索引中移除（在标记删除前）
+        const char* value = (const char*)CACHE_PTR(cache, offset + sizeof(cache_entry_header_t) + h->key_len + 1);
+        cache_tag_index_remove(cache, offset, value, h->value_len);
+        cache_vector_index_remove(cache, offset);
+        
         // 标记删除
         h->flags |= CACHE_ENTRY_DELETED;
         h->expire_at = 1;
         cache->entry_count--;
+        cache->memory_used -= cache_entry_total_size(h);
+        cache->deleted_count++;
         deleted++;
     }
     
     // 从 sorted array 中移除（压缩数组）
     if (deleted > 0) {
+        // 先从 hash 和 namespace 索引中移除被删除的条目
+        for (size_t i = start; i < end; i++) {
+            size_t offset = cache->sorted.offsets[i];
+            if (offset == 0) continue;
+            cache_entry_header_t* h = (cache_entry_header_t*)CACHE_PTR(cache, offset);
+            if (!(h->flags & CACHE_ENTRY_DELETED)) continue;
+            const char* key = (const char*)CACHE_PTR(cache, offset + sizeof(cache_entry_header_t));
+            cache_hash_remove(cache, key, h->key_len);
+            cache_ns_remove(cache, key);
+        }
+        
         size_t write = start;
         for (size_t i = start; i < end; i++) {
             size_t offset = cache->sorted.offsets[i];
@@ -1052,17 +1174,6 @@ int cache_del_namespace(cache_t* cache, const char* ns) {
         }
         cache->sorted.count = write + remaining;
         cache->sorted.dirty = 1;
-        
-        // 从 hash index 和 namespace index 中移除
-        for (size_t i = start; i < end; i++) {
-            size_t offset = cache_sorted_get(cache, i);
-            if (offset == 0) continue;
-            cache_entry_header_t* h = (cache_entry_header_t*)CACHE_PTR(cache, offset);
-            if (h->flags & CACHE_ENTRY_DELETED) continue;
-            const char* key = (const char*)CACHE_PTR(cache, offset + sizeof(cache_entry_header_t));
-            cache_hash_remove(cache, key, h->key_len);
-            cache_ns_remove(cache, key);
-        }
     }
     
     free(ns_prefix);

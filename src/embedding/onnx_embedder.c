@@ -153,25 +153,62 @@ static int vocab_lookup(vocab_hash_entry_t* hash_table, int hash_size, const cha
     return -1;
 }
 
-// Unicode character classification
-static int is_cjk(char c) {
-    // CJK Unified Ideographs: 0x4E00-0x9FFF
-    // CJK Unified Ideographs Extension A: 0x3400-0x4DBF
-    unsigned char u = (unsigned char)c;
-    return (u >= 0x4E && u <= 0x9F) || (u >= 0x34 && u <= 0x4D);
+// UTF-8 character classification
+// Returns number of bytes for the character, or 0 for ASCII/control
+static int utf8_char_len(const char* p) {
+    unsigned char c = (unsigned char)*p;
+    if (c < 0x80) return 1;
+    if ((c & 0xE0) == 0xC0) return 2;
+    if ((c & 0xF0) == 0xE0) return 3;
+    if ((c & 0xF8) == 0xF0) return 4;
+    return 1; // Invalid UTF-8, treat as single byte
 }
 
-static int is_punctuation(char c) {
-    return c == '。' || c == '，' || c == '、' || c == '；' || c == '：' ||
-           c == '？' || c == '！' || c == '"' || c == '"' || c == ''' || c == ''' ||
-           c == '（' || c == '）' || c == '【' || c == '】' || c == '《' || c == '》' ||
-           c == '…' || c == '—' || c == '～' || c == '·' ||
-           c == '.' || c == ',' || c == '!' || c == '?' || c == ';' || c == ':' ||
-           c == '(' || c == ')' || c == '[' || c == ']' || c == '{' || c == '}' ||
-           c == '"' || c == '\'' || c == '`' || c == '-' || c == '_' ||
-           c == '+' || c == '=' || c == '*' || c == '/' || c == '\\' ||
-           c == '<' || c == '>' || c == '|' || c == '&' || c == '%' || c == '$' ||
-           c == '#' || c == '@' || c == '^' || c == '~';
+static int is_cjk_utf8(const char* p) {
+    unsigned char c = (unsigned char)*p;
+    // CJK Unified Ideographs: U+4E00-U+9FFF (UTF-8: E4 B8 80 - E9 BF BF)
+    // CJK Extension A: U+3400-U+4DBF (UTF-8: E3 90 80 - E4 B6 BF)
+    // CJK Extension B: U+20000-U+2A6DF (UTF-8: F0 A0 80 80 - F0 AA 9B 9F)
+    if (c == 0xE4 || c == 0xE5 || c == 0xE6 || c == 0xE7 || c == 0xE8 || c == 0xE9) {
+        return 3; // Most common CJK
+    }
+    if (c == 0xE3) {
+        unsigned char c2 = (unsigned char)*(p+1);
+        if (c2 >= 0x90) return 3; // Extension A
+    }
+    if (c == 0xF0) {
+        unsigned char c2 = (unsigned char)*(p+1);
+        if (c2 >= 0xA0 && c2 <= 0xAA) return 4; // Extension B
+    }
+    return 0;
+}
+
+static int is_punctuation_utf8(const char* p) {
+    unsigned char c = (unsigned char)*p;
+    // ASCII punctuation
+    if (c < 0x80) {
+        return c == '.' || c == ',' || c == '!' || c == '?' || c == ';' || c == ':' ||
+               c == '(' || c == ')' || c == '[' || c == ']' || c == '{' || c == '}' ||
+               c == '"' || c == '\'' || c == '`' || c == '-' || c == '_' ||
+               c == '+' || c == '=' || c == '*' || c == '/' || c == '\\' ||
+               c == '<' || c == '>' || c == '|' || c == '&' || c == '%' || c == '$' ||
+               c == '#' || c == '@' || c == '^' || c == '~';
+    }
+    // CJK punctuation (UTF-8 3-byte: E3/EF/EF...)
+    if (c == 0xE3) {
+        unsigned char c2 = (unsigned char)*(p+1);
+        unsigned char c3 = (unsigned char)*(p+2);
+        // 。，、；：？！""''（）【】《》…—～·
+        if (c2 == 0x80) {
+            return c3 == 0x80 || c3 == 0x81 || c3 == 0x82 || c3 == 0x83 || c3 == 0x84 ||
+                   c3 == 0x85 || c3 == 0x86 || c3 == 0x87 || c3 == 0x88 || c3 == 0x89 ||
+                   c3 == 0x8C || c3 == 0x8D || c3 == 0x8E || c3 == 0x8F || c3 == 0x90 ||
+                   c3 == 0x94 || c3 == 0x98 || c3 == 0x99 || c3 == 0x9A || c3 == 0x9B ||
+                   c3 == 0x9C || c3 == 0x9D || c3 == 0x9E || c3 == 0x9F || c3 == 0xA0 ||
+                   c3 == 0xA1;
+        }
+    }
+    return 0;
 }
 
 // Extract next token from text
@@ -185,28 +222,31 @@ static int extract_next_token(const char* text, char* token, int max_len) {
     while (*p && isspace((unsigned char)*p)) p++;
     if (!*p) return p - text;
     
-    char c = *p;
-    
-    // CJK character: extract one character
-    if (is_cjk(c)) {
-        token[0] = c;
-        token[1] = '\0';
-        return p - text + 1;
+    // CJK character: extract one character (3 or 4 bytes)
+    int cjk_len = is_cjk_utf8(p);
+    if (cjk_len > 0) {
+        if (cjk_len < max_len) {
+            memcpy(token, p, cjk_len);
+            token[cjk_len] = '\0';
+        }
+        return p - text + cjk_len;
     }
     
     // Punctuation: skip it (don't tokenize)
-    if (is_punctuation(c)) {
-        return p - text + 1;  // Skip and return 0 tokens
+    int punct_len = is_punctuation_utf8(p);
+    if (punct_len > 0) {
+        return p - text + punct_len;
     }
     
     // ASCII word: extract until whitespace/punctuation/CJK
     int wlen = 0;
     while (*p && wlen < max_len - 1) {
-        char ch = *p;
-        if (isspace((unsigned char)ch) || is_punctuation(ch) || is_cjk(ch)) {
-            break;
-        }
-        token[wlen++] = ch;
+        if (isspace((unsigned char)*p)) break;
+        int cl = is_cjk_utf8(p);
+        if (cl > 0) break;
+        int pl = is_punctuation_utf8(p);
+        if (pl > 0) break;
+        token[wlen++] = *p;
         p++;
     }
     token[wlen] = '\0';
@@ -235,9 +275,11 @@ static int wordpiece_tokenize(onnx_embedder_t* e, const char* text, int64_t* tok
         
         if (word[0] == '\0') continue;  // Skipped punctuation
         
-        // Convert to lowercase for ASCII letters
+        // Convert to lowercase for ASCII letters only (preserve UTF-8)
         for (int i = 0; word[i]; i++) {
-            word[i] = tolower((unsigned char)word[i]);
+            if ((unsigned char)word[i] < 0x80) {
+                word[i] = tolower((unsigned char)word[i]);
+            }
         }
         
         int wlen = strlen(word);
@@ -373,6 +415,7 @@ onnx_embedder_t* onnx_embedder_init(const char* model_path, const char* vocab_pa
     status = g_ort->CreateEnv(ORT_LOGGING_LEVEL_WARNING, "embedder", &e->env);
     if (status != NULL) {
         set_error("Failed to create ONNX env");
+        g_ort->ReleaseStatus(status);
         onnx_embedder_free(e);
         return NULL;
     }
@@ -381,6 +424,7 @@ onnx_embedder_t* onnx_embedder_init(const char* model_path, const char* vocab_pa
     status = g_ort->CreateSessionOptions(&session_options);
     if (status != NULL) {
         set_error("Failed to create session options");
+        g_ort->ReleaseStatus(status);
         onnx_embedder_free(e);
         return NULL;
     }
@@ -390,6 +434,7 @@ onnx_embedder_t* onnx_embedder_init(const char* model_path, const char* vocab_pa
     
     if (status != NULL) {
         set_error("Failed to create ONNX session");
+        g_ort->ReleaseStatus(status);
         onnx_embedder_free(e);
         return NULL;
     }
@@ -397,6 +442,7 @@ onnx_embedder_t* onnx_embedder_init(const char* model_path, const char* vocab_pa
     status = g_ort->CreateCpuMemoryInfo(OrtArenaAllocator, OrtMemTypeDefault, &e->memory_info);
     if (status != NULL) {
         set_error("Failed to create memory info");
+        g_ort->ReleaseStatus(status);
         onnx_embedder_free(e);
         return NULL;
     }
@@ -437,6 +483,7 @@ int onnx_embedder_encode(onnx_embedder_t* e, const char* text, float* vector) {
         input_shape, 2, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64, &input_tensor);
     if (status != NULL) {
         set_error("Failed to create input tensor");
+        g_ort->ReleaseStatus(status);
         return -1;
     }
     
@@ -446,6 +493,7 @@ int onnx_embedder_encode(onnx_embedder_t* e, const char* text, float* vector) {
     if (status != NULL) {
         g_ort->ReleaseValue(input_tensor);
         set_error("Failed to create mask tensor");
+        g_ort->ReleaseStatus(status);
         return -1;
     }
     
@@ -462,6 +510,7 @@ int onnx_embedder_encode(onnx_embedder_t* e, const char* text, float* vector) {
     
     if (status != NULL) {
         set_error("ONNX inference failed");
+        g_ort->ReleaseStatus(status);
         return -1;
     }
     
@@ -471,6 +520,7 @@ int onnx_embedder_encode(onnx_embedder_t* e, const char* text, float* vector) {
     if (status != NULL) {
         g_ort->ReleaseValue(output_tensor);
         set_error("Failed to get output data");
+        g_ort->ReleaseStatus(status);
         return -1;
     }
     

@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <ctype.h>
 
 #define CACHE_PTR(cache, offset) ((void*)((char*)(cache)->pool.base + (offset)))
 
@@ -213,35 +214,52 @@ void cache_vector_index_rebuild(cache_t* cache) {
         // 检查value中是否包含向量元数据
         const char* value = (const char*)CACHE_PTR(cache, offset + sizeof(cache_entry_header_t) + h->key_len + 1);
         
-        // 查找 "__vector_offset":N 和 "__vector_dim":N
-        const char* vec_off_str = strstr(value, "\"__vector_offset\":");
-        const char* vec_dim_str = strstr(value, "\"__vector_dim\":");
-        
-        if (vec_off_str && vec_dim_str) {
+        // 安全解析向量元数据：要求 value 以 '{"__vector_offset":' 开头
+        // 格式: {"__vector_offset":N,"__vector_dim":N,"content":...}
+        if (value[0] == '{' && strncmp(value + 1, "\"__vector_offset\":" , 18) == 0) {
+            const char* p = value + 19;  // 跳过 {"__vector_offset":
+            
+            // 解析 offset
             size_t vector_offset = 0;
-            size_t vector_dim = 0;
+            while (*p >= '0' && *p <= '9') {
+                vector_offset = vector_offset * 10 + (*p - '0');
+                p++;
+            }
             
-            sscanf(vec_off_str + 18, "%zu", &vector_offset);
-            sscanf(vec_dim_str + 15, "%zu", &vector_dim);
-            
-            if (vector_offset > 0 && vector_dim > 0 && vector_dim <= CACHE_MAX_VECTOR_DIM) {
-                // 添加到索引
-                if (cache->vector_index.count >= cache->vector_index.capacity) {
-                    size_t new_cap = cache->vector_index.capacity == 0 ? 16 : cache->vector_index.capacity * 2;
-                    cache_vector_entry_t* new_entries = realloc(cache->vector_index.entries,
-                                                                  sizeof(cache_vector_entry_t) * new_cap);
-                    if (new_entries) {
-                        cache->vector_index.entries = new_entries;
-                        cache->vector_index.capacity = new_cap;
-                    }
+            // 跳过 ",\"__vector_dim\":"
+            if (*p == ',' && strncmp(p + 1, "\"__vector_dim\":" , 15) == 0) {
+                p += 16;  // 跳过 ,"__vector_dim":
+                
+                // 解析 dim
+                size_t vector_dim = 0;
+                while (*p >= '0' && *p <= '9') {
+                    vector_dim = vector_dim * 10 + (*p - '0');
+                    p++;
                 }
                 
-                if (cache->vector_index.count < cache->vector_index.capacity) {
-                    cache_vector_entry_t* entry = &cache->vector_index.entries[cache->vector_index.count];
-                    entry->entry_offset = offset;
-                    entry->vector_offset = vector_offset;
-                    entry->dim = vector_dim;
-                    cache->vector_index.count++;
+                if (vector_offset > 0 && vector_dim > 0 && vector_dim <= CACHE_MAX_VECTOR_DIM) {
+                    // 验证向量数据在 pool 范围内
+                    size_t vector_end = vector_offset + sizeof(float) * vector_dim;
+                    if (vector_end <= cache->pool.used) {
+                        // 添加到索引
+                        if (cache->vector_index.count >= cache->vector_index.capacity) {
+                            size_t new_cap = cache->vector_index.capacity == 0 ? 16 : cache->vector_index.capacity * 2;
+                            cache_vector_entry_t* new_entries = realloc(cache->vector_index.entries,
+                                                                          sizeof(cache_vector_entry_t) * new_cap);
+                            if (new_entries) {
+                                cache->vector_index.entries = new_entries;
+                                cache->vector_index.capacity = new_cap;
+                            }
+                        }
+                        
+                        if (cache->vector_index.count < cache->vector_index.capacity) {
+                            cache_vector_entry_t* entry = &cache->vector_index.entries[cache->vector_index.count];
+                            entry->entry_offset = offset;
+                            entry->vector_offset = vector_offset;
+                            entry->dim = vector_dim;
+                            cache->vector_index.count++;
+                        }
+                    }
                 }
             }
         }
@@ -261,15 +279,7 @@ int cache_set_vector(cache_t* cache, const char* key, const char* value,
         return CACHE_ERR_INVAL;
     }
     
-    // 先存储普通 value，确保 entry 创建成功
-    int ret = cache_set(cache, key, value, ttl_ms);
-    if (ret != CACHE_OK) return ret;
-    
-    // 获取刚插入的 entry offset
-    size_t entry_offset = cache_hash_lookup(cache, key, strlen(key));
-    if (!entry_offset) return CACHE_ERR_IO;
-    
-    // 分配向量数据到 pool
+    // 分配向量数据到 pool（先分配，确保成功后再写入 value）
     size_t vector_offset = alloc_vector_data(cache, vector, dim);
     if (!vector_offset) return CACHE_ERR_NOMEM;
     
@@ -286,18 +296,17 @@ int cache_set_vector(cache_t* cache, const char* key, const char* value,
              "{\"__vector_offset\":%zu,\"__vector_dim\":%zu,\"content\":%s}",
              vector_offset, dim, value);
     
-    // 更新 entry 的 value（包含向量元数据）
-    ret = cache_set(cache, key, new_value, ttl_ms);
+    // 单次写入 entry（含向量元数据）
+    int ret = cache_set(cache, key, new_value, ttl_ms);
     free(new_value);
     
     if (ret == CACHE_OK) {
-        // 重新获取 entry_offset（更新后可能变化）
-        entry_offset = cache_hash_lookup(cache, key, strlen(key));
+        size_t entry_offset = cache_hash_lookup(cache, key, strlen(key));
         if (entry_offset) {
             cache_vector_index_add(cache, entry_offset, vector, dim);
         }
     }
-    // 如果第二次 cache_set 失败，向量数据仍在 pool 中（孤儿数据），
+    // 如果 cache_set 失败，向量数据仍在 pool 中（孤儿数据），
     // 将在下次 compact 时回收。这是 pool 分配器的限制。
     
     return ret;
@@ -360,16 +369,17 @@ static int count_keyword_matches(const char* query, const char* text) {
     }
     text_lower[i] = '\0';
     
-    // Check each word in query
+    // Check each word in query (using strtok_r for reentrancy)
     char* q = query_lower;
+    char* saveptr = NULL;
     char* word;
-    while ((word = strtok(q, " \t\n\r")) != NULL) {
+    while ((word = strtok_r(q, " \t\n\r", &saveptr)) != NULL) {
         q = NULL;  // For subsequent calls
         if (strlen(word) >= 2 && strstr(text_lower, word)) {
             matches++;
         }
     }
-    
+
     return matches;
 }
 
@@ -390,9 +400,12 @@ static double calculate_hybrid_score(cache_t* cache, size_t entry_offset,
     double score = semantic_score;
     
     // 1. Title bonus: exact key match or title entries get higher weight
-    if (strstr(key, "/title")) {
+    // Use strict path segment matching to avoid false positives like "my-title-guide"
+    size_t key_len_actual = strlen(key);
+    if ((key_len_actual >= 6 && strcmp(key + key_len_actual - 6, "/title") == 0) ||
+        strstr(key, "/title/") != NULL) {
         score *= 1.5;  // Title entries are more important
-    } else if (strstr(key, "/_meta/")) {
+    } else if (strstr(key, "/_meta/") != NULL) {
         score *= 1.3;  // Metadata is also important
     }
     

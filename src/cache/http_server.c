@@ -111,7 +111,8 @@ static int parse_request(const char* buf, size_t len, http_request_t* req) {
 static int url_decode(const char* src, char* dst, size_t dst_size) {
     size_t i = 0, j = 0;
     while (src[i] && j < dst_size - 1) {
-        if (src[i] == '%' && isxdigit(src[i+1]) && isxdigit(src[i+2])) {
+        if (src[i] == '%' && src[i+1] && src[i+2] &&
+            isxdigit((unsigned char)src[i+1]) && isxdigit((unsigned char)src[i+2])) {
             char hex[3] = {src[i+1], src[i+2], '\0'};
             dst[j++] = (char)strtol(hex, NULL, 16);
             i += 3;
@@ -780,9 +781,9 @@ static void handle_http_client(int fd, cache_t* cache) {
         ssize_t total = 0;
         ssize_t n;
         
-        // 先读取头部
+        // 先读取头部（批量读取，避免逐字节系统调用）
         while (total < sizeof(buf) - 1) {
-            n = recv(fd, buf + total, 1, 0);
+            n = recv(fd, buf + total, sizeof(buf) - 1 - total, 0);
             if (n <= 0) return;
             total += n;
             buf[total] = '\0';  // 确保每次读取后 null-terminate

@@ -20,13 +20,20 @@ static uint64_t tag_hash(const char* tag, size_t len) {
 // 对中文文本，连续的中文字符视为一个 token
 
 static int is_tag_char(unsigned char c) {
-    // 允许 ASCII 字母数字
-    if (isalnum(c)) return 1;
-    // 允许 UTF-8 多字节字符的首字节 (>= 0xC0)
+    // ASCII 字母数字和下划线
+    if (isalnum(c) || c == '_') return 1;
+    // UTF-8 多字节字符的首字节 (>= 0xC0)
     if (c >= 0xC0) return 1;
-    // 允许 UTF-8 后续字节 (0x80-0xBF)
-    if (c >= 0x80 && c <= 0xBF) return 1;
     return 0;
+}
+
+// 获取 UTF-8 字符的字节长度（从首字节判断）
+static int utf8_seq_len(unsigned char c) {
+    if ((c & 0x80) == 0) return 1;
+    if ((c & 0xE0) == 0xC0) return 2;
+    if ((c & 0xF0) == 0xE0) return 3;
+    if ((c & 0xF8) == 0xF0) return 4;
+    return 1; // Invalid, treat as single byte
 }
 
 // 从 value 中提取所有 tag，返回 tag 字符串数组
@@ -39,13 +46,37 @@ static char** extract_tags(const char* value, size_t value_len, size_t* out_coun
     size_t tag_count = 0;
     size_t i = 0;
     while (i < value_len) {
-        // 跳过非 tag 字符
-        while (i < value_len && !is_tag_char((unsigned char)value[i])) i++;
-        if (i >= value_len) break;
+        unsigned char c = (unsigned char)value[i];
+        // 跳过非 tag 字符（包括 whitespace、标点、UTF-8 continuation bytes）
+        if (!is_tag_char(c)) {
+            i++;
+            continue;
+        }
         
         // 找到 tag 起始
         size_t start = i;
-        while (i < value_len && is_tag_char((unsigned char)value[i])) i++;
+        if (c < 0x80) {
+            // ASCII: 连续读取 alnum/underscore
+            while (i < value_len && (isalnum((unsigned char)value[i]) || value[i] == '_')) i++;
+        } else {
+            // UTF-8: 按完整字符读取
+            while (i < value_len) {
+                unsigned char ch = (unsigned char)value[i];
+                if (ch < 0x80) {
+                    // ASCII 中断 UTF-8 序列
+                    if (!isalnum(ch) && ch != '_') break;
+                    i++;
+                } else if (ch >= 0xC0) {
+                    // 新的 UTF-8 字符首字节
+                    int seq_len = utf8_seq_len(ch);
+                    if (i + seq_len > value_len) break;
+                    i += seq_len;
+                } else {
+                    // continuation byte (0x80-0xBF): should not happen as start of char
+                    break;
+                }
+            }
+        }
         size_t len = i - start;
         
         if (len >= 2) tag_count++;
@@ -61,11 +92,30 @@ static char** extract_tags(const char* value, size_t value_len, size_t* out_coun
     size_t idx = 0;
     i = 0;
     while (i < value_len && idx < tag_count) {
-        while (i < value_len && !is_tag_char((unsigned char)value[i])) i++;
-        if (i >= value_len) break;
+        unsigned char c = (unsigned char)value[i];
+        if (!is_tag_char(c)) {
+            i++;
+            continue;
+        }
         
         size_t start = i;
-        while (i < value_len && is_tag_char((unsigned char)value[i])) i++;
+        if (c < 0x80) {
+            while (i < value_len && (isalnum((unsigned char)value[i]) || value[i] == '_')) i++;
+        } else {
+            while (i < value_len) {
+                unsigned char ch = (unsigned char)value[i];
+                if (ch < 0x80) {
+                    if (!isalnum(ch) && ch != '_') break;
+                    i++;
+                } else if (ch >= 0xC0) {
+                    int seq_len = utf8_seq_len(ch);
+                    if (i + seq_len > value_len) break;
+                    i += seq_len;
+                } else {
+                    break;
+                }
+            }
+        }
         size_t len = i - start;
         
         if (len >= 2) {

@@ -373,6 +373,34 @@ int cache_index_save(cache_t* cache) {
 int cache_index_load(cache_t* cache) {
     if (!cache) return -1;
     
+    // 清理旧索引数据，防止内存泄漏
+    if (cache->sorted.offsets) {
+        free(cache->sorted.offsets);
+        cache->sorted.offsets = NULL;
+        cache->sorted.count = 0;
+        cache->sorted.capacity = 0;
+    }
+    if (cache->vector_index.entries) {
+        free(cache->vector_index.entries);
+        cache->vector_index.entries = NULL;
+        cache->vector_index.count = 0;
+        cache->vector_index.capacity = 0;
+    }
+    if (cache->vector_index.hnsw) {
+        hnsw_destroy(cache->vector_index.hnsw);
+        cache->vector_index.hnsw = NULL;
+        cache->vector_index.use_hnsw = 0;
+    }
+    if (cache->ns_root) {
+        // 使用递归函数释放 namespace 树
+        // 这里需要调用 namespace.c 中的 destroy_ns_tree，但它是 static 的
+        // 我们在 cache.c 中通过 cache_ns_destroy 暴露
+        cache_ns_destroy(cache);
+    }
+    cache->hash.buckets_offset = 0;
+    cache->hash.bucket_count = 0;
+    cache->hash.size = 0;
+    
     char path[512];
     snprintf(path, sizeof(path), "%s/%s", cache->db_dir, INDEX_FILE_NAME);
     
