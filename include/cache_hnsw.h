@@ -59,6 +59,18 @@ size_t hnsw_count(const hnsw_index_t* index);
 size_t hnsw_memory_usage(const hnsw_index_t* index);
 int hnsw_get_ef_search(const hnsw_index_t* index);
 
+// ====== 持久化 ======
+// 计算序列化所需大小
+size_t hnsw_serialize_size(const hnsw_index_t* index);
+
+// 序列化到缓冲区
+// 返回写入的字节数，失败返回 0
+size_t hnsw_serialize(const hnsw_index_t* index, void* buf, size_t buf_size);
+
+// 从缓冲区反序列化
+// 返回新创建的索引，失败返回 NULL
+hnsw_index_t* hnsw_deserialize(const void* buf, size_t buf_size);
+
 #ifdef __cplusplus
 }
 #endif

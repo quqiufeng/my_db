@@ -671,3 +671,198 @@ int hnsw_get_ef_search(const hnsw_index_t* idx) {
     if (!idx) return HNSW_DEFAULT_EF_SEARCH;
     return idx->ef_search;
 }
+
+// ====== Persistence ======
+
+#define HNSW_SERIALIZE_MAGIC 0x48534E48  // "HNSH"
+#define HNSW_SERIALIZE_VERSION 1
+
+// Header: 56 bytes
+typedef struct __attribute__((packed)) {
+    uint32_t magic;
+    uint32_t version;
+    uint64_t dim;
+    int32_t M;
+    int32_t M_max;
+    int32_t ef_construction;
+    int32_t ef_search;
+    int32_t max_level;
+    uint64_t entry_point;
+    uint64_t node_count;
+    uint64_t free_count;
+} hnsw_serialize_header_t;
+
+size_t hnsw_serialize_size(const hnsw_index_t* idx) {
+    if (!idx) return 0;
+    
+    size_t size = sizeof(hnsw_serialize_header_t);
+    
+    // Nodes
+    for (size_t i = 0; i < idx->node_count; i++) {
+        hnsw_node_impl_t* node = &idx->nodes[i];
+        size += 8 + 4 + 4;  // id + level + valid
+        if (node->valid && node->vector) {
+            size += sizeof(float) * idx->dim;  // vector
+            size += 4;  // num_levels
+            for (int l = 0; l <= node->level; l++) {
+                size += 8;  // count
+                size += sizeof(size_t) * node->neighbors[l].count;  // ids
+            }
+        }
+    }
+    
+    // Free list
+    size += sizeof(uint64_t);  // free_count
+    size += sizeof(size_t) * idx->free_count;
+    
+    return size;
+}
+
+size_t hnsw_serialize(const hnsw_index_t* idx, void* buf, size_t buf_size) {
+    if (!idx || !buf || buf_size == 0) return 0;
+    
+    size_t required = hnsw_serialize_size(idx);
+    if (buf_size < required) return 0;
+    
+    char* p = (char*)buf;
+    
+    // Header
+    hnsw_serialize_header_t* hdr = (hnsw_serialize_header_t*)p;
+    hdr->magic = HNSW_SERIALIZE_MAGIC;
+    hdr->version = HNSW_SERIALIZE_VERSION;
+    hdr->dim = idx->dim;
+    hdr->M = idx->M;
+    hdr->M_max = idx->M_max;
+    hdr->ef_construction = idx->ef_construction;
+    hdr->ef_search = idx->ef_search;
+    hdr->max_level = idx->max_level;
+    hdr->entry_point = idx->entry_point;
+    hdr->node_count = idx->node_count;
+    hdr->free_count = idx->free_count;
+    p += sizeof(hnsw_serialize_header_t);
+    
+    // Nodes
+    for (size_t i = 0; i < idx->node_count; i++) {
+        hnsw_node_impl_t* node = &idx->nodes[i];
+        *(size_t*)p = node->id;
+        p += 8;
+        *(int32_t*)p = node->level;
+        p += 4;
+        *(int32_t*)p = node->valid;
+        p += 4;
+        
+        if (node->valid && node->vector) {
+            memcpy(p, node->vector, sizeof(float) * idx->dim);
+            p += sizeof(float) * idx->dim;
+            
+            int32_t num_levels = node->level + 1;
+            *(int32_t*)p = num_levels;
+            p += 4;
+            
+            for (int l = 0; l < num_levels; l++) {
+                *(size_t*)p = node->neighbors[l].count;
+                p += 8;
+                memcpy(p, node->neighbors[l].ids, sizeof(size_t) * node->neighbors[l].count);
+                p += sizeof(size_t) * node->neighbors[l].count;
+            }
+        }
+    }
+    
+    // Free list
+    *(size_t*)p = idx->free_count;
+    p += 8;
+    memcpy(p, idx->free_list, sizeof(size_t) * idx->free_count);
+    p += sizeof(size_t) * idx->free_count;
+    
+    return p - (char*)buf;
+}
+
+hnsw_index_t* hnsw_deserialize(const void* buf, size_t buf_size) {
+    if (!buf || buf_size < sizeof(hnsw_serialize_header_t)) return NULL;
+    
+    const char* p = (const char*)buf;
+    
+    // Header
+    const hnsw_serialize_header_t* hdr = (const hnsw_serialize_header_t*)p;
+    if (hdr->magic != HNSW_SERIALIZE_MAGIC || hdr->version != HNSW_SERIALIZE_VERSION) {
+        return NULL;
+    }
+    p += sizeof(hnsw_serialize_header_t);
+    
+    // Create index
+    hnsw_index_t* idx = calloc(1, sizeof(hnsw_index_t));
+    if (!idx) return NULL;
+    
+    idx->dim = hdr->dim;
+    idx->M = hdr->M;
+    idx->M_max = hdr->M_max;
+    idx->ef_construction = hdr->ef_construction;
+    idx->ef_search = hdr->ef_search;
+    idx->mL = 1.0f / logf((float)idx->M);
+    idx->max_level = hdr->max_level;
+    idx->entry_point = hdr->entry_point;
+    idx->node_count = hdr->node_count;
+    idx->node_capacity = hdr->node_count;
+    
+    // Allocate nodes
+    idx->nodes = calloc(idx->node_capacity, sizeof(hnsw_node_impl_t));
+    if (!idx->nodes) {
+        free(idx);
+        return NULL;
+    }
+    
+    // Load nodes
+    for (size_t i = 0; i < idx->node_count; i++) {
+        hnsw_node_impl_t* node = &idx->nodes[i];
+        node->id = *(size_t*)p;
+        p += 8;
+        node->level = *(int32_t*)p;
+        p += 4;
+        node->valid = *(int32_t*)p;
+        p += 4;
+        
+        if (node->valid) {
+            // Vector
+            node->vector = malloc(sizeof(float) * idx->dim);
+            if (node->vector) {
+                memcpy(node->vector, p, sizeof(float) * idx->dim);
+                p += sizeof(float) * idx->dim;
+            }
+            
+            // Neighbors
+            int32_t num_levels = *(int32_t*)p;
+            p += 4;
+            
+            if (num_levels > 0) {
+                node->neighbors = calloc(num_levels, sizeof(neighbor_list_t));
+                if (node->neighbors) {
+                    for (int l = 0; l < num_levels; l++) {
+                        size_t count = *(size_t*)p;
+                        p += 8;
+                        if (count > 0) {
+                            neighbor_list_init(&node->neighbors[l], count);
+                            memcpy(node->neighbors[l].ids, p, sizeof(size_t) * count);
+                            node->neighbors[l].count = count;
+                            p += sizeof(size_t) * count;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    // Free list
+    size_t free_count = *(size_t*)p;
+    p += 8;
+    if (free_count > 0) {
+        idx->free_list = malloc(sizeof(size_t) * free_count);
+        if (idx->free_list) {
+            memcpy(idx->free_list, p, sizeof(size_t) * free_count);
+            idx->free_count = free_count;
+            idx->free_capacity = free_count;
+            p += sizeof(size_t) * free_count;
+        }
+    }
+    
+    return idx;
+}

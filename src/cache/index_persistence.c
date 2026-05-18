@@ -14,10 +14,12 @@
 
 // Calculate total size needed for all indexes
 static size_t calculate_index_size(cache_t* cache, size_t* hash_size,
-                                   size_t* sorted_size, size_t* vector_size) {
+                                   size_t* sorted_size, size_t* vector_size,
+                                   size_t* hnsw_size) {
     *hash_size = 0;
     *sorted_size = 0;
     *vector_size = 0;
+    *hnsw_size = 0;
     
     // Hash index
     if (cache->hash.bucket_count > 0) {
@@ -34,15 +36,21 @@ static size_t calculate_index_size(cache_t* cache, size_t* hash_size,
         *vector_size = 16 + cache->vector_index.count * sizeof(cache_vector_entry_t);
     }
     
+    // HNSW index
+    if (cache->vector_index.use_hnsw && cache->vector_index.hnsw) {
+        *hnsw_size = hnsw_serialize_size(cache->vector_index.hnsw);
+    }
+    
     // Header + entries
     size_t header_size = sizeof(cache_index_file_header_t);
     int index_count = 0;
     if (*hash_size > 0) index_count++;
     if (*sorted_size > 0) index_count++;
     if (*vector_size > 0) index_count++;
+    if (*hnsw_size > 0) index_count++;
     
     size_t entries_size = index_count * sizeof(cache_index_entry_t);
-    size_t data_size = *hash_size + *sorted_size + *vector_size;
+    size_t data_size = *hash_size + *sorted_size + *vector_size + *hnsw_size;
     
     return header_size + entries_size + data_size;
 }
@@ -124,8 +132,8 @@ int cache_index_save(cache_t* cache) {
     snprintf(path, sizeof(path), "%s/%s", cache->db_dir, INDEX_FILE_NAME);
     snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", path);
     
-    size_t hash_size, sorted_size, vector_size;
-    size_t total_size = calculate_index_size(cache, &hash_size, &sorted_size, &vector_size);
+    size_t hash_size, sorted_size, vector_size, hnsw_size;
+    size_t total_size = calculate_index_size(cache, &hash_size, &sorted_size, &vector_size, &hnsw_size);
     
     if (total_size <= sizeof(cache_index_file_header_t)) {
         // Nothing to save
@@ -167,6 +175,7 @@ int cache_index_save(cache_t* cache) {
     if (hash_size > 0) index_count++;
     if (sorted_size > 0) index_count++;
     if (vector_size > 0) index_count++;
+    if (hnsw_size > 0) index_count++;
     header->index_count = index_count;
     
     // Index entries start after header
@@ -218,6 +227,20 @@ int cache_index_save(cache_t* cache) {
         entry->reserved2 = 0;
         
         size_t written = write_vector_index(cache, data_ptr);
+        data_ptr += written;
+    }
+    
+    // Write HNSW index
+    if (hnsw_size > 0) {
+        cache_index_entry_t* entry = &entries[entry_idx++];
+        entry->type = INDEX_TYPE_HNSW;
+        entry->data_offset = data_ptr - (char*)base;
+        entry->data_size = hnsw_size;
+        entry->entry_count = hnsw_count(cache->vector_index.hnsw);
+        entry->reserved = 0;
+        entry->reserved2 = 0;
+        
+        size_t written = hnsw_serialize(cache->vector_index.hnsw, data_ptr, hnsw_size);
         data_ptr += written;
     }
     
@@ -340,6 +363,17 @@ int cache_index_load(cache_t* cache) {
                         cache->vector_index.count = count;
                         cache->vector_index.capacity = count;
                         cache->vector_index.entries = entries;
+                    }
+                }
+                break;
+            }
+            
+            case INDEX_TYPE_HNSW: {
+                if (entry->data_size > 0) {
+                    hnsw_index_t* hnsw = hnsw_deserialize(data, entry->data_size);
+                    if (hnsw) {
+                        cache->vector_index.hnsw = hnsw;
+                        cache->vector_index.use_hnsw = 1;
                     }
                 }
                 break;
