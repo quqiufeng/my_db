@@ -39,6 +39,7 @@ TOOLS_DIR = tools
 IMPORT_BOOK = $(TOOLS_DIR)/import_book
 CACHE_SERVER = $(TOOLS_DIR)/cache_server
 CACHE_HTTP_SERVER = $(TOOLS_DIR)/cache_http_server
+CACHE_SNAPSHOT = $(TOOLS_DIR)/cache_snapshot
 
 PREFIX ?= /usr/local
 LIBDIR = $(PREFIX)/lib
@@ -46,7 +47,7 @@ INCLUDEDIR = $(PREFIX)/include
 
 .PHONY: all clean test test_join test_perf test_edge test_composite test_wal test_cache test_cache_full test_http test_hnsw example install
 
-all: $(LIB) $(TEST_BASIC) $(TEST_JOIN) $(TEST_PERF) $(TEST_EDGE) $(TEST_COMPOSITE) $(TEST_WAL) $(TEST_CACHE) $(TEST_CACHE_FULL) $(TEST_HTTP_SERVER) $(TEST_HNSW) $(IMPORT_BOOK) $(CACHE_SERVER) $(CACHE_HTTP_SERVER) example
+all: $(LIB) $(TEST_BASIC) $(TEST_JOIN) $(TEST_PERF) $(TEST_EDGE) $(TEST_COMPOSITE) $(TEST_WAL) $(TEST_CACHE) $(TEST_CACHE_FULL) $(TEST_HTTP_SERVER) $(TEST_HNSW) $(IMPORT_BOOK) $(CACHE_SERVER) $(CACHE_HTTP_SERVER) $(CACHE_SNAPSHOT) example
 
 $(LIB): $(OBJECTS)
 	$(CC) -shared -o $@ $^ -lm
@@ -134,6 +135,9 @@ $(CACHE_SERVER): $(TOOLS_DIR)/cache_server.c $(LIB)
 $(CACHE_HTTP_SERVER): $(TOOLS_DIR)/cache_http_server.c $(LIB)
 	$(CC) $(CFLAGS) -o $@ $< -L. -lmydb -Wl,-rpath,.
 
+$(CACHE_SNAPSHOT): $(TOOLS_DIR)/cache_snapshot.c $(LIB)
+	$(CC) $(CFLAGS) -o $@ $< -L. -lmydb -Wl,-rpath,.
+
 example: $(LIB)
 	$(CC) $(CFLAGS) -o $(EXAMPLE_C) $(EXAMPLE_DIR)/example.c -L. -lmydb -Wl,-rpath,.
 	@echo "C example built: $(EXAMPLE_C)"
@@ -149,4 +153,4 @@ install: $(LIB)
 	@echo "Header:  $(INCLUDEDIR)/mydb.h"
 
 clean:
-	rm -rf $(OBJ_DIR) $(LIB) $(TEST_BASIC) $(TEST_JOIN) $(TEST_PERF) $(TEST_EDGE) $(TEST_COMPOSITE) $(TEST_WAL) $(TEST_CACHE) $(TEST_CACHE_FULL) $(TEST_HTTP_SERVER) $(TEST_HNSW) $(IMPORT_BOOK) $(CACHE_HTTP_SERVER) $(EXAMPLE_C) *.bin *.index test_cache_dir test_cache_lru
+	rm -rf $(OBJ_DIR) $(LIB) $(TEST_BASIC) $(TEST_JOIN) $(TEST_PERF) $(TEST_EDGE) $(TEST_COMPOSITE) $(TEST_WAL) $(TEST_CACHE) $(TEST_CACHE_FULL) $(TEST_HTTP_SERVER) $(TEST_HNSW) $(IMPORT_BOOK) $(CACHE_HTTP_SERVER) $(CACHE_SNAPSHOT) $(EXAMPLE_C) *.bin *.index test_cache_dir test_cache_lru

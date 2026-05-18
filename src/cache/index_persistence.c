@@ -12,14 +12,105 @@
 
 #define INDEX_FILE_NAME "index.bin"
 
+// ====== Namespace Tree Persistence ======
+
+static size_t ns_node_size(cache_ns_node_t* node) {
+    if (!node) return 0;
+    size_t size = 4 + strlen(node->path);  // path_len + path
+    size += 8 + node->entry_count * sizeof(size_t);  // entry_count + offsets
+    size += 8;  // child_count
+    for (size_t i = 0; i < node->child_count; i++) {
+        size += ns_node_size(node->children[i]);
+    }
+    return size;
+}
+
+static size_t ns_serialize_size(cache_t* cache) {
+    if (!cache || !cache->ns_root) return 0;
+    return ns_node_size(cache->ns_root);
+}
+
+static size_t write_ns_node(cache_ns_node_t* node, char* buf) {
+    if (!node) return 0;
+    char* p = buf;
+    
+    uint32_t path_len = strlen(node->path);
+    *(uint32_t*)p = path_len;
+    p += 4;
+    memcpy(p, node->path, path_len);
+    p += path_len;
+    
+    *(size_t*)p = node->entry_count;
+    p += 8;
+    memcpy(p, node->entry_offsets, node->entry_count * sizeof(size_t));
+    p += node->entry_count * sizeof(size_t);
+    
+    *(size_t*)p = node->child_count;
+    p += 8;
+    
+    for (size_t i = 0; i < node->child_count; i++) {
+        p += write_ns_node(node->children[i], p);
+    }
+    
+    return p - buf;
+}
+
+static size_t write_ns_index(cache_t* cache, void* buf) {
+    if (!cache || !cache->ns_root) return 0;
+    return write_ns_node(cache->ns_root, (char*)buf);
+}
+
+static cache_ns_node_t* read_ns_node(const char** p) {
+    cache_ns_node_t* node = calloc(1, sizeof(cache_ns_node_t));
+    if (!node) return NULL;
+    
+    uint32_t path_len = *(uint32_t*)(*p);
+    *p += 4;
+    
+    node->path = malloc(path_len + 1);
+    if (node->path) {
+        memcpy(node->path, *p, path_len);
+        node->path[path_len] = '\0';
+    }
+    *p += path_len;
+    
+    node->entry_count = *(size_t*)(*p);
+    *p += 8;
+    
+    if (node->entry_count > 0) {
+        node->entry_offsets = malloc(node->entry_count * sizeof(size_t));
+        if (node->entry_offsets) {
+            memcpy(node->entry_offsets, *p, node->entry_count * sizeof(size_t));
+        }
+        node->entry_capacity = node->entry_count;
+        *p += node->entry_count * sizeof(size_t);
+    }
+    
+    size_t child_count = *(size_t*)(*p);
+    *p += 8;
+    
+    if (child_count > 0) {
+        node->children = calloc(child_count, sizeof(cache_ns_node_t*));
+        node->child_capacity = child_count;
+        
+        for (size_t i = 0; i < child_count; i++) {
+            node->children[i] = read_ns_node(p);
+            node->child_count++;
+        }
+    }
+    
+    return node;
+}
+
 // Calculate total size needed for all indexes
 static size_t calculate_index_size(cache_t* cache, size_t* hash_size,
                                    size_t* sorted_size, size_t* vector_size,
-                                   size_t* hnsw_size) {
+                                   size_t* hnsw_size, size_t* ns_size) {
     *hash_size = 0;
     *sorted_size = 0;
     *vector_size = 0;
     *hnsw_size = 0;
+    *ns_size = 0;
     
     // Hash index
     if (cache->hash.bucket_count > 0) {
@@ -41,6 +132,9 @@ static size_t calculate_index_size(cache_t* cache, size_t* hash_size,
         *hnsw_size = hnsw_serialize_size(cache->vector_index.hnsw);
     }
     
+    // Namespace tree
+    *ns_size = ns_serialize_size(cache);
+    
     // Header + entries
     size_t header_size = sizeof(cache_index_file_header_t);
     int index_count = 0;
@@ -48,9 +142,10 @@ static size_t calculate_index_size(cache_t* cache, size_t* hash_size,
     if (*sorted_size > 0) index_count++;
     if (*vector_size > 0) index_count++;
     if (*hnsw_size > 0) index_count++;
+    if (*ns_size > 0) index_count++;
     
     size_t entries_size = index_count * sizeof(cache_index_entry_t);
-    size_t data_size = *hash_size + *sorted_size + *vector_size + *hnsw_size;
+    size_t data_size = *hash_size + *sorted_size + *vector_size + *hnsw_size + *ns_size;
     
     return header_size + entries_size + data_size;
 }
@@ -132,8 +227,8 @@ int cache_index_save(cache_t* cache) {
     snprintf(path, sizeof(path), "%s/%s", cache->db_dir, INDEX_FILE_NAME);
     snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", path);
     
-    size_t hash_size, sorted_size, vector_size, hnsw_size;
-    size_t total_size = calculate_index_size(cache, &hash_size, &sorted_size, &vector_size, &hnsw_size);
+    size_t hash_size, sorted_size, vector_size, hnsw_size, ns_size;
+    size_t total_size = calculate_index_size(cache, &hash_size, &sorted_size, &vector_size, &hnsw_size, &ns_size);
     
     if (total_size <= sizeof(cache_index_file_header_t)) {
         // Nothing to save
@@ -176,6 +271,7 @@ int cache_index_save(cache_t* cache) {
     if (sorted_size > 0) index_count++;
     if (vector_size > 0) index_count++;
     if (hnsw_size > 0) index_count++;
+    if (ns_size > 0) index_count++;
     header->index_count = index_count;
     
     // Index entries start after header
@@ -241,6 +337,21 @@ int cache_index_save(cache_t* cache) {
         entry->reserved2 = 0;
         
         size_t written = hnsw_serialize(cache->vector_index.hnsw, data_ptr, hnsw_size);
+        data_ptr += written;
+    }
+    
+    // Write namespace tree
+    if (ns_size > 0) {
+        cache_index_entry_t* entry = &entries[entry_idx++];
+        entry->type = INDEX_TYPE_TAG;  // Use TAG type for namespace (no dedicated type yet)
+        entry->type = 6;  // Custom type for namespace
+        entry->data_offset = data_ptr - (char*)base;
+        entry->data_size = ns_size;
+        entry->entry_count = 0;  // Tree structure, no simple count
+        entry->reserved = 0;
+        entry->reserved2 = 0;
+        
+        size_t written = write_ns_index(cache, data_ptr);
         data_ptr += written;
     }
     
@@ -375,6 +486,14 @@ int cache_index_load(cache_t* cache) {
                         cache->vector_index.hnsw = hnsw;
                         cache->vector_index.use_hnsw = 1;
                     }
+                }
+                break;
+            }
+            
+            case 6: {  // Namespace tree
+                if (entry->data_size > 0) {
+                    const char* p = (const char*)data;
+                    cache->ns_root = read_ns_node(&p);
                 }
                 break;
             }
