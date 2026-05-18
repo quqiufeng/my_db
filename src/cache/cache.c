@@ -697,7 +697,7 @@ int cache_batch_set(cache_t* cache, const cache_batch_item_t* items, size_t coun
         cache->memory_used += aligned_size;
     }
     
-    // 批量更新索引
+    // 批量更新索引（预计算长度，减少重复 strlen）
     for (size_t i = 0; i < count; i++) {
         const char* key = items[i].key;
         size_t key_len = strlen(key);

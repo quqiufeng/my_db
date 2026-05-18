@@ -76,10 +76,19 @@ static int parse_request(const char* buf, size_t len, http_request_t* req) {
     char* q = strchr(path_raw, '?');
     if (q) {
         *q = '\0';
-        strncpy(req->path, path_raw, HTTP_MAX_PATH - 1);
-        strncpy(req->query, q + 1, HTTP_MAX_PATH - 1);
+        size_t path_len = strlen(path_raw);
+        if (path_len >= HTTP_MAX_PATH) path_len = HTTP_MAX_PATH - 1;
+        memcpy(req->path, path_raw, path_len);
+        req->path[path_len] = '\0';
+        size_t query_len = strlen(q + 1);
+        if (query_len >= HTTP_MAX_PATH) query_len = HTTP_MAX_PATH - 1;
+        memcpy(req->query, q + 1, query_len);
+        req->query[query_len] = '\0';
     } else {
-        strncpy(req->path, path_raw, HTTP_MAX_PATH - 1);
+        size_t path_len = strlen(path_raw);
+        if (path_len >= HTTP_MAX_PATH) path_len = HTTP_MAX_PATH - 1;
+        memcpy(req->path, path_raw, path_len);
+        req->path[path_len] = '\0';
     }
     
     // 解析 headers
@@ -175,18 +184,30 @@ static void send_json_response(int fd, int status_code, const char* json_body) {
 }
 
 static void send_error(int fd, int status_code, const char* message) {
-    char json[512];
     char escaped[256];
     json_escape(message, escaped, sizeof(escaped));
-    snprintf(json, sizeof(json), "{\"status\":\"error\",\"error\":\"%s\"}", escaped);
+    size_t json_len = 32 + strlen(escaped);  // {"status":"error","error":""} + escaped
+    char* json = malloc(json_len);
+    if (!json) {
+        send_json_response(fd, status_code, "{\"status\":\"error\"}");
+        return;
+    }
+    snprintf(json, json_len, "{\"status\":\"error\",\"error\":\"%s\"}", escaped);
     send_json_response(fd, status_code, json);
+    free(json);
 }
 
 static void send_success(int fd, const char* data_json) {
     if (data_json) {
-        char json[HTTP_SERVER_BUF_SIZE];
-        snprintf(json, sizeof(json), "{\"status\":\"ok\",\"data\":%s}", data_json);
+        size_t json_len = 32 + strlen(data_json);  // {"status":"ok","data":} + data_json
+        char* json = malloc(json_len);
+        if (!json) {
+            send_json_response(fd, 200, "{\"status\":\"ok\"}");
+            return;
+        }
+        snprintf(json, json_len, "{\"status\":\"ok\",\"data\":%s}", data_json);
         send_json_response(fd, 200, json);
+        free(json);
     } else {
         send_json_response(fd, 200, "{\"status\":\"ok\"}");
     }
@@ -270,9 +291,15 @@ static void handle_cache_get(int fd, cache_t* cache, const char* key) {
     
     char escaped[HTTP_SERVER_BUF_SIZE];
     json_escape(value, escaped, sizeof(escaped));
-    char json[HTTP_SERVER_BUF_SIZE + 64];
-    snprintf(json, sizeof(json), "{\"key\":\"%s\",\"value\":\"%s\"}", decoded_key, escaped);
+    size_t json_len = 32 + strlen(decoded_key) + strlen(escaped);
+    char* json = malloc(json_len);
+    if (!json) {
+        send_error(fd, 500, "out of memory");
+        return;
+    }
+    snprintf(json, json_len, "{\"key\":\"%s\",\"value\":\"%s\"}", decoded_key, escaped);
     send_success(fd, json);
+    free(json);
 }
 
 static void handle_cache_put(int fd, cache_t* cache, const char* key, const char* body) {
@@ -740,8 +767,10 @@ static void route_request(int fd, http_request_t* req, cache_t* cache) {
         size_t key_len = strlen(key);
         if (key_len > 7 && strcmp(key + key_len - 7, "/exists") == 0) {
             char real_key[CACHE_MAX_KEY_LEN];
-            strncpy(real_key, key, key_len - 7);
-            real_key[key_len - 7] = '\0';
+            size_t copy_len = key_len - 7;
+            if (copy_len >= CACHE_MAX_KEY_LEN) copy_len = CACHE_MAX_KEY_LEN - 1;
+            memcpy(real_key, key, copy_len);
+            real_key[copy_len] = '\0';
             if (req->method == HTTP_GET) {
                 handle_cache_exists(fd, cache, real_key);
             } else {

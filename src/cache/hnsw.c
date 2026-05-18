@@ -638,16 +638,15 @@ size_t hnsw_search_exact(hnsw_index_t* idx, const float* query, int top_k,
     }
     
     // 按距离排序（升序）
-    for (size_t i = 0; i < count && i < (size_t)top_k; i++) {
-        size_t min_idx = i;
-        for (size_t j = i + 1; j < count; j++) {
-            if (scores[j].dist < scores[min_idx].dist) {
-                min_idx = j;
-            }
+    if (count > 1) {
+        // 使用 qsort 进行全量排序，然后取前 top_k
+        // 对于小规模数据，qsort 开销可忽略；对于大规模数据，比选择排序快
+        int compare_score(const void* a, const void* b) {
+            float da = ((const score_t*)a)->dist;
+            float db = ((const score_t*)b)->dist;
+            return (da < db) ? -1 : (da > db) ? 1 : 0;
         }
-        score_t tmp = scores[i];
-        scores[i] = scores[min_idx];
-        scores[min_idx] = tmp;
+        qsort(scores, count, sizeof(score_t), compare_score);
     }
     
     size_t result_count = count < (size_t)top_k ? count : (size_t)top_k;
