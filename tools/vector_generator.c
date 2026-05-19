@@ -19,7 +19,7 @@ typedef struct {
     char text[MAX_TEXT_LEN];
 } item_t;
 
-static void build_text(const char* json, char* text, int max_len);
+static void build_text(const char* name, const char* json, char* text, int max_len);
 static void extract_name(const char* key, char* name, int max_len);
 static void namespace_to_filename(const char* ns, char* out, size_t out_len);
 static int file_exists(const char* path);
@@ -223,11 +223,11 @@ int main(int argc, char** argv) {
             capacity = new_capacity;
         }
         
-        build_text(value, items[item_count].text, MAX_TEXT_LEN);
+        build_text(name, value, items[item_count].text, MAX_TEXT_LEN);
         strncpy(items[item_count].name, name, sizeof(items[item_count].name) - 1);
         items[item_count].name[sizeof(items[item_count].name) - 1] = '\0';
         
-        if (strlen(items[item_count].text) > 10) {
+        if (strlen(items[item_count].text) > 50) {
             item_count++;
         }
     }
@@ -482,33 +482,68 @@ static int extract_field(const char* json, const char* field, char* out, int max
     return i;
 }
 
-static void build_text(const char* json, char* text, int max_len) {
+static void build_text(const char* name, const char* json, char* text, int max_len) {
     char sig[512] = {0};
-    char doc[512] = {0};
-    char content[1024] = {0};
+    char doc[1024] = {0};
+    char content[4096] = {0};
+    char lang[32] = {0};
     
     extract_field(json, "signature", sig, sizeof(sig));
     extract_field(json, "docstring", doc, sizeof(doc));
     extract_field(json, "content", content, sizeof(content));
+    extract_field(json, "language", lang, sizeof(lang));
     
-    char lines[5][256];
+    // Collect up to 10 non-empty code lines
+    char lines[10][256];
     int line_count = 0;
     char* p = content;
-    while (*p && line_count < 5) {
+    while (*p && line_count < 10) {
+        // Skip leading whitespace on each line
+        while (*p && (*p == ' ' || *p == '\t')) p++;
+        
         int i = 0;
         while (*p && *p != '\n' && i < 255) {
             lines[line_count][i++] = *p++;
         }
         lines[line_count][i] = '\0';
-        line_count++;
+        
+        // Only count non-empty lines
+        if (i > 0) {
+            line_count++;
+        }
         if (*p == '\n') p++;
     }
     
     int n = 0;
-    if (sig[0]) n += snprintf(text + n, max_len - n, "%s\n", sig);
-    if (doc[0]) n += snprintf(text + n, max_len - n, "%s\n", doc);
+    
+    // 1. Function name is the strongest semantic signal
+    if (name[0]) {
+        n += snprintf(text + n, max_len - n, "%s ", name);
+    }
+    
+    // 2. Language context
+    if (lang[0]) {
+        n += snprintf(text + n, max_len - n, "(%s) ", lang);
+    }
+    
+    // 3. Signature
+    if (sig[0]) {
+        n += snprintf(text + n, max_len - n, "%s ", sig);
+    }
+    
+    // 4. Docstring
+    if (doc[0]) {
+        n += snprintf(text + n, max_len - n, "%s ", doc);
+    }
+    
+    // 5. Code body (non-empty lines)
     for (int i = 0; i < line_count && n < max_len - 1; i++) {
-        n += snprintf(text + n, max_len - n, "%s\n", lines[i]);
+        n += snprintf(text + n, max_len - n, "%s ", lines[i]);
+    }
+    
+    // Trim trailing space
+    if (n > 0 && text[n-1] == ' ') {
+        text[n-1] = '\0';
     }
 }
 

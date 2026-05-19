@@ -145,8 +145,8 @@ $(CACHE_SNAPSHOT): $(TOOLS_DIR)/cache_snapshot.c $(LIB)
 $(VECTOR_GENERATOR): $(TOOLS_DIR)/vector_generator.c $(ONNX_EMBEDDER_LIB) $(LIB)
 	$(CC) $(CFLAGS) $(ONNX_CFLAGS) -o $@ $< -L. -lmydb -lonnx_embedder $(ONNX_LDFLAGS) -lm -ldl -Wl,-rpath,'$$ORIGIN/..'
 
-$(VECTOR_SEARCH): $(TOOLS_DIR)/vector_search.c $(ONNX_EMBEDDER_LIB)
-	$(CC) $(CFLAGS) $(ONNX_CFLAGS) -o $@ $< -L. -lonnx_embedder $(ONNX_LDFLAGS) -lm -ldl -Wl,-rpath,'$$ORIGIN/..'
+$(VECTOR_SEARCH): $(TOOLS_DIR)/vector_search.c $(ONNX_EMBEDDER_LIB) $(LIB)
+	$(CC) $(CFLAGS) $(ONNX_CFLAGS) -o $@ $< -L. -lmydb -lonnx_embedder $(ONNX_LDFLAGS) -lm -ldl -Wl,-rpath,'$$ORIGIN/..'
 
 # ONNX Embedder shared library (for Python FFI)
 ONNX_EMBEDDER_OBJ = $(OBJ_DIR)/embedding/onnx_embedder.o

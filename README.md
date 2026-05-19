@@ -649,26 +649,22 @@ make tools/vector_search
 # 限定在特定项目搜索
 ./tools/vector_search ./ai_code_memory "generate image from text" 5 /code/local/stable-diffusion.cpp
 
-# 输出：
-# Cache: ./ai_code_memory
-# Query: "generate image from text"
-# Max results: 5
-# 
-# Found 1 vector source(s):
-#   [1] /code/local/stable-diffusion.cpp (41563 vectors)
-# 
-# Loading embedder...
-# Encoding query...
-# Searching /code/local/stable-diffusion.cpp...
-# 
-# Top 5 results across 1 source(s):
-# Name                                               Score
-# ----                                               -----
-# generate_image                                     0.7823
-# txt2img                                            0.7654
-# sd_image_t                                         0.7432
-# upscale_image                                      0.7211
-# preprocess_image                                   0.6987
+# Rich 模式：返回完整代码上下文（AI 最友好的方式）
+./tools/vector_search --rich ./ai_code_memory "generate image from text" 5
+
+# JSON 模式：结构化输出，AI 可直接解析
+./tools/vector_search --json --rich ./ai_code_memory "generate image from text" 5
+
+# 输出示例（--rich 模式）：
+# [1] txt2img (0.6245)
+#     Signature: sd_image_t* txt2img(...)
+#     Location:  examples/cli/main.cpp:234
+#     Language:  cpp
+#     Code:
+#       | sd_image_t* txt2img(...) {
+#       |     // generate image from text prompt
+#       |     ...
+#       | }
 ```
 
 ### 查询示例
@@ -724,53 +720,62 @@ AI Agent 可以通过调用 `vector_search` C 程序来查询源码：
 
 ```python
 import subprocess
-import os
+import json
 
-def search_code(query, cache_dir="./ai_code_memory", top_k=5, namespace=None):
-    """AI Agent 调用 C 工具进行语义搜索（支持任意项目）"""
-    cmd = ["./tools/vector_search", cache_dir, query, str(top_k)]
+def search_code(query, cache_dir="./ai_code_memory", top_k=5, namespace=None, rich=True):
+    """AI Agent 调用 C 工具进行语义搜索（支持任意项目）
+    
+    Args:
+        query: 自然语言查询
+        cache_dir: 缓存目录
+        top_k: 返回结果数量
+        namespace: 限定项目（如 /code/local/my-project）
+        rich: 是否返回完整代码上下文（文件、行号、签名、代码）
+    
+    Returns:
+        JSON 格式的搜索结果，包含 name, score, file, line_start, signature, content
+    """
+    cmd = ["./tools/vector_search", "--json"]
+    if rich:
+        cmd.append("--rich")
+    cmd.extend([cache_dir, query, str(top_k)])
     if namespace:
         cmd.append(namespace)
     
     result = subprocess.run(cmd, capture_output=True, text=True)
     
-    # 解析输出
-    lines = result.stdout.strip().split('\n')
-    results = []
-    in_results = False
+    if result.returncode != 0:
+        print(f"Search failed: {result.stderr}")
+        return []
     
-    for line in lines:
-        if line.startswith("Top "):
-            in_results = True
-            continue
-        if in_results and len(line) > 50:
-            # Format: "name                          score"
-            parts = line.rsplit(None, 1)
-            if len(parts) == 2:
-                try:
-                    score = float(parts[1])
-                    results.append({
-                        "name": parts[0].strip(),
-                        "score": score
-                    })
-                except ValueError:
-                    continue
-    
-    return results
+    try:
+        data = json.loads(result.stdout)
+        return data.get("results", [])
+    except json.JSONDecodeError:
+        print("Failed to parse JSON output")
+        return []
 
 # AI Agent 使用示例（支持任意项目）
 code_context = "我需要生成图像的函数"
 
-# 搜索所有项目
-results = search_code("generate image from text", top_k=5)
+# 搜索所有项目，获取完整上下文
+results = search_code("generate image from text", top_k=5, rich=True)
 
 # 或限定在特定项目
 results = search_code("generate image", top_k=3, namespace="/code/local/my-project")
 
-# 结果注入提示词
+# 结果注入提示词（AI 可直接使用）
 prompt = f"用户需要: {code_context}\n\n相关源码:\n"
 for r in results:
-    prompt += f"- {r['name']} (相似度: {r['score']:.2%})\n"
+    prompt += f"\n## {r['name']} (相似度: {r['score']:.2%})\n"
+    if r.get('file'):
+        prompt += f"位置: {r['file']}:{r['line_start']}\n"
+    if r.get('signature'):
+        prompt += f"签名: {r['signature']}\n"
+    if r.get('content'):
+        prompt += f"代码:\n```cpp\n{r['content'][:1000]}\n```\n"
+
+# 现在 prompt 包含完整的代码上下文，AI 可以直接分析和生成代码
 ```
 
 ### 完整使用示例
