@@ -556,525 +556,254 @@ cache_search_vector(cache, query_vector, 384, top_k=5, min_score=0.3, &opts, &re
 - 搜索速度：~10ms/查询（HNSW 索引，>1000 向量自动启用）
 - 向量维度：384 维（sentence-transformers all-MiniLM-L6-v2）
 
-## AI Agent 编码助手
+## AI Agent 源码探索（C 工具链）
 
-AI Agent 编码时实时查询第三方库源码，基于已索引的代码记忆提供准确的函数签名、实现细节和使用示例。
+基于 C 语言实现的 AI Agent 代码记忆系统，提供极速的源码索引、向量生成和自然语言语义搜索。
 
-### 功能
+### 核心工具
 
-- **自动解析 import/include**：识别代码中的第三方依赖
-- **函数签名查询**：返回函数名、参数、返回类型
-- **精确位置定位**：文件路径 + 行号，AI 自己去查看实现
-- **多语言支持**：C/C++、Python、Go、Rust、JavaScript/TypeScript
-- **轻量级存储**：只存签名和位置，不存完整实现（10MB 索引 891 文件）
-- **语义搜索**：自然语言查询函数（"图像生成" → `generate_image`）
-- **调用图分析**：who-calls-whom 关系分析
-- **极速查询**：0.1ms 响应（Hash 索引 O(1)）
-
-### 使用方式
-
-**1. 前提：已索引第三方库**
-
-```bash
-# 索引 hnswlib 源码
-python3 tools/ai_code_memory.py ingest https://github.com/nmslib/hnswlib
-
-# 索引 onnxruntime
-python3 tools/ai_code_memory.py ingest https://github.com/microsoft/onnxruntime
-```
-
-**2. Python API 实时查询**
-
-```python
-from tools.coding_assistant import CodingAssistant
-
-assistant = CodingAssistant("./ai_code_memory")
-
-# AI 正在写这段代码
-code_context = '''
-#include <hnswlib/hnswalg.h>
-
-int main() {
-    hnswlib::HNSWIndex<float> index(128, 10000);
-    index.addPoint(data, label);
-}
-'''
-
-# 查询第三方库详情
-info = assistant.query_context(code_context, current_repo="/code/my_project")
-
-# 返回结果：
-# - hnswlib::HNSWIndex 的完整定义和构造函数签名
-# - addPoint 的实现和所有重载
-# - 其他项目使用 addPoint 的真实示例
-# - 同文件的相关函数（如 searchKnn、saveIndex）
-```
-
-**3. 获取快速帮助（插入 AI 提示词）**
-
-```python
-# 获取适合插入 AI 提示词的 Markdown 格式帮助
-help_text = assistant.get_quick_help("addPoint", repo_hint="/code/hnswlib/hnswlib")
-
-# 返回示例：
-# ### addPoint
-# **定义**: `hnswalg.h:142`
-# **类型**: function
-# **签名**: `void addPoint(const void *data_point, labeltype label)`
-#
-# **源码**:
-# ```c
-# template <typename dist_t>
-# void HNSWIndex<dist_t>::addPoint(const void *data_point, labeltype label) {
-#     std::unique_lock<std::mutex> lock(global);
-#     int level = getRandomLevel(mult...);
-#     // ...
-# }
-# ```
-#
-# **使用示例**:
-# 1. `test_add_point` @ `tests/cpp/main.cpp:45`
-#    ```
-#    index.addPoint(data, i);
-#    ```
-```
-
-**4. CLI 用法**
-
-```bash
-# 索引项目
-python3 tools/ai_code_memory.py ingest /path/to/project
-
-# 查询符号位置和签名
-python3 tools/ai_code_memory.py symbol generate_image --repo /code/local/stable-diffusion.cpp
-
-# 调用图分析：谁调用了这个函数？
-python3 tools/ai_code_memory.py callers "generate_image" /code/local/stable-diffusion.cpp
-
-# 调用图分析：这个函数调用了谁？
-python3 tools/ai_code_memory.py callees "main" /code/local/stable-diffusion.cpp
-
-# 语义搜索：用自然语言查找函数（默认已生成向量）
-python3 tools/ai_code_memory.py semantic-search "图像生成" /code/local/stable-diffusion.cpp
-
-# 分析代码上下文（识别 import 并查询相关库）
-python3 tools/coding_assistant.py analyze '
-#include "stable-diffusion.h"
-sd_ctx_t* ctx = new_sd_ctx(params);
-' --repo /code/my_project
-
-# 获取快速帮助文本
-python3 tools/coding_assistant.py help "new_sd_ctx" --repo /code/local/stable-diffusion.cpp
-```
-
-### 存储设计（轻量级）
-
-**核心原则：只存签名和位置，不存完整实现**
-
-```
-传统存储（臃肿）：
-/code/repo/chunks/file/func    → 500行代码 (100KB)
-/code/repo/symbols/name        → 符号列表
-/code/repo/vectors/id          → 384维向量 (1.5KB)
-总计：100MB+ / 项目
-
-轻量级存储（精简）：
-/code/repo/_meta/info          → 元数据
-/code/repo/symbols/name        → {file, line, signature}
-总计：10MB / 项目 (stable-diffusion.cpp 891文件)
-```
-
-**为什么这样设计：**
-1. **精确位置 > 完整内容**：知道 `src/foo.cpp:42` 比存 500 行代码更有用
-2. **签名 > 实现**：`void foo(int x)` 足以让 AI 理解接口
-3. **实时查看 > 预存内容**：AI 根据位置自己去读源码文件
-4. **速度 > completeness**：0.1ms 查询比存所有内容更重要
-
-**性能基准（含向量生成）：**
-
-| 项目 | 文件数 | 符号数 | 索引时间 | 存储大小 | 查询速度 |
-|------|--------|--------|----------|----------|----------|
-| stable-diffusion.cpp | 891 | 36,138 | ~15分钟 | ~150MB | 0.1ms |
-| sd_mini (4文件) | 4 | 439 | ~25秒 | ~3MB | 0.1ms |
-| redis | ~200 | ~15,000 | ~5分钟 | ~50MB | 0.1ms |
-
-**索引时间说明：**
-- 符号解析：3秒（891文件）
-- 向量生成：~13分钟（36,138符号 × 23ms/符号）
-- 如果不需要语义搜索，使用 `--skip-vectors` 可在 3 秒内完成
-
-### GPU 加速向量生成（TensorRT 10）
-
-**性能提升（RTX 3080）**：
-
-| 方案 | 速度 | 索引时间 | 状态 |
-|------|------|----------|------|
-| Python CPU | 43 items/s | ~14 分钟 | ✅ 可用 |
-| C++ 多线程 CPU | 88 items/s | ~7 分钟 | ✅ 可用 |
-| **CUDA GPU** | **213 items/s** | **~3 分钟** | ✅ **默认** |
-| **TensorRT 10 FP16** | **325 items/s** | **~2 分钟** | ✅ **生产级** |
-
-**依赖**：
-
-| 组件 | 版本 | 来源 | 说明 |
+| 工具 | 文件 | 功能 | 技术 |
 |------|------|------|------|
-| ONNX Runtime | 1.23.2 | `pip install onnxruntime-gpu` | GPU 推理运行时 |
-| TensorRT | 10.16.1 | `/opt/TensorRT-10/` | NVIDIA 推理优化 |
-| cuDNN | 9.x | conda 或系统包 | GPU 深度学习库 |
-| CUDA | 12.x | `/usr/local/cuda` | GPU 计算框架 |
+| **代码索引** | `tools/ai_code_memory.py` | 解析源码，生成符号索引 | ctags + Python |
+| **向量生成** | `tools/vector_generator.c` | GPU 编码语义向量 | C + TensorRT |
+| **语义搜索** | `tools/vector_search.c` | 自然语言查询代码 | C + 二进制向量 |
 
-**关键库文件**（项目目录已包含）：
-```
-libonnxruntime.so.1.23.2       # ONNX Runtime GPU 版
-libnvinfer.so.10.16.1          # TensorRT 10 核心
-libnvonnxparser.so.10.16.1     # TensorRT ONNX 解析器
-libnvinfer_builder_resource_sm86.so.10.16.1  # RTX 3080 架构资源
-libcudnn.so.9                  # cuDNN 9
-```
+### 完整工作流程
 
-**环境配置**：
+**Step 1: 扫描代码目录生成索引**
+
 ```bash
+# 索引源码项目（仅生成符号索引，不包含向量）
+python3 tools/ai_code_memory.py ingest /opt/stable-diffusion.cpp --skip-vectors
+
+# 输出：
+# Phase 1: Parsing symbols with ctags...
+#   Found 41267 raw tags
+# Phase 3: Building code chunks...
+#   Created 41598 code chunks
+# Phase 6: Storing to memory...
+# Ingest complete!  Chunks: 41598, Symbols: 31020
+```
+
+**存储结构**：
+```
+ai_code_memory/
+├── cache.bin              # 代码片段、符号、调用图
+├── index.bin              # 持久化索引（Hash + Sorted + Namespace）
+└── vectors/               # 语义向量（由 Step 2 生成）
+    └── code_local_stable-diffusion.cpp.bin   # 二进制向量文件
+    └── code_local_stable-diffusion.cpp.idx   # 名称→偏移索引
+```
+
+**Step 2: 生成向量索引（C + TensorRT GPU）**
+
+```bash
+# 设置环境变量（确保 TensorRT 库可被加载）
 export LD_LIBRARY_PATH=/home/dministrator/my_db:\
-    /home/dministrator/anaconda3/envs/dl/lib:$LD_LIBRARY_PATH
+    /opt/TensorRT-10/lib:\
+    /home/dministrator/anaconda3/envs/dl/lib:\
+    $LD_LIBRARY_PATH
+
+# 编译向量生成工具（首次使用）
+make vector_generator
+
+# 生成语义向量（自动使用 GPU TensorRT 加速）
+./tools/vector_generator ./ai_code_memory /code/local/stable-diffusion.cpp
+
+# 输出：
+# Loading embedder...
+#   Using TensorRT GPU acceleration (FP16)
+# Collecting chunks...
+#   Found 41563 items to encode
+# Encoding with batch size 512...
+#   Progress: 40960/41563
+# Encoded 41563 items in 17.9s (2324.6 items/s)
+# Storing vectors to binary file...
+#   Stored 41563 vectors in 0.1s (415227 items/s)
+# Done! Total: 19.9s
 ```
 
-**实现原理**：
+**性能对比**：
 
-1. **C++ 嵌入器**（`src/embedding/onnx_embedder.c`）：
-   - 纯 C 实现，零依赖 Python 运行时
-   - Tokenizer：WordPiece 哈希表，30522 词表
-   - 推理：ONNX Runtime C API → TensorRT Execution Provider
-   - 自动 fallback：TensorRT → CUDA → CPU
+| 方案 | 速度 | 41K 向量耗时 | 显存 |
+|------|------|-------------|------|
+| Python CPU | 43 items/s | ~14 分钟 | 0 GB |
+| C + CUDA | 213 items/s | ~3 分钟 | ~2 GB |
+| **C + TensorRT 10** | **2324 items/s** | **~18 秒** | **~4 GB** |
 
-2. **多线程批处理**（`tools/vector_indexer_v2.cpp`）：
-   ```
-   读取 chunks → 分批次(BATCH=32) → 线程池编码 → 写回 cache
-   ```
-   - ThreadPool + 任务队列
-   - 预分配向量内存，避免 malloc 开销
-   - 进度实时输出
+**Step 3: AI Agent 使用 C 应用探索源码**
 
-3. **持久化**：
-   - 向量存储为 `{name: "func", vector: [0.1, ...]}` JSON
-   - 与 chunk 数据共用 namespace：`/code/repo/vectors/{func_name}`
-
-**使用**：
 ```bash
-# 完整索引（自动检测 GPU）
-python3 tools/ai_code_memory.py ingest /path/to/project
+# 编译语义搜索工具（首次使用）
+gcc -O2 -o tools/vector_search tools/vector_search.c \
+    -I./include -L. -lmydb -lonnx_embedder \
+    -Wl,-rpath,'$ORIGIN/..' -lm -ldl
 
-# 跳过向量（快速索引，仅符号+调用图）
-python3 tools/ai_code_memory.py ingest /path/to/project --skip-vectors
+# 自然语言搜索代码
+./tools/vector_search ./ai_code_memory "generate image from text" 5
 
-# 后续补生成向量
-python3 tools/ai_code_memory.py index-vectors /code/local/project
+# 输出：
+# Query: "generate image from text"
+# Vectors: 41563, Dim: 768
+# 
+# Top 5 results:
+# Name                                               Score
+# ----                                               -----
+# setjmp.h_2                                         0.4414
+# data_34                                            0.4361
+# IMkvWriter_1                                       0.4361
+# ErnieImageAttention                                0.4294
+# DataUrl                                            0.4246
+```
+
+### 查询示例
+
+**查询图像生成相关函数**：
+```bash
+./tools/vector_search ./ai_code_memory "upscale image resolution" 5
+```
+
+**查询 CUDA 相关代码**：
+```bash
+./tools/vector_search ./ai_code_memory "CUDA kernel for GPU" 5
+```
+
+**查询内存分配**：
+```bash
+./tools/vector_search ./ai_code_memory "allocate memory for tensors" 5
+```
+
+### 架构设计
+
+**为什么用 C 而不是 Python？**
+
+| 问题 | Python | C |
+|------|--------|---|
+| TensorRT 加载 | 环境变量复杂，经常失败 | 链接时直接解析，稳定 |
+| 速度 | 400 items/s (CUDA fallback) | 2300+ items/s (TensorRT) |
+| 内存 | Python 对象开销大 | 直接操作二进制文件 |
+| 部署 | 依赖 Python 环境 | 独立可执行文件 |
+
+**向量存储格式**：
+```
+vectors/code_local_stable-diffusion.cpp.bin
+├─ Header: [count:4][dim:4]           # 41563, 768
+└─ Vectors: [float768] × 41563        # 原始 float32 数组
+
+vectors/code_local_stable-diffusion.cpp.idx
+└─ JSON: {"func_name": offset, ...}   # 名称到字节偏移的映射
+```
+
+**搜索流程**：
+```
+用户查询 → Tokenize → ONNX Runtime (TensorRT) → 768维向量
+                                              ↓
+                                           余弦相似度
+                                              ↓
+读取 .bin 文件 → 遍历所有向量 → 计算相似度 → Top-K 排序 → 输出结果
 ```
 
 ### 与 AI Agent 集成
 
-在 AI Agent 的代码生成循环中集成编码助手：
-
-```
-1. Agent 生成代码草稿
-2. 自动调用 assistant.analyze_imports() 提取第三方依赖
-3. 调用 assistant.query_context() 获取源码细节
-4. 将函数签名/示例/注意事项注入提示词
-5. Agent 基于准确信息生成最终代码
-```
-
-**集成示例**：
+AI Agent 可以通过调用 `vector_search` C 程序来查询源码：
 
 ```python
-def generate_code_with_assistant(agent, prompt, assistant):
-    # 1. Agent 生成初始代码
-    draft_code = agent.generate(prompt)
-    
-    # 2. 提取第三方依赖
-    imports = assistant.analyze_imports(draft_code)
-    
-    # 3. 查询相关库信息
-    context_info = assistant.query_context(draft_code, current_repo="/code/my_project")
-    
-    # 4. 构建增强提示词
-    enhanced_prompt = prompt + "\n\n第三方库参考信息：\n"
-    for sym_name, info in context_info["symbol_info"].items():
-        if info.get("definition"):
-            d = info["definition"]
-            enhanced_prompt += f"\n{d['name']} ({d['kind']})\n"
-            if d.get("signature"):
-                enhanced_prompt += f"签名: {d['signature']}\n"
-            if d.get("docstring"):
-                enhanced_prompt += f"文档: {d['docstring'][:300]}\n"
-    
-    # 5. 基于准确信息重新生成
-    final_code = agent.generate(enhanced_prompt)
-    return final_code
-```
-
-### 工作流程
-
-```
-AI Agent 编码
-    │
-    ▼
-提取 import / include
-    │
-    ▼
-匹配 memory 中的仓库
-    │
-    ▼
-查询符号定义 + 示例
-    │
-    ▼
-注入提示词 → 生成准确代码
-```
-
-### 调用图分析（Who-Calls-Whom）
-
-分析函数间的调用关系，帮助 AI 理解代码流程：
-
-```bash
-# 查看谁调用了 generate_image
-$ python3 tools/ai_code_memory.py callers "generate_image" /code/local/stable-diffusion.cpp
-
-Who calls 'generate_image' in /code/local/stable-diffusion.cpp?
-
-  Found 2 callers:
-
-  1. execute_img_gen_job
-      Location: examples/server/async_jobs.cpp:166
-      Signature: (ServerRuntime & runtime,AsyncGenerationJob & job,...)
-
-  2. execute_sync_img_gen_request
-      Location: examples/server/routes_openai.cpp:223
-      Signature: (ServerRuntime & runtime,ImgGenJobRequest & request,...)
-
-# 查看 new_sd_ctx 调用了谁
-$ python3 tools/ai_code_memory.py callees "new_sd_ctx" /code/local/stable-diffusion.cpp
-
-What does 'new_sd_ctx' call in /code/local/stable-diffusion.cpp?
-
-  Found 5 callees:
-
-  1. StableDiffusionGGML
-  2. new_sd_ctx
-  3. init
-  4. free
-  5. malloc
-```
-
-**用途：**
-- 理解函数在代码中的位置和影响范围
-- 追踪数据流（谁生成图像 -> 谁调用生成函数）
-- 识别关键路径（入口函数 -> 核心逻辑 -> 底层实现）
-
-### 语义搜索（自然语言查询）
-
-当不知道准确的函数名时，用自然语言描述来搜索：
-
-```bash
-# 1. 索引项目（默认包含向量生成）
-$ python3 tools/ai_code_memory.py ingest /path/to/project
-
-# 2. 语义搜索
-$ python3 tools/ai_code_memory.py semantic-search "图像生成函数" /code/local/stable-diffusion.cpp
-
-Semantic search: '图像生成函数' in /code/local/stable-diffusion.cpp
-Found 5 results:
-
-[1] generate_image
-    Similarity: 87.3%
-    Location: src/stable-diffusion.cpp:3394
-    Signature: (sd_ctx_t * sd_ctx,const sd_img_gen_params_t * sd_img_gen_params)
-
-[2] generate_video
-    Similarity: 82.1%
-    Location: src/stable-diffusion.cpp:3420
-    Signature: (sd_ctx_t * sd_ctx,const sd_vid_gen_params_t * sd_vid_gen_params,...)
-```
-
-**Python API：**
-```python
-from tools.ai_code_memory import AICodeMemory
-
-memory = AICodeMemory("./ai_code_memory")
-
-# 语义搜索（不需要知道准确的函数名）
-results = memory.semantic_search("图像生成", "/code/local/stable-diffusion.cpp", top_k=5)
-for r in results:
-    print(f"{r['name']}: {r['similarity']*100:.1f}%")
-    print(f"  {r['file']}:{r['line']}")
-    print(f"  {r['signature']}")
-```
-
-**设计特点：**
-- **默认生成**：ingest 时自动为所有符号生成向量
-- **自然语言**：支持中英文描述，如 "image generation" 或 "图像生成"
-- **语义理解**：能理解同义词和相关概念
-- **快速跳过**：如果不需要语义搜索，使用 `--skip-vectors` 可在 3 秒内完成索引
-
-### AI Agent 完整使用指南
-
-**场景：AI Agent 需要理解 libmobi 项目来生成代码**
-
-**Step 1: 管理员索引项目（一次）**
-```bash
-# 索引 libmobi 源码
-python3 tools/ai_code_memory.py ingest /opt/libmobi
-
-# 输出：
-# Phase 1: Parsing symbols with ctags...
-#   Found 3896 raw tags
-# Phase 3: Building code chunks...
-#   Created 3495 code chunks
-# Phase 7: Generating semantic vectors...
-#   Generating embeddings for 3484 symbols (TensorRT GPU)
-#   Progress: 3484/3484 (325.2 items/s)
-# Ingest complete!  Memory used: 2.5 MB
-```
-
-**Step 2: AI Agent 查询（实时）**
-
-```python
-from mydb.cache import open_cache
+import subprocess
 import json
 
-cache = open_cache("./ai_code_memory", 500 * 1024 * 1024)
-repo = "/code/local/libmobi"
+def search_code(query, cache_dir="./ai_code_memory", top_k=5):
+    """AI Agent 调用 C 工具进行语义搜索"""
+    env = {
+        "LD_LIBRARY_PATH": "/home/dministrator/my_db:/opt/TensorRT-10/lib:/home/dministrator/anaconda3/envs/dl/lib"
+    }
+    
+    result = subprocess.run(
+        ["./tools/vector_search", cache_dir, query, str(top_k)],
+        capture_output=True,
+        text=True,
+        env={**os.environ, **env}
+    )
+    
+    # 解析输出，提取结果
+    lines = result.stdout.strip().split('\n')
+    results = []
+    in_results = False
+    
+    for line in lines:
+        if line.startswith("Top "):
+            in_results = True
+            continue
+        if in_results and line.startswith("  "):
+            parts = line.strip().rsplit(None, 1)
+            if len(parts) == 2:
+                name, score = parts
+                results.append({
+                    "name": name.strip(),
+                    "score": float(score),
+                    "location": get_location(name.strip())  # 从 cache 查位置
+                })
+    
+    return results
 
-# 场景 A：知道函数名，查签名和位置
-val = cache.get(f"{repo}/symbols/mobi_init")
-if val:
-    data = json.loads(val)
-    sym = data[0]
-    print(f"函数: {sym['name']}")
-    print(f"位置: {sym['file']}:{sym['line']}")
-    print(f"签名: {sym['signature']}")
-    # AI 读取 src/memory.c:25 获取完整实现
+# AI Agent 使用示例
+code_context = "我需要生成图像的函数"
+results = search_code("generate image from text", top_k=3)
 
-# 场景 B：不知道函数名，用自然语言搜索
-# 先用语义搜索找到最相关的函数
-from tools.ai_code_memory import AICodeMemory
-memory = AICodeMemory("./ai_code_memory")
-results = memory.semantic_search("内存分配", repo, top_k=5)
+# 结果注入提示词
+prompt = f"用户需要: {code_context}\n\n相关源码:\n"
 for r in results:
-    print(f"{r['name']} ({r['similarity']*100:.1f}%)")
-    print(f"  {r['file']}:{r['line']}")
+    prompt += f"- {r['name']} (相似度: {r['score']:.2%})\n"
+    if r.get('location'):
+        prompt += f"  位置: {r['location']['file']}:{r['location']['line']}\n"
 
-# 场景 C：理解代码流程，查调用关系
-# 谁调用了 mobi_init？
-callers_val = cache.get(f"{repo}/callers/mobi_init")
-if callers_val:
-    callers = json.loads(callers_val)
-    print(f"被 {callers['count']} 个函数调用:")
-    for name in callers['callers']:
-        print(f"  - {name}")
-
-# 场景 D：浏览某个文件的所有函数
-results = cache.search_prefix(f"{repo}/chunks/src/memory.c/", max_results=100)
-for r in results:
-    data = json.loads(r['value'])
-    print(f"  {data['name']} (line {data['line_start']})")
-
-cache.close()
+# AI 基于准确的源码位置生成代码
 ```
 
-**Step 3: 在 AI 提示词中使用**
+### 完整使用示例
 
-```python
-def build_ai_prompt(query, repo="/code/local/libmobi"):
-    """为 AI Agent 构建包含源码信息的增强提示词"""
-    memory = AICodeMemory("./ai_code_memory")
-    
-    # 1. 语义搜索找到相关函数
-    results = memory.semantic_search(query, repo, top_k=3)
-    
-    prompt = f"用户问题: {query}\n\n"
-    prompt += "相关源码信息:\n"
-    
-    for i, r in enumerate(results, 1):
-        # 获取完整代码片段
-        chunk_key = f"{repo}/chunks/{r['file']}/{r['name']}"
-        chunk_val = cache.get(chunk_key)
-        if chunk_val:
-            chunk = json.loads(chunk_val)
-            prompt += f"\n{i}. {r['name']} ({r['file']}:{r['line']})\n"
-            prompt += f"   签名: {chunk.get('signature', 'N/A')}\n"
-            prompt += f"   代码:\n{chunk['content'][:500]}\n"
-    
-    return prompt
-
-# 使用
-prompt = build_ai_prompt("如何初始化 mobi 数据结构？")
-# AI 根据提示词中的源码信息生成准确答案
-```
-
-**数据流**：
-```
-libmobi 源码
-    │
-    ▼  ingest (ctags + TensorRT)
-┌──────────────────────────────┐
-│ /code/local/libmobi/         │
-│ ├── symbols/mobi_init        │ → {file: "src/memory.c", line: 25, signature: "(void)"}
-│ ├── chunks/src/memory.c/...  │ → {content: "代码前10行", signature: "..."}
-│ ├── callers/mobi_init        │ → {count: 4, callers: ["split_hybrid", ...]}
-│ ├── callees/mobi_init        │ → {count: 5, callees: ["calloc", ...]}
-│ └── vectors/mobi_init        │ → {vector: [0.1, -0.2, ...]} (384维)
-└──────────────────────────────┘
-    │
-    ▼  AI Agent 查询
-语义搜索 "内存分配" → mobi_init (55%)
-                    → memory.h (47%)
-精确查询 mobi_init → src/memory.c:25
-调用图 mobi_init ← split_hybrid, loadfilename, mobi_load_file
-```
-
-**完整工作流示例**：
+**1. 管理员：索引新项目（一次性）**
 ```bash
-# 1. 索引（管理员做一次）
-$ python3 tools/ai_code_memory.py ingest /opt/libmobi
-# Found 3896 tags → 3495 chunks → 3484 vectors (TensorRT, 325 items/s)
+# 索引源码
+python3 tools/ai_code_memory.py ingest /opt/stable-diffusion.cpp --skip-vectors
 
-# 2. Agent 查询（运行时）
-$ python3 -c "
-from tools.ai_code_memory import AICodeMemory
-m = AICodeMemory('./ai_code_memory')
-
-# Agent 想知道如何分配内存
-results = m.semantic_search('内存分配', '/code/local/libmobi', top_k=3)
-for r in results:
-    print(f'{r[\"name\"]}: {r[\"file\"]}:{r[\"line\"]}')
-"
-# 输出:
-# memory.h: src/read.h:16
-# libmobi_memory_h: src/memory.h:12
-# mobi_randombytes_linux_getrandom: src/randombytes.c:236
-
-# 3. 查具体函数
-$ python3 tools/ai_code_memory.py symbol mobi_init /code/local/libmobi
-# mobi_init @ src/memory.c:25 (function)
-# Signature: (void)
-# Code preview:
-#   MOBIData * mobi_init(void) {
-#       MOBIData *m = NULL;
-#       m = calloc(1, sizeof(MOBIData));
-#       ...
-
-# 4. 查谁调用了它
-$ python3 tools/ai_code_memory.py callers mobi_init /code/local/libmobi
-# Called by: split_hybrid, loadfilename, mobi_load_file
+# 生成向量（C 工具，GPU 加速）
+export LD_LIBRARY_PATH=/home/dministrator/my_db:/opt/TensorRT-10/lib:/home/dministrator/anaconda3/envs/dl/lib:$LD_LIBRARY_PATH
+./tools/vector_generator ./ai_code_memory /code/local/stable-diffusion.cpp
 ```
 
-### 支持的导入解析
+**2. AI Agent：查询源码（运行时）**
+```bash
+# 语义搜索
+./tools/vector_search ./ai_code_memory "how to generate image" 5
 
-| 语言 | 解析模式 | 示例 |
-|------|---------|------|
-| **C/C++** | `#include` + `::` 符号 | `#include <hnswlib/hnswalg.h>` → `hnswlib` |
-| **Python** | `import` / `from...import` | `from redis import Redis` → `redis` |
-| **Go** | `import` 包路径 | `import "github.com/redis/go-redis/v9"` → `go-redis` |
-| **Rust** | `use` 路径 | `use std::collections::HashMap` → `std` |
-| **JS/TS** | `import` / `require` | `import {useState} from 'react'` → `react` |
+# 查具体函数签名
+python3 -c "
+from mydb.cache import open_cache
+cache = open_cache('./ai_code_memory')
+data = cache.get('/code/local/stable-diffusion.cpp/symbols/generate_image')
+print(data)
+"
+
+# 查调用关系
+python3 -c "
+from mydb.cache import open_cache
+cache = open_cache('./ai_code_memory')
+data = cache.get('/code/local/stable-diffusion.cpp/callers/generate_image')
+print(data)
+"
+```
+
+### 性能基准
+
+| 项目 | 文件数 | 符号数 | 索引时间 | 向量时间 | 查询速度 |
+|------|--------|--------|----------|----------|----------|
+| stable-diffusion.cpp | 891 | 41,563 | 6分12秒 | 18秒 | < 1秒 |
+| libmobi | 44 | 2,371 | 3秒 | 0.6秒 | < 0.1秒 |
+
+**时间说明**：
+- 索引时间：ctags 解析 + 存储到 cache
+- 向量时间：TensorRT GPU 编码（batch=512）
+- 查询速度：读取 127MB 二进制文件 + 计算余弦相似度
 
 ## 架构设计
 
