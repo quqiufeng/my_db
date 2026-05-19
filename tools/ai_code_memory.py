@@ -362,7 +362,7 @@ class AICodeMemory:
                 print("Phase 7: Generating semantic vectors...")
                 self._generate_vectors(chunks, namespace)
             else:
-                print("Phase 7: Skipping semantic vectors (run 'index-vectors' later to enable)")
+                print("Phase 7: Skipping semantic vectors (run C vector_generator tool later to enable)")
             
             self.cache.sync()
             print(f"\n{'='*60}")
@@ -663,163 +663,7 @@ class AICodeMemory:
         print(f"  Built call graph: {len(callers_map)} callers, {len(callees_map)} callees")
         print(f"  Saved {len(file_groups)} file indexes")
     
-    def generate_vectors_for_repo(self, repo: str, batch_size: int = 100) -> bool:
-        """
-        为仓库按需生成语义向量（用于自然语言搜索）
-        
-        直接从 chunks 中读取内容生成向量，不依赖 _text/ 键
-        
-        Args:
-            repo: 仓库 namespace，如 /code/local/stable-diffusion.cpp
-            batch_size: 每批处理的符号数
-        
-        Returns:
-            bool: 是否成功
-        """
-        try:
-            from mydb.onnx_embedder import OnnxEmbedder
-            embedder = OnnxEmbedder()
-            
-            # 获取所有待生成向量的符号（从 chunks 中读取）
-            prefix = f"{repo}/chunks/"
-            items = []
-            
-            # 遍历所有 key 查找 chunks
-            for key, value in self.cache.items():
-                if not key.startswith(prefix):
-                    continue
-                try:
-                    data = json.loads(value)
-                    func_name = key.split('/')[-1]
-                    
-                    # 检查是否已有向量
-                    vec_key = f"{repo}/vectors/{func_name}"
-                    if not self.cache.get(vec_key):
-                        # 构建文本：签名 + 文档 + 内容预览
-                        text = f"{data.get('signature', '')}\n{data.get('docstring', '')}\n{data.get('content', '')[:500]}"
-                        if text.strip():
-                            items.append((func_name, text))
-                except:
-                    pass
-            
-            if not items:
-                print("No new vectors to generate")
-                return True
-            
-            print(f"Generating vectors for {len(items)} symbols...")
-            start_time = time.time()
-            
-            for i in range(0, len(items), batch_size):
-                batch = items[i:i+batch_size]
-                
-                for func_name, text in batch:
-                    if not text.strip():
-                        continue
-                    
-                    try:
-                        vector = embedder.encode(text)
-                        
-                        # 存储向量
-                        vec_key = f"{repo}/vectors/{func_name}"
-                        self.cache.set(vec_key, json.dumps({
-                            "name": func_name,
-                            "vector": vector,
-                        }), 0)
-                    except Exception as e:
-                        print(f"  Failed to encode {func_name}: {e}")
-                        continue
-                
-                elapsed = time.time() - start_time
-                rate = (i + len(batch)) / elapsed if elapsed > 0 else 0
-                print(f"  Progress: {min(i + batch_size, len(items))}/{len(items)} ({rate:.1f} items/s)")
-            
-            embedder.close()
-            total_time = time.time() - start_time
-            print(f"Vector generation complete! {len(items)} vectors in {total_time:.1f}s ({len(items)/total_time:.1f} items/s)")
-            return True
-            
-        except ImportError:
-            print("ONNX embedder not available")
-            return False
-        except Exception as e:
-            print(f"Vector generation failed: {e}")
-            return False
-    
-    def semantic_search(self, query: str, repo: str, top_k: int = 5) -> List[Dict]:
-        """
-        语义搜索 - 根据自然语言描述查找相关函数
-        
-        示例:
-            semantic_search("图像生成函数", "/code/local/stable-diffusion.cpp")
-            semantic_search("初始化上下文", "/code/local/stable-diffusion.cpp")
-        
-        Args:
-            query: 自然语言查询，如 "图像生成函数"
-            repo: 仓库 namespace
-            top_k: 返回结果数量
-        
-        Returns:
-            相关函数列表，按相似度排序
-        """
-        try:
-            from mydb.onnx_embedder import OnnxEmbedder
-            embedder = OnnxEmbedder()
-            
-            # 生成查询向量
-            query_vector = embedder.encode(query)
-            embedder.close()
-            
-            # 搜索仓库内的所有向量
-            prefix = f"{repo}/vectors/"
-            results = []
-            
-            for key, value in self.cache.items():
-                if key.startswith(prefix):
-                    try:
-                        data = json.loads(value)
-                        func_name = data.get('name', '')
-                        vector = data.get('vector', [])
-                        
-                        if not vector or len(vector) != len(query_vector):
-                            continue
-                        
-                        # 计算余弦相似度
-                        dot_product = sum(a * b for a, b in zip(query_vector, vector))
-                        norm_a = sum(a * a for a in query_vector) ** 0.5
-                        norm_b = sum(b * b for b in vector) ** 0.5
-                        
-                        if norm_a == 0 or norm_b == 0:
-                            continue
-                        
-                        similarity = dot_product / (norm_a * norm_b)
-                        
-                        # 获取符号信息
-                        sym_key = f"{repo}/symbols/{func_name}"
-                        sym_value = self.cache.get(sym_key)
-                        if sym_value:
-                            sym_data = json.loads(sym_value)
-                            if sym_data:
-                                primary = sym_data[0]
-                                results.append({
-                                    "name": func_name,
-                                    "file": primary.get('file', ''),
-                                    "line": primary.get('line', 0),
-                                    "signature": primary.get('signature', ''),
-                                    "similarity": similarity,
-                                })
-                    except:
-                        continue
-            
-            # 按相似度排序
-            results.sort(key=lambda x: x['similarity'], reverse=True)
-            return results[:top_k]
-            
-        except ImportError:
-            print("ONNX embedder not available")
-            return []
-        except Exception as e:
-            print(f"Semantic search failed: {e}")
-            return []
+
     
     def get_callers(self, func_name: str, repo: str) -> List[Dict]:
         """
@@ -1531,17 +1375,6 @@ def main():
     # stats
     subparsers.add_parser('stats', help='Show statistics')
     
-    # index-vectors (按需生成向量)
-    index_vec_parser = subparsers.add_parser('index-vectors', help='Generate semantic vectors for a repo')
-    index_vec_parser.add_argument('repo', help='Repository namespace like /code/local/stable-diffusion.cpp')
-    index_vec_parser.add_argument('--batch-size', '-b', type=int, default=100, help='Batch size for vector generation')
-    
-    # semantic-search (语义搜索)
-    sem_search_parser = subparsers.add_parser('semantic-search', help='Search functions by natural language description')
-    sem_search_parser.add_argument('query', help='Natural language query like "image generation function"')
-    sem_search_parser.add_argument('repo', help='Repository namespace')
-    sem_search_parser.add_argument('--top-k', '-k', type=int, default=5, help='Number of results')
-    
     # callers (谁调用了这个函数)
     callers_parser = subparsers.add_parser('callers', help='Show who calls this function')
     callers_parser.add_argument('symbol', help='Function name')
@@ -1642,24 +1475,6 @@ def main():
             print(f"  Entries: {stats['entries']}")
             print(f"  Memory: {stats['memory_used_mb']:.1f} / {stats['memory_max_mb']:.1f} MB")
             print(f"  Repos: {len(stats['repos'])}")
-        
-        elif args.command == 'index-vectors':
-            print(f"\nGenerating semantic vectors for {args.repo}...")
-            success = memory.generate_vectors_for_repo(args.repo, args.batch_size)
-            sys.exit(0 if success else 1)
-        
-        elif args.command == 'semantic-search':
-            print(f"\nSemantic search: '{args.query}' in {args.repo}")
-            results = memory.semantic_search(args.query, args.repo, args.top_k)
-            print(f"Found {len(results)} results:\n")
-            for i, r in enumerate(results, 1):
-                sim_pct = r['similarity'] * 100
-                print(f"[{i}] {r['name']}")
-                print(f"    Similarity: {sim_pct:.1f}%")
-                print(f"    Location: {r['file']}:{r['line']}")
-                if r.get('signature'):
-                    print(f"    Signature: {r['signature']}")
-                print()
         
         elif args.command == 'callers':
             print(f"\nWho calls '{args.symbol}' in {args.repo}?\n")
