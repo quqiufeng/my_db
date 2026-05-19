@@ -7,6 +7,7 @@
 #include <sys/stat.h>
 #include "cache.h"
 #include "onnx_embedder.h"
+#include "cache_hnsw.h"
 
 #define DIM 768
 #define MAX_RESULTS 10
@@ -23,6 +24,8 @@ typedef struct {
     char namespace[256];
     char vec_file[512];
     char idx_file[512];
+    char hnsw_file[512];
+    char model[32];
     uint32_t count;
 } vector_source_t;
 
@@ -35,7 +38,14 @@ typedef struct {
     char docstring[1024];
     char content[4096];
     char language[32];
+    char kind[32];
 } result_detail_t;
+
+typedef struct {
+    char kind_filter[32];
+    char lang_filter[32];
+    char file_filter[256];
+} search_filter_t;
 
 static int output_json = 0;
 static int output_rich = 0;
@@ -79,16 +89,36 @@ static int discover_sources(const char* cache_dir, vector_source_t* sources, int
         size_t len = strlen(entry->d_name);
         if (len < 5 || strcmp(entry->d_name + len - 4, ".bin") != 0) continue;
         
+        // Parse model suffix: name.mpnet.bin or name.jina.bin
+        char base_name[256];
+        strncpy(base_name, entry->d_name, len - 4);
+        base_name[len - 4] = '\0';
+        
+        char* model_suffix = NULL;
+        char* last_dot = strrchr(base_name, '.');
+        if (last_dot) {
+            if (strcmp(last_dot + 1, "mpnet") == 0 || 
+                strcmp(last_dot + 1, "jina") == 0) {
+                model_suffix = last_dot + 1;
+                *last_dot = '\0';
+            }
+        }
+        if (!model_suffix) {
+            model_suffix = "mpnet"; // legacy fallback
+        }
+        
         char idx_file[1024];
-        snprintf(idx_file, sizeof(idx_file), "%s/%s", vec_dir, entry->d_name);
-        idx_file[strlen(idx_file) - 4] = '\0';
-        strncat(idx_file, ".idx", sizeof(idx_file) - strlen(idx_file) - 1);
+        snprintf(idx_file, sizeof(idx_file), "%s/%s.%s.idx", vec_dir, base_name, model_suffix);
         
         struct stat st;
-        if (stat(idx_file, &st) != 0) continue;
+        if (stat(idx_file, &st) != 0) {
+            // Try legacy .idx
+            snprintf(idx_file, sizeof(idx_file), "%s/%s.idx", vec_dir, base_name);
+            if (stat(idx_file, &st) != 0) continue;
+        }
         
         char ns[256] = {0};
-        strncpy(ns, entry->d_name, len - 4);
+        strncpy(ns, base_name, sizeof(ns) - 1);
         
         if (strncmp(ns, "code_local_", 11) == 0) {
             snprintf(sources[count].namespace, sizeof(sources[count].namespace), 
@@ -105,6 +135,19 @@ static int discover_sources(const char* cache_dir, vector_source_t* sources, int
                  "%s/%s", vec_dir, entry->d_name);
         strncpy(sources[count].idx_file, idx_file, sizeof(sources[count].idx_file) - 1);
         sources[count].idx_file[sizeof(sources[count].idx_file) - 1] = '\0';
+        strncpy(sources[count].model, model_suffix, sizeof(sources[count].model) - 1);
+        sources[count].model[sizeof(sources[count].model) - 1] = '\0';
+        
+        // Check for HNSW index
+        char hnsw_path[1024];
+        snprintf(hnsw_path, sizeof(hnsw_path), "%s/%s.%s.bin.hnsw", vec_dir, base_name, model_suffix);
+        struct stat hnsw_st;
+        if (stat(hnsw_path, &hnsw_st) == 0) {
+            strncpy(sources[count].hnsw_file, hnsw_path, sizeof(sources[count].hnsw_file) - 1);
+            sources[count].hnsw_file[sizeof(sources[count].hnsw_file) - 1] = '\0';
+        } else {
+            sources[count].hnsw_file[0] = '\0';
+        }
         
         FILE* fp = fopen(sources[count].vec_file, "rb");
         if (fp) {
@@ -234,6 +277,7 @@ static int get_result_details(cache_t* cache, const char* namespace, const char*
             extract_json_field(value, "docstring", detail->docstring, sizeof(detail->docstring));
             extract_json_field(value, "content", detail->content, sizeof(detail->content));
             extract_json_field(value, "language", detail->language, sizeof(detail->language));
+            extract_json_field(value, "kind", detail->kind, sizeof(detail->kind));
             
             char line_buf[32];
             if (extract_json_field(value, "line_start", line_buf, sizeof(line_buf)) > 0) {
@@ -258,9 +302,132 @@ static int compare_results(const void* a, const void* b) {
     return 0;
 }
 
+// Check if query keywords appear in name for hybrid boost
+static float keyword_boost(const char* query, const char* name) {
+    char qcopy[256];
+    strncpy(qcopy, query, sizeof(qcopy) - 1);
+    qcopy[sizeof(qcopy) - 1] = '\0';
+    
+    float boost = 0.0f;
+    char* token = strtok(qcopy, " _-.,;:!?()[]{}<>\"'\t\n");
+    while (token) {
+        if (strlen(token) >= 3) {
+            // Check if token appears in name (case-insensitive)
+            const char* p = name;
+            size_t tlen = strlen(token);
+            while (*p) {
+                if (strncasecmp(p, token, tlen) == 0) {
+                    boost += 0.08f;
+                    break;
+                }
+                p++;
+            }
+        }
+        token = strtok(NULL, " _-.,;:!?()[]{}<>\"'\t\n");
+    }
+    
+    return boost > 0.3f ? 0.3f : boost;  // Cap at 0.3
+}
+
 static int search_source(const vector_source_t* source, const float* query_vec, 
-                         float query_norm, int max_results, 
+                         float query_norm, int max_results, cache_t* cache,
+                         const search_filter_t* filter, const char* query,
                          search_result_t** out_results, int* out_count) {
+    // Try HNSW index first
+    if (source->hnsw_file[0]) {
+        FILE* hnsw_fp = fopen(source->hnsw_file, "rb");
+        if (hnsw_fp) {
+            fseek(hnsw_fp, 0, SEEK_END);
+            long hnsw_size = ftell(hnsw_fp);
+            fseek(hnsw_fp, 0, SEEK_SET);
+            
+            void* hnsw_buf = malloc(hnsw_size);
+            if (hnsw_buf) {
+                fread(hnsw_buf, 1, hnsw_size, hnsw_fp);
+                fclose(hnsw_fp);
+                
+                hnsw_index_t* hnsw = hnsw_deserialize(hnsw_buf, hnsw_size);
+                if (hnsw) {
+                    size_t* ids = NULL;
+                    float* scores = NULL;
+                    int top_k = max_results * 4; // Get more for filtering
+                    
+                    size_t found = hnsw_search(hnsw, query_vec, top_k, &ids, &scores);
+                    
+                    // Load name index for mapping
+                    FILE* fp = fopen(source->vec_file, "rb");
+                    uint32_t count = 0, dim_check = 0;
+                    if (fp) {
+                        fread(&count, 4, 1, fp);
+                        fread(&dim_check, 4, 1, fp); // dim
+                        fclose(fp);
+                    }
+                    
+                    char** names = malloc(count * sizeof(char*));
+                    size_t* offsets = malloc(count * sizeof(size_t));
+                    for (uint32_t i = 0; i < count; i++) names[i] = malloc(256);
+                    parse_index(source->idx_file, names, offsets, count);
+                    
+                    search_result_t* results = malloc(found * sizeof(search_result_t));
+                    int result_count = 0;
+                    
+                    for (size_t i = 0; i < found; i++) {
+                        if (ids[i] >= count) continue;
+                        
+                        float sim = scores[i];
+                        
+                        // Hybrid keyword boost
+                        if (query && query[0]) {
+                            sim += keyword_boost(query, names[ids[i]]);
+                            if (sim > 1.0f) sim = 1.0f;
+                        }
+                        
+                        int pass = 1;
+                        if (filter && (filter->kind_filter[0] || filter->lang_filter[0] || filter->file_filter[0])) {
+                            result_detail_t detail;
+                            if (get_result_details(cache, source->namespace, names[ids[i]], &detail)) {
+                                if (filter->kind_filter[0] && strcasecmp(detail.kind, filter->kind_filter) != 0) pass = 0;
+                                if (filter->lang_filter[0] && strcasecmp(detail.language, filter->lang_filter) != 0) pass = 0;
+                                if (filter->file_filter[0] && !strstr(detail.file, filter->file_filter)) pass = 0;
+                            } else {
+                                pass = 0;
+                            }
+                        }
+                        
+                        if (pass) {
+                            strncpy(results[result_count].name, names[ids[i]], 255);
+                            results[result_count].name[255] = '\0';
+                            results[result_count].score = sim;
+                            result_count++;
+                            if (result_count >= max_results) break;
+                        }
+                    }
+                    
+                    *out_results = malloc(result_count * sizeof(search_result_t));
+                    if (*out_results) {
+                        memcpy(*out_results, results, result_count * sizeof(search_result_t));
+                        *out_count = result_count;
+                    }
+                    
+                    free(results);
+                    if (ids) free(ids);
+                    if (scores) free(scores);
+                    for (uint32_t i = 0; i < count; i++) free(names[i]);
+                    free(names);
+                    free(offsets);
+                    hnsw_destroy(hnsw);
+                    free(hnsw_buf);
+                    
+                    return 0;
+                }
+                free(hnsw_buf);
+            } else {
+                fclose(hnsw_fp);
+            }
+        }
+    }
+    
+    // Fallback to brute force search
     FILE* fp = fopen(source->vec_file, "rb");
     if (!fp) return -1;
     
@@ -330,6 +497,12 @@ static int search_source(const vector_source_t* source, const float* query_vec,
             sim = dot / (query_norm * norm_v);
         }
         
+        // Hybrid keyword boost
+        if (query && query[0]) {
+            sim += keyword_boost(query, names[i]);
+            if (sim > 1.0f) sim = 1.0f;
+        }
+        
         strncpy(results[i].name, names[i], 255);
         results[i].name[255] = '\0';
         results[i].score = sim;
@@ -343,12 +516,42 @@ static int search_source(const vector_source_t* source, const float* query_vec,
     
     qsort(results, parsed, sizeof(search_result_t), compare_results);
     
-    int show = (max_results < parsed) ? max_results : parsed;
-    *out_results = malloc(show * sizeof(search_result_t));
-    if (*out_results) {
-        memcpy(*out_results, results, show * sizeof(search_result_t));
-        *out_count = show;
+    // Apply filters
+    int filtered_count = 0;
+    search_result_t* filtered = malloc(parsed * sizeof(search_result_t));
+    
+    for (int i = 0; i < parsed && filtered_count < max_results; i++) {
+        int pass = 1;
+        
+        if (filter && (filter->kind_filter[0] || filter->lang_filter[0] || filter->file_filter[0])) {
+            result_detail_t detail;
+            if (get_result_details(cache, source->namespace, results[i].name, &detail)) {
+                if (filter->kind_filter[0] && strcasecmp(detail.kind, filter->kind_filter) != 0) {
+                    pass = 0;
+                }
+                if (filter->lang_filter[0] && strcasecmp(detail.language, filter->lang_filter) != 0) {
+                    pass = 0;
+                }
+                if (filter->file_filter[0] && !strstr(detail.file, filter->file_filter)) {
+                    pass = 0;
+                }
+            } else {
+                pass = 0; // Can't verify, skip
+            }
+        }
+        
+        if (pass) {
+            memcpy(&filtered[filtered_count++], &results[i], sizeof(search_result_t));
+        }
     }
+    
+    *out_results = malloc(filtered_count * sizeof(search_result_t));
+    if (*out_results) {
+        memcpy(*out_results, filtered, filtered_count * sizeof(search_result_t));
+        *out_count = filtered_count;
+    }
+    
+    free(filtered);
     free(results);
     
     return 0;
@@ -384,57 +587,81 @@ int main(int argc, char** argv) {
     const char* target_ns = NULL;
     
     const char* model_type = "mpnet";
+    search_filter_t filter = {0};
+    int use_filter = 0;
     
-    // Parse arguments
+    // Parse arguments - first pass: collect all options
     int arg_idx = 1;
-    while (arg_idx < argc && argv[arg_idx][0] == '-') {
-        if (strcmp(argv[arg_idx], "--json") == 0) {
-            output_json = 1;
-            arg_idx++;
-        } else if (strcmp(argv[arg_idx], "--rich") == 0) {
-            output_rich = 1;
-            arg_idx++;
-        } else if (strcmp(argv[arg_idx], "--model") == 0 && arg_idx + 1 < argc) {
-            model_type = argv[++arg_idx];
-            arg_idx++;
-        } else if (strcmp(argv[arg_idx], "--help") == 0 || strcmp(argv[arg_idx], "-h") == 0) {
-            printf("AI Agent Semantic Code Search\n");
-            printf("Usage: %s [options] <cache_dir> <query> [max_results] [namespace]\n", argv[0]);
-            printf("\nOptions:\n");
-            printf("  --json       Output results as JSON\n");
-            printf("  --rich       Include full code context (file, line, signature, content)\n");
-            printf("  --model      Model type: mpnet (default) or codebert\n");
-            printf("  -h, --help   Show this help\n");
-            printf("\nExamples:\n");
-            printf("  %s ./ai_code_memory \"generate image\" 5\n", argv[0]);
-            printf("  %s --model codebert ./ai_code_memory \"CUDA kernel\" 10\n", argv[0]);
-            printf("  %s --json --rich ./ai_code_memory \"memory allocation\" 5 /code/local/project\n", argv[0]);
-            return 0;
+    while (arg_idx < argc) {
+        if (argv[arg_idx][0] == '-') {
+            if (strcmp(argv[arg_idx], "--json") == 0) {
+                output_json = 1;
+                arg_idx++;
+            } else if (strcmp(argv[arg_idx], "--rich") == 0) {
+                output_rich = 1;
+                arg_idx++;
+            } else if (strcmp(argv[arg_idx], "--model") == 0 && arg_idx + 1 < argc) {
+                model_type = argv[arg_idx + 1];
+                arg_idx += 2;
+            } else if (strcmp(argv[arg_idx], "--kind") == 0 && arg_idx + 1 < argc) {
+                strncpy(filter.kind_filter, argv[arg_idx + 1], sizeof(filter.kind_filter) - 1);
+                use_filter = 1;
+                arg_idx += 2;
+            } else if (strcmp(argv[arg_idx], "--lang") == 0 && arg_idx + 1 < argc) {
+                strncpy(filter.lang_filter, argv[arg_idx + 1], sizeof(filter.lang_filter) - 1);
+                use_filter = 1;
+                arg_idx += 2;
+            } else if (strcmp(argv[arg_idx], "--file") == 0 && arg_idx + 1 < argc) {
+                strncpy(filter.file_filter, argv[arg_idx + 1], sizeof(filter.file_filter) - 1);
+                use_filter = 1;
+                arg_idx += 2;
+            } else if (strcmp(argv[arg_idx], "--help") == 0 || strcmp(argv[arg_idx], "-h") == 0) {
+                printf("AI Agent Semantic Code Search\n");
+                printf("Usage: %s [options] <cache_dir> <query> [max_results] [namespace]\n", argv[0]);
+                printf("\nOptions:\n");
+                printf("  --json       Output results as JSON\n");
+                printf("  --rich       Include full code context (file, line, signature, content)\n");
+                printf("  --model      Model type: mpnet (default) or jina\n");
+                printf("  --kind       Filter by symbol kind: function, struct, class, macro, typedef\n");
+                printf("  --lang       Filter by language: cpp, c, python, javascript, go, rust, java\n");
+                printf("  --file       Filter by filename pattern (substring match)\n");
+                printf("  -h, --help   Show this help\n");
+                printf("\nExamples:\n");
+                printf("  %s ./ai_code_memory \"generate image\" 5\n", argv[0]);
+                printf("  %s --model jina ./ai_code_memory \"upscale image\" 5\n", argv[0]);
+                printf("  %s --kind function --lang cpp ./ai_code_memory \"memory allocation\" 5\n", argv[0]);
+                printf("  %s --file cuda ./ai_code_memory \"gpu kernel\" 5\n", argv[0]);
+                printf("  %s --json --rich ./ai_code_memory \"memory allocation\" 5 /code/local/project\n", argv[0]);
+                return 0;
+            } else {
+                fprintf(stderr, "Unknown option: %s\n", argv[arg_idx]);
+                return 1;
+            }
         } else {
-            fprintf(stderr, "Unknown option: %s\n", argv[arg_idx]);
-            return 1;
+            // First positional argument is cache_dir
+            if (!cache_dir) {
+                cache_dir = argv[arg_idx];
+            } else if (!query) {
+                query = argv[arg_idx];
+            } else if (max_results == MAX_RESULTS) {
+                max_results = atoi(argv[arg_idx]);
+                if (max_results <= 0) max_results = MAX_RESULTS;
+            } else {
+                target_ns = argv[arg_idx];
+            }
+            arg_idx++;
         }
     }
     
-    if (arg_idx >= argc) {
+    if (!cache_dir) {
         fprintf(stderr, "Error: cache_dir required\n");
         fprintf(stderr, "Usage: %s [options] <cache_dir> <query> [max_results] [namespace]\n", argv[0]);
         return 1;
     }
-    cache_dir = argv[arg_idx++];
     
-    if (arg_idx >= argc) {
+    if (!query) {
         fprintf(stderr, "Error: query required\n");
         return 1;
-    }
-    query = argv[arg_idx++];
-    
-    if (arg_idx < argc) {
-        max_results = atoi(argv[arg_idx]);
-        arg_idx++;
-    }
-    if (arg_idx < argc) {
-        target_ns = argv[arg_idx];
     }
     
     if (max_results <= 0) max_results = MAX_RESULTS;
@@ -454,37 +681,74 @@ int main(int argc, char** argv) {
         return 1;
     }
     
-    // Filter by namespace
+    // Filter by namespace and model
     int active_sources[MAX_NAMESPACES];
     int num_active = 0;
     for (int i = 0; i < num_sources; i++) {
-        if (!target_ns || strcmp(sources[i].namespace, target_ns) == 0 ||
-            strstr(sources[i].namespace, target_ns)) {
+        int ns_match = !target_ns || strcmp(sources[i].namespace, target_ns) == 0 ||
+                       strstr(sources[i].namespace, target_ns);
+        int model_match = strcmp(sources[i].model, model_type) == 0;
+        if (ns_match && model_match) {
             active_sources[num_active++] = i;
         }
     }
     if (num_active == 0) {
-        fprintf(stderr, "No matching namespace found for: %s\n", target_ns);
+        if (target_ns) {
+            fprintf(stderr, "No matching namespace found for: %s (model: %s)\n", target_ns, model_type);
+        } else {
+            fprintf(stderr, "No vector files found for model: %s\n", model_type);
+        }
+        fprintf(stderr, "Available sources:\n");
+        for (int i = 0; i < num_sources; i++) {
+            fprintf(stderr, "  %s (%s, %u vectors)\n", sources[i].namespace, sources[i].model, sources[i].count);
+        }
         return 1;
     }
     
-    // Open cache for rich mode
+    // Open cache for rich mode or filtering
     cache_t* cache = NULL;
-    if (output_rich) {
+    if (output_rich || use_filter) {
         cache = cache_open(cache_dir, 1024 * 1024 * 1024);
         if (!cache) {
-            fprintf(stderr, "Warning: Failed to open cache, rich mode disabled\n");
-            output_rich = 0;
+            if (output_rich) {
+                fprintf(stderr, "Warning: Failed to open cache, rich mode disabled\n");
+                output_rich = 0;
+            }
+            if (use_filter) {
+                fprintf(stderr, "Error: Failed to open cache, filtering requires cache\n");
+                return 1;
+            }
         }
     }
     
-    // Load embedder
-    int use_codebert = (strcmp(model_type, "codebert") == 0);
-    
+    // Load embedder based on model type
     float query_vec[DIM];
     
-    if (!use_codebert) {
-        // MPNet: use C embedder
+    if (strcmp(model_type, "jina") == 0) {
+        // Jina: use C embedder with BPE tokenizer
+        if (!output_json) {
+            printf("Loading Jina embedder...\n");
+        }
+        onnx_embedder_t* embedder = onnx_embedder_init(
+            "models/jina-embeddings-v2-base-code/model.onnx",
+            "models/jina-embeddings-v2-base-code/vocab.json",
+            512, DIM
+        );
+        if (!embedder) {
+            fprintf(stderr, "Failed to load Jina embedder: %s\n", onnx_embedder_error());
+            if (cache) cache_close(cache);
+            return 1;
+        }
+        
+        if (onnx_embedder_encode(embedder, query, query_vec) != 0) {
+            fprintf(stderr, "Failed to encode query with Jina\n");
+            onnx_embedder_free(embedder);
+            if (cache) cache_close(cache);
+            return 1;
+        }
+        onnx_embedder_free(embedder);
+    } else {
+        // MPNet: use C embedder (default)
         if (!output_json) {
             printf("Loading MPNet embedder...\n");
         }
@@ -506,57 +770,6 @@ int main(int argc, char** argv) {
             return 1;
         }
         onnx_embedder_free(embedder);
-    } else {
-        // CodeBERT: use Python encoder
-        if (!output_json) {
-            printf("Loading CodeBERT encoder...\n");
-        }
-        
-        char cmd[2048];
-        char escaped_query[4096];
-        int j = 0;
-        for (int i = 0; query[i] && j < sizeof(escaped_query) - 3; i++) {
-            if (query[i] == '"' || query[i] == '\\') {
-                escaped_query[j++] = '\\';
-            }
-            escaped_query[j++] = query[i];
-        }
-        escaped_query[j] = '\0';
-        
-        snprintf(cmd, sizeof(cmd), 
-                 "python3 /home/dministrator/my_db/tools/codebert_encode.py --model-dir models/codebert-base --query \"%s\" 2>/dev/null",
-                 escaped_query);
-        
-        FILE* fp = popen(cmd, "r");
-        if (!fp) {
-            fprintf(stderr, "Failed to run CodeBERT encoder\n");
-            if (cache) cache_close(cache);
-            return 1;
-        }
-        
-        char line[65536];
-        if (fgets(line, sizeof(line), fp) == NULL) {
-            fprintf(stderr, "Failed to read CodeBERT output\n");
-            pclose(fp);
-            if (cache) cache_close(cache);
-            return 1;
-        }
-        pclose(fp);
-        
-        // Parse JSON: {"vector":[0.1,0.2,...]}
-        char* vec_start = strstr(line, "\"vector\":[");
-        if (!vec_start) {
-            fprintf(stderr, "Failed to parse CodeBERT output\n");
-            if (cache) cache_close(cache);
-            return 1;
-        }
-        vec_start += 10;
-        
-        for (int d = 0; d < DIM && *vec_start; d++) {
-            query_vec[d] = strtof(vec_start, &vec_start);
-            if (*vec_start == ',') vec_start++;
-            else if (*vec_start == ']') break;
-        }
     }
     
     float query_norm = 0.0f;
@@ -574,7 +787,8 @@ int main(int argc, char** argv) {
         search_result_t* src_results = NULL;
         int src_count = 0;
         if (search_source(&sources[src_idx], query_vec, query_norm, 
-                          max_results * 2, &src_results, &src_count) == 0) {
+                          max_results * 2, cache, use_filter ? &filter : NULL, query,
+                          &src_results, &src_count) == 0) {
             search_result_t* new_all = realloc(all_results, 
                 (total_results + src_count) * sizeof(search_result_t));
             if (new_all) {

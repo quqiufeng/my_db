@@ -50,6 +50,10 @@ trt_cache/
 tools/vector_indexer
 tools/vector_indexer_v2
 tools/vector_generator
+tools/vector_search
+tools/embedding_daemon
+tools/build_hnsw_index
+tools/cache_snapshot
 
 # Temporary files
 /tmp/

@@ -131,7 +131,7 @@ $(TEST_HNSW): $(TEST_DIR)/test_hnsw.c $(LIB)
 	$(CC) $(CFLAGS) -o $@ $< -L. -lmydb -lm -Wl,-rpath,.
 
 $(IMPORT_BOOK): $(TOOLS_DIR)/import_book.c $(SRC_DIR)/embedding/onnx_embedder.c $(LIB)
-	$(CC) $(CFLAGS) $(ONNX_CFLAGS) -o $@ $(TOOLS_DIR)/import_book.c $(SRC_DIR)/embedding/onnx_embedder.c -L. -lmydb $(ONNX_LDFLAGS) -lm -Wl,-rpath,.
+	$(CC) $(CFLAGS) $(ONNX_CFLAGS) -I./include/tokenizers-cpp -o $@ $(TOOLS_DIR)/import_book.c $(SRC_DIR)/embedding/onnx_embedder.c $(TOKENIZERS_CPP_LIBS) -L. -lmydb $(ONNX_LDFLAGS) -lm -lstdc++ -Wl,-rpath,.
 
 $(CACHE_SERVER): $(TOOLS_DIR)/cache_server.c $(LIB)
 	$(CC) $(CFLAGS) -o $@ $< -L. -lmydb -Wl,-rpath,.
@@ -143,21 +143,27 @@ $(CACHE_SNAPSHOT): $(TOOLS_DIR)/cache_snapshot.c $(LIB)
 	$(CC) $(CFLAGS) -o $@ $< -L. -lmydb -Wl,-rpath,.
 
 $(VECTOR_GENERATOR): $(TOOLS_DIR)/vector_generator.c $(ONNX_EMBEDDER_LIB) $(LIB)
-	$(CC) $(CFLAGS) $(ONNX_CFLAGS) -o $@ $< -L. -lmydb -lonnx_embedder $(ONNX_LDFLAGS) -lm -ldl -Wl,-rpath,'$$ORIGIN/..'
+	$(CC) $(CFLAGS) $(ONNX_CFLAGS) -o $@ $(TOOLS_DIR)/vector_generator.c -L. -lmydb -lonnx_embedder $(ONNX_LDFLAGS) -lm -ldl -Wl,-rpath,'$$ORIGIN/..'
 
 $(VECTOR_SEARCH): $(TOOLS_DIR)/vector_search.c $(ONNX_EMBEDDER_LIB) $(LIB)
-	$(CC) $(CFLAGS) $(ONNX_CFLAGS) -o $@ $< -L. -lmydb -lonnx_embedder $(ONNX_LDFLAGS) -lm -ldl -Wl,-rpath,'$$ORIGIN/..'
+	$(CC) $(CFLAGS) $(ONNX_CFLAGS) -o $@ $(TOOLS_DIR)/vector_search.c -L. -lmydb -lonnx_embedder $(ONNX_LDFLAGS) -lm -ldl -Wl,-rpath,'$$ORIGIN/..'
 
 # ONNX Embedder shared library (for Python FFI)
 ONNX_EMBEDDER_OBJ = $(OBJ_DIR)/embedding/onnx_embedder.o
 ONNX_EMBEDDER_LIB = libonnx_embedder.so
 
+# tokenizers-cpp libraries
+TOKENIZERS_CPP_DIR = lib/tokenizers-cpp
+TOKENIZERS_CPP_LIBS = $(TOKENIZERS_CPP_DIR)/libtokenizers_cpp.a \
+                      $(TOKENIZERS_CPP_DIR)/libtokenizers_c.a \
+                      $(TOKENIZERS_CPP_DIR)/libonig.a
+
 $(ONNX_EMBEDDER_OBJ): $(SRC_DIR)/embedding/onnx_embedder.c
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) $(ONNX_CFLAGS) -c -o $@ $^
+	$(CC) $(CFLAGS) $(ONNX_CFLAGS) -I./include/tokenizers-cpp -c -o $@ $(SRC_DIR)/embedding/onnx_embedder.c
 
 $(ONNX_EMBEDDER_LIB): $(ONNX_EMBEDDER_OBJ)
-	$(CC) -shared -o $@ $< $(ONNX_LDFLAGS) -lm -ldl
+	$(CC) -shared -o $@ $< $(TOKENIZERS_CPP_LIBS) $(ONNX_LDFLAGS) -lm -ldl -lstdc++
 
 example: $(LIB)
 	$(CC) $(CFLAGS) -o $(EXAMPLE_C) $(EXAMPLE_DIR)/example.c -L. -lmydb -Wl,-rpath,.
@@ -174,4 +180,4 @@ install: $(LIB)
 	@echo "Header:  $(INCLUDEDIR)/mydb.h"
 
 clean:
-	rm -rf $(OBJ_DIR) $(LIB) $(ONNX_EMBEDDER_LIB) $(TEST_BASIC) $(TEST_JOIN) $(TEST_PERF) $(TEST_EDGE) $(TEST_COMPOSITE) $(TEST_WAL) $(TEST_CACHE) $(TEST_CACHE_FULL) $(TEST_HTTP_SERVER) $(TEST_HNSW) $(IMPORT_BOOK) $(CACHE_HTTP_SERVER) $(CACHE_SNAPSHOT) $(VECTOR_GENERATOR) $(VECTOR_SEARCH) $(EXAMPLE_C) *.bin *.index test_cache_dir test_cache_lru
+	rm -rf $(OBJ_DIR) $(LIB) $(ONNX_EMBEDDER_LIB) $(TEST_BASIC) $(TEST_JOIN) $(TEST_PERF) $(TEST_EDGE) $(TEST_COMPOSITE) $(TEST_WAL) $(TEST_CACHE) $(TEST_CACHE_FULL) $(TEST_HTTP_SERVER) $(TEST_HNSW) $(IMPORT_BOOK) $(CACHE_HTTP_SERVER) $(CACHE_SNAPSHOT) $(VECTOR_GENERATOR) $(VECTOR_SEARCH) $(EXAMPLE_C) tests/test_codebert_embedder tests/bench_codebert *.bin *.index test_cache_dir test_cache_lru

@@ -60,6 +60,7 @@
 - **Tag 索引**：Hash-based 反向索引，O(1) 标签搜索
 - **Skip List**：20 级跳表，数据量 > 100 万自动启用
 - **向量搜索**：Float embedding + 余弦相似度，语义搜索（ONNX Runtime C 推理）
+- **Jina v2 C 推理**：纯 C 推理 + tokenizers-cpp（HuggingFace 官方 tokenizer），代码语义检索专用
 - **源码分析**：7 种语言 AST 提取（函数/类/结构体/导入）
 - **TCP 远程**：文本协议服务器，支持端口远程操作
 
@@ -591,8 +592,10 @@ ai_code_memory/
 ├── cache.bin              # 代码片段、符号、调用图
 ├── index.bin              # 持久化索引（Hash + Sorted + Namespace）
 └── vectors/               # 语义向量（由 Step 2 生成）
-    └── code_local_stable-diffusion.cpp.bin   # 二进制向量文件
-    └── code_local_stable-diffusion.cpp.idx   # 名称→偏移索引
+    └── code_local_stable-diffusion.cpp.mpnet.bin    # MPNet 二进制向量
+    └── code_local_stable-diffusion.cpp.mpnet.idx    # MPNet 名称→偏移索引
+    └── code_local_stable-diffusion.cpp.jina.bin     # Jina 二进制向量（代码专用）
+    └── code_local_stable-diffusion.cpp.jina.idx     # Jina 名称→偏移索引
 ```
 
 **Step 2: 生成向量索引（C + TensorRT GPU）**
@@ -629,32 +632,48 @@ make tools/vector_generator
 # Done! Total: 13.3s
 ```
 
-**模型选择（MPNet vs CodeBERT）**：
+**模型选择（MPNet vs Jina v2）**：
 
 | 模型 | 适用场景 | 速度 | 特点 |
 |------|---------|------|------|
 | **MPNet** (默认) | 电子书、文档、通用文本 | ⭐⭐⭐⭐⭐ | 通用文本理解，C 原生 tokenizer |
-| **CodeBERT** | 代码仓库 | ⭐⭐⭐ | 代码语义理解，需 Python tokenizer |
+| **Jina v2** | 代码仓库（推荐） | ⭐⭐⭐⭐ | 代码专用嵌入，理解代码语义，对比学习训练 |
 
 ```bash
 # 使用 MPNet（默认，适合通用文本）
 ./tools/vector_generator ./ai_code_memory /code/local/project
+# 生成: vectors/code_local_project.mpnet.bin + .mpnet.idx
 
-# 使用 CodeBERT（代码专用，理解命名约定）
-# 先下载模型: https://huggingface.co/microsoft/codebert-base
-./tools/vector_generator --model codebert ./ai_code_memory /code/local/project
+# 使用 Jina v2（代码专用，推荐）
+# 先下载模型: https://huggingface.co/jinaai/jina-embeddings-v2-base-code
+python3 tools/export_jina_onnx.py
+./tools/vector_generator --model jina ./ai_code_memory /code/local/project
+# 生成: vectors/code_local_project.jina.bin + .jina.idx
 ```
 
-**CodeBERT 模型准备**：
+> **注意**：向量文件名自动包含模型标识（`.mpnet` / `.jina`），不同模型向量不会互相覆盖。
+
+**Jina v2 模型准备（推荐）**：
 ```bash
-# 1. 下载模型到 /opt/codebert
-# 从 https://huggingface.co/microsoft/codebert-base/tree/main 下载:
-#   pytorch_model.bin, vocab.json, merges.txt, config.json, tokenizer_config.json
+# 1. 下载模型到 /opt/jina-embeddings-v2-base-code
+# 从 https://huggingface.co/jinaai/jina-embeddings-v2-base-code 下载全部文件
 
 # 2. 导出 ONNX（只需执行一次）
-python3 tools/export_codebert_onnx.py
-# 输出: models/codebert-base/model.onnx + vocab.txt
+python3 tools/export_jina_onnx.py
+# 输出: models/jina-embeddings-v2-base-code/model.onnx + vocab.json + merges.txt + tokenizer.json
 ```
+
+**为什么推荐 Jina v2 而非 CodeBERT？**
+
+| 指标 | CodeBERT | Jina v2 base code |
+|------|----------|-------------------|
+| 架构 | 自编码器（BERT-like） | 自回归（GPT-like）+ 任务适配 |
+| 训练目标 | MLM（掩码预测） | 对比学习（检索优化） |
+| 检索质量 | off-diag similarity 0.95+ | 语义区分度强 |
+| 相似度范围 | 0.94-0.97（压缩严重） | 0.40-0.80（分布合理） |
+| 适用任务 | 代码分类/补全 | **代码检索**（本场景） |
+
+CodeBERT 的自编码器架构使其向量高度集中在同一区域，导致余弦相似度无法区分不同函数。Jina v2 专为检索设计，相似度分布合理，搜索效果更好。
 
 **性能对比**：
 
@@ -662,7 +681,13 @@ python3 tools/export_codebert_onnx.py
 |------|------|-------------|------|
 | Python CPU | 43 items/s | ~14 分钟 | 0 GB |
 | C + CUDA | 213 items/s | ~3 分钟 | ~2 GB |
-| **C + TensorRT 10** | **2324 items/s** | **~18 秒** | **~4 GB** |
+| C + TensorRT 10 (FP16) | 2324 items/s | ~18 秒 | ~4 GB |
+| **Python + CUDA (Jina)** | **97 items/s** | **~1.9 分钟** | **~2 GB** |
+
+**向量生成方案选择**：
+- **MPNet**: 使用 C + TensorRT（最快，C tokenizer 正确）
+- **Jina v2**: 使用 Python + CUDA（C TensorRT FP16 会破坏 Jina embedding 质量，必须使用 FP32 或 Python）
+- **CodeBERT**: 使用 C + TensorRT（但检索质量差，不推荐）
 
 **Step 3: AI Agent 使用 C 应用探索源码**
 
@@ -673,7 +698,7 @@ make tools/vector_search
 # 自然语言搜索代码（自动发现所有项目）
 ./tools/vector_search ./ai_code_memory "generate image from text" 5
 
-# 限定在特定项目搜索
+# 限定在特定项目搜索（支持模糊匹配）
 ./tools/vector_search ./ai_code_memory "generate image from text" 5 /code/local/stable-diffusion.cpp
 
 # Rich 模式：返回完整代码上下文（AI 最友好的方式）
@@ -682,11 +707,25 @@ make tools/vector_search
 # JSON 模式：结构化输出，AI 可直接解析
 ./tools/vector_search --json --rich ./ai_code_memory "generate image from text" 5
 
+# 使用 Jina 模型搜索（推荐，代码专用）
+./tools/vector_search --model jina --rich ./ai_code_memory "upscale image" 5
+
+# 使用 CodeBERT 模型搜索（不推荐）
+./tools/vector_search --model codebert --rich ./ai_code_memory "CUDA kernel" 5 /code/local/stable-diffusion.cpp
+
+# 查看所有选项和已生成的向量文件
+./tools/vector_search --help
+
+# 查看所有选项
+./tools/vector_search --help
+
 # 输出示例（--rich 模式）：
 # [1] txt2img (0.6245)
 #     Signature: sd_image_t* txt2img(...)
 #     Location:  examples/cli/main.cpp:234
 #     Language:  cpp
+#     Doc:
+#       Generate image from text prompt using stable diffusion
 #     Code:
 #       | sd_image_t* txt2img(...) {
 #       |     // generate image from text prompt
@@ -722,14 +761,20 @@ make tools/vector_search
 | 内存 | Python 对象开销大 | 直接操作二进制文件 |
 | 部署 | 依赖 Python 环境 | 独立可执行文件 |
 
-**向量存储格式**：
+**向量存储格式**（文件名包含模型标识）：
 ```
-vectors/code_local_stable-diffusion.cpp.bin
-├─ Header: [count:4][dim:4]           # 41563, 768
-└─ Vectors: [float768] × 41563        # 原始 float32 数组
+vectors/code_local_stable-diffusion.cpp.mpnet.bin
+├─ Header: [count:4][dim:4]           # 14308, 768
+└─ Vectors: [float768] × 14308        # 原始 float32 数组
 
-vectors/code_local_stable-diffusion.cpp.idx
+vectors/code_local_stable-diffusion.cpp.mpnet.idx
 └─ JSON: {"func_name": offset, ...}   # 名称到字节偏移的映射
+
+# 同一项目可共存多个模型的向量
+vectors/code_local_stable-diffusion.cpp.jina.bin        # Jina v2 (推荐)
+vectors/code_local_stable-diffusion.cpp.jina.idx
+vectors/code_local_stable-diffusion.cpp.codebert.bin    # CodeBERT (不推荐)
+vectors/code_local_stable-diffusion.cpp.codebert.idx
 ```
 
 **搜索流程**：
@@ -749,20 +794,23 @@ AI Agent 可以通过调用 `vector_search` C 程序来查询源码：
 import subprocess
 import json
 
-def search_code(query, cache_dir="./ai_code_memory", top_k=5, namespace=None, rich=True):
+def search_code(query, cache_dir="./ai_code_memory", top_k=5, namespace=None, rich=True, model="jina"):
     """AI Agent 调用 C 工具进行语义搜索（支持任意项目）
     
     Args:
         query: 自然语言查询
         cache_dir: 缓存目录
         top_k: 返回结果数量
-        namespace: 限定项目（如 /code/local/my-project）
+        namespace: 限定项目（如 /code/local/my-project，支持模糊匹配）
         rich: 是否返回完整代码上下文（文件、行号、签名、代码）
+        model: 嵌入模型，jina (默认，代码专用) 或 mpnet (通用文本)
     
     Returns:
         JSON 格式的搜索结果，包含 name, score, file, line_start, signature, content
     """
     cmd = ["./tools/vector_search", "--json"]
+    if model != "mpnet":
+        cmd.extend(["--model", model])
     if rich:
         cmd.append("--rich")
     cmd.extend([cache_dir, query, str(top_k)])
@@ -785,11 +833,11 @@ def search_code(query, cache_dir="./ai_code_memory", top_k=5, namespace=None, ri
 # AI Agent 使用示例（支持任意项目）
 code_context = "我需要生成图像的函数"
 
-# 搜索所有项目，获取完整上下文
-results = search_code("generate image from text", top_k=5, rich=True)
+# 搜索所有项目，获取完整上下文（使用 Jina，代码专用）
+results = search_code("generate image from text", top_k=5, rich=True, model="jina")
 
 # 或限定在特定项目
-results = search_code("generate image", top_k=3, namespace="/code/local/my-project")
+results = search_code("generate image", top_k=3, namespace="/code/local/my-project", model="jina")
 
 # 结果注入提示词（AI 可直接使用）
 prompt = f"用户需要: {code_context}\n\n相关源码:\n"

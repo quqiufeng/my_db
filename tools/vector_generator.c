@@ -10,8 +10,9 @@
 #include "onnx_embedder.h"
 
 #define DIM 768
-#define BATCH_SIZE 32  // CodeBERT uses Python encoder, smaller batches
-#define MAX_TEXT_LEN 4096
+#define BATCH_SIZE_MPNET 64
+#define BATCH_SIZE_JINA 32
+#define MAX_TEXT_LEN 8192
 #define MAX_ITEMS_INITIAL 10000
 
 #define VERSION "2.0.0"
@@ -32,14 +33,14 @@ static void print_usage(const char* prog) {
     printf("Generate semantic vectors for code repositories.\n\n");
     printf("Usage: %s [options] <cache_dir> [namespace]\n", prog);
     printf("\nOptions:\n");
-    printf("  --model <type>   Model type: mpnet (default) or codebert\n");
+    printf("  --model <type>   Model type: mpnet (default) or jina\n");
     printf("  --help, -h      Show this help\n");
     printf("\nExamples:\n");
     printf("  %s ./ai_code_memory\n", prog);
-    printf("  %s --model codebert ./ai_code_memory /code/local/my-project\n", prog);
+    printf("  %s --model jina ./ai_code_memory /code/local/my-project\n", prog);
     printf("\nModels:\n");
-    printf("  mpnet    - all-mpnet-base-v2 (general text, fast C tokenizer)\n");
-    printf("  codebert - microsoft/codebert-base (code-optimized, Python tokenizer)\n");
+    printf("  mpnet - all-mpnet-base-v2 (general text, fast C tokenizer)\n");
+    printf("  jina  - jina-embeddings-v2-base-code (code retrieval, BPE tokenizer)\n");
 }
 
 static int file_exists(const char* path) {
@@ -101,85 +102,6 @@ static int detect_namespace(const char* cache_dir, char* ns_out, size_t ns_out_l
     return found ? 0 : -1;
 }
 
-// Encode using Python CodeBERT script
-static int encode_codebert_batch(const char* model_dir, item_t* items, int count, float* vectors, int dim) {
-    // Write items to temp file
-    char temp_in[] = "/tmp/codebert_in_XXXXXX";
-    int fd = mkstemp(temp_in);
-    if (fd < 0) return -1;
-    
-    FILE* fp = fdopen(fd, "w");
-    if (!fp) {
-        close(fd);
-        unlink(temp_in);
-        return -1;
-    }
-    
-    for (int i = 0; i < count; i++) {
-        // Escape JSON special chars in text
-        fprintf(fp, "{\"name\":\"%s\",\"text\":\"", items[i].name);
-        for (char* p = items[i].text; *p; p++) {
-            if (*p == '"' || *p == '\\') fprintf(fp, "\\%c", *p);
-            else if (*p == '\n') fprintf(fp, "\\n");
-            else if (*p == '\r') fprintf(fp, "\\r");
-            else if (*p == '\t') fprintf(fp, "\\t");
-            else if ((unsigned char)*p >= 0x20) fprintf(fp, "%c", *p);
-        }
-        fprintf(fp, "\"}\n");
-    }
-    fclose(fp);
-    
-    // Run Python encoder
-    char temp_out[] = "/tmp/codebert_out_XXXXXX";
-    int fd_out = mkstemp(temp_out);
-    if (fd_out < 0) {
-        unlink(temp_in);
-        return -1;
-    }
-    close(fd_out);
-    
-    char cmd[2048];
-    snprintf(cmd, sizeof(cmd), 
-             "python3 /home/dministrator/my_db/tools/codebert_encode.py --model-dir %s --batch < %s > %s 2>/dev/null",
-             model_dir, temp_in, temp_out);
-    
-    int ret = system(cmd);
-    unlink(temp_in);
-    
-    if (ret != 0) {
-        fprintf(stderr, "CodeBERT encoder failed (exit code %d)\n", ret);
-        unlink(temp_out);
-        return -1;
-    }
-    
-    // Read results
-    fp = fopen(temp_out, "r");
-    if (!fp) {
-        unlink(temp_out);
-        return -1;
-    }
-    
-    int processed = 0;
-    char line[65536];
-    while (fgets(line, sizeof(line), fp) && processed < count) {
-        // Parse JSON: {"name":"...","vector":[0.1,0.2,...]}
-        char* vec_start = strstr(line, "\"vector\":[");
-        if (!vec_start) continue;
-        vec_start += 10; // skip "vector":[
-        
-        for (int d = 0; d < dim && *vec_start; d++) {
-            vectors[processed * dim + d] = strtof(vec_start, &vec_start);
-            if (*vec_start == ',') vec_start++;
-            else if (*vec_start == ']') break;
-        }
-        processed++;
-    }
-    fclose(fp);
-    unlink(temp_out);
-    
-    return processed;
-}
-
 int main(int argc, char** argv) {
     const char* model_type = "mpnet";
     const char* cache_dir = NULL;
@@ -210,7 +132,7 @@ int main(int argc, char** argv) {
     }
     
     // Validate model type
-    int use_codebert = (strcmp(model_type, "codebert") == 0);
+    int use_jina = (strcmp(model_type, "jina") == 0);
     
     struct stat st;
     if (stat(cache_dir, &st) != 0 || !S_ISDIR(st.st_mode)) {
@@ -240,7 +162,19 @@ int main(int argc, char** argv) {
     
     // Initialize embedder
     onnx_embedder_t* embedder = NULL;
-    if (!use_codebert) {
+    if (use_jina) {
+        printf("Loading Jina embedder...\n");
+        embedder = onnx_embedder_init(
+            "models/jina-embeddings-v2-base-code/model.onnx",
+            "models/jina-embeddings-v2-base-code/vocab.json",
+            512, DIM
+        );
+        if (!embedder) {
+            fprintf(stderr, "Failed: %s\n", onnx_embedder_error());
+            cache_close(cache);
+            return 1;
+        }
+    } else {
         printf("Loading MPNet embedder...\n");
         embedder = onnx_embedder_init(
             "models/all-mpnet-base-v2/model.onnx",
@@ -249,13 +183,6 @@ int main(int argc, char** argv) {
         );
         if (!embedder) {
             fprintf(stderr, "Failed: %s\n", onnx_embedder_error());
-            cache_close(cache);
-            return 1;
-        }
-    } else {
-        printf("Using CodeBERT (Python-based encoding)...\n");
-        if (!file_exists("models/codebert-base/model.onnx")) {
-            fprintf(stderr, "Error: CodeBERT model not found at models/codebert-base/model.onnx\n");
             cache_close(cache);
             return 1;
         }
@@ -352,7 +279,7 @@ int main(int argc, char** argv) {
     }
     
     // Encode
-    printf("Encoding with %s...\n", use_codebert ? "CodeBERT" : "MPNet");
+    printf("Encoding with %s...\n", use_jina ? "Jina" : "MPNet");
     float* vectors = malloc(item_count * DIM * sizeof(float));
     if (!vectors) {
         fprintf(stderr, "Failed to allocate vectors memory\n");
@@ -365,60 +292,42 @@ int main(int argc, char** argv) {
     int processed = 0;
     clock_t encode_start = clock();
     
-    if (!use_codebert) {
-        // MPNet: use C embedder with batching
-        const char** texts = malloc(BATCH_SIZE * sizeof(char*));
-        if (!texts) {
-            free(vectors);
-            free(items);
-            onnx_embedder_free(embedder);
-            cache_close(cache);
-            return 1;
+    // Use C embedder with batching
+    int batch_size = use_jina ? BATCH_SIZE_JINA : BATCH_SIZE_MPNET;
+    const char** texts = malloc(batch_size * sizeof(char*));
+    if (!texts) {
+        free(vectors);
+        free(items);
+        onnx_embedder_free(embedder);
+        cache_close(cache);
+        return 1;
+    }
+    
+    for (int i = 0; i < item_count; i += batch_size) {
+        int batch_end = i + batch_size;
+        if (batch_end > item_count) batch_end = item_count;
+        int batch_count = batch_end - i;
+        
+        for (int j = 0; j < batch_count; j++) {
+            texts[j] = items[i + j].text;
         }
         
-        for (int i = 0; i < item_count; i += BATCH_SIZE) {
-            int batch_end = i + BATCH_SIZE;
-            if (batch_end > item_count) batch_end = item_count;
-            int batch_count = batch_end - i;
-            
+        int ret = onnx_embedder_encode_batch(embedder, texts, batch_count, vectors + i * DIM);
+        if (ret == 0) {
+            processed += batch_count;
+        } else {
             for (int j = 0; j < batch_count; j++) {
-                texts[j] = items[i + j].text;
-            }
-            
-            int ret = onnx_embedder_encode_batch(embedder, texts, batch_count, vectors + i * DIM);
-            if (ret == 0) {
-                processed += batch_count;
-            } else {
-                for (int j = 0; j < batch_count; j++) {
-                    if (onnx_embedder_encode(embedder, items[i + j].text, vectors + (i + j) * DIM) == 0) {
-                        processed++;
-                    }
+                if (onnx_embedder_encode(embedder, items[i + j].text, vectors + (i + j) * DIM) == 0) {
+                    processed++;
                 }
             }
-            
-            if ((i / BATCH_SIZE) % 10 == 0 && i > 0) {
-                printf("  Progress: %d/%d\n", i, item_count);
-            }
         }
-        free(texts);
-    } else {
-        // CodeBERT: use Python encoder
-        for (int i = 0; i < item_count; i += BATCH_SIZE) {
-            int batch_end = i + BATCH_SIZE;
-            if (batch_end > item_count) batch_end = item_count;
-            int batch_count = batch_end - i;
-            
-            int ret = encode_codebert_batch("models/codebert-base", items + i, batch_count, 
-                                             vectors + i * DIM, DIM);
-            if (ret > 0) {
-                processed += ret;
-            }
-            
-            if ((i / BATCH_SIZE) % 5 == 0 && i > 0) {
-                printf("  Progress: %d/%d\n", i, item_count);
-            }
+        
+        if ((i / batch_size) % 10 == 0 && i > 0) {
+            printf("  Progress: %d/%d\n", i, item_count);
         }
     }
+    free(texts);
     
     double encode_time = (double)(clock() - encode_start) / CLOCKS_PER_SEC;
     printf("Encoded %d/%d items in %.1fs (%.1f items/s)\n", 
@@ -438,8 +347,9 @@ int main(int argc, char** argv) {
     namespace_to_filename(ns, safe_ns, sizeof(safe_ns));
     
     char vec_file[1024], idx_file[1024];
-    int n1 = snprintf(vec_file, sizeof(vec_file), "%s/%s.bin", vec_dir, safe_ns);
-    int n2 = snprintf(idx_file, sizeof(idx_file), "%s/%s.idx", vec_dir, safe_ns);
+    const char* model_suffix = use_jina ? "jina" : "mpnet";
+    int n1 = snprintf(vec_file, sizeof(vec_file), "%s/%s.%s.bin", vec_dir, safe_ns, model_suffix);
+    int n2 = snprintf(idx_file, sizeof(idx_file), "%s/%s.%s.idx", vec_dir, safe_ns, model_suffix);
     if (n1 >= (int)sizeof(vec_file) || n2 >= (int)sizeof(idx_file)) {
         fprintf(stderr, "Error: Path too long\n");
         free(items);

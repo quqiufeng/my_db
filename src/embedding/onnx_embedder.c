@@ -1,4 +1,5 @@
 #include "onnx_embedder.h"
+#include "tokenizers-cpp/tokenizers_c.h"
 #include <onnxruntime_c_api.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -9,6 +10,12 @@
 
 #define MAX_VOCAB_SIZE 50000
 #define MAX_TOKEN_LEN 64
+
+// Tokenizer types
+typedef enum {
+    TOKENIZER_WORDPIECE,
+    TOKENIZER_BPE
+} tokenizer_type_t;
 
 // Global ONNX Runtime API pointer
 static const OrtApi* g_ort = NULL;
@@ -27,15 +34,26 @@ struct onnx_embedder {
     OrtMemoryInfo* memory_info;
     
     // Tokenizer
+    tokenizer_type_t tokenizer_type;
     vocab_hash_entry_t* vocab_hash;
     int vocab_hash_size;
     int vocab_size;
+    TokenizerHandle tokenizers_handle;
+    
     int max_seq_length;
     int dim;
     int unk_id;
     int cls_id;
     int sep_id;
     int pad_id;
+    int bos_id;
+    int eos_id;
+    
+    // ONNX model output name
+    const char* output_name;
+    
+    // Use pooled output (CLS token) instead of mean pooling
+    int use_pooled_output;
     
     // Working buffers
     int64_t* input_ids;
@@ -394,20 +412,131 @@ onnx_embedder_t* onnx_embedder_init(const char* model_path, const char* vocab_pa
     
     e->max_seq_length = max_seq_length;
     e->dim = dim;
-    e->unk_id = 100;
-    e->cls_id = 101;
-    e->sep_id = 102;
-    e->pad_id = 0;
     
-    // Load vocab
-    if (load_vocab(vocab_path, &e->vocab_hash, &e->vocab_hash_size, &e->vocab_size,
-                   &e->unk_id, &e->cls_id, &e->sep_id, &e->pad_id) < 0) {
-        free(e);
-        return NULL;
+    // Detect tokenizer type from vocab file extension and path
+    size_t vocab_len = strlen(vocab_path);
+    int is_jina = (strstr(vocab_path, "jina") != NULL);
+    
+    if (vocab_len > 5 && strcmp(vocab_path + vocab_len - 5, ".json") == 0) {
+        // BPE tokenizer (Jina / RoBERTa)
+        e->tokenizer_type = TOKENIZER_BPE;
+        e->output_name = "last_hidden_state";
+        e->use_pooled_output = 0;
+        e->bos_id = 0;   // <s>
+        e->eos_id = 2;   // </s>
+        e->unk_id = 3;   // <unk>
+        e->pad_id = 1;   // <pad> = 1
+        
+        // Load vocab.json into memory
+        FILE* f = fopen(vocab_path, "rb");
+        if (!f) {
+            set_error("Failed to open vocab.json");
+            free(e);
+            return NULL;
+        }
+        
+        fseek(f, 0, SEEK_END);
+        long vocab_size = ftell(f);
+        fseek(f, 0, SEEK_SET);
+        
+        char* vocab_data = malloc(vocab_size + 1);
+        if (!vocab_data) {
+            fclose(f);
+            set_error("Failed to allocate vocab buffer");
+            free(e);
+            return NULL;
+        }
+        
+        if (fread(vocab_data, 1, vocab_size, f) != (size_t)vocab_size) {
+            free(vocab_data);
+            fclose(f);
+            set_error("Failed to read vocab.json");
+            free(e);
+            return NULL;
+        }
+        vocab_data[vocab_size] = '\0';
+        fclose(f);
+        
+        // Derive merges path from vocab path (replace vocab.json with merges.txt)
+        char merges_path[512];
+        strncpy(merges_path, vocab_path, sizeof(merges_path) - 1);
+        merges_path[sizeof(merges_path) - 1] = '\0';
+        
+        // Find last '/' or '\'
+        char* last_slash = strrchr(merges_path, '/');
+        char* last_backslash = strrchr(merges_path, '\\');
+        char* base = (last_slash > last_backslash) ? last_slash : last_backslash;
+        if (!base) base = merges_path;
+        else base++;
+        
+        strcpy(base, "merges.txt");
+        
+        // Load merges.txt into memory
+        f = fopen(merges_path, "rb");
+        if (!f) {
+            free(vocab_data);
+            set_error("Failed to open merges.txt");
+            free(e);
+            return NULL;
+        }
+        
+        fseek(f, 0, SEEK_END);
+        long merges_size = ftell(f);
+        fseek(f, 0, SEEK_SET);
+        
+        char* merges_data = malloc(merges_size + 1);
+        if (!merges_data) {
+            free(vocab_data);
+            fclose(f);
+            set_error("Failed to allocate merges buffer");
+            free(e);
+            return NULL;
+        }
+        
+        if (fread(merges_data, 1, merges_size, f) != (size_t)merges_size) {
+            free(vocab_data);
+            free(merges_data);
+            fclose(f);
+            set_error("Failed to read merges.txt");
+            free(e);
+            return NULL;
+        }
+        merges_data[merges_size] = '\0';
+        fclose(f);
+        
+        // Create byte-level BPE tokenizer
+        e->tokenizers_handle = byte_level_bpe_tokenizers_new_from_str(
+            vocab_data, vocab_size,
+            merges_data, merges_size,
+            NULL, 0  // no added tokens
+        );
+        
+        free(vocab_data);
+        free(merges_data);
+        
+        if (!e->tokenizers_handle) {
+            set_error("Failed to initialize tokenizers-cpp");
+            free(e);
+            return NULL;
+        }
+        
+        printf("Loaded tokenizers-cpp from %s\n", vocab_path);
+    } else {
+        // WordPiece tokenizer (MPNet / BERT)
+        e->tokenizer_type = TOKENIZER_WORDPIECE;
+        e->output_name = "token_embeddings";
+        e->use_pooled_output = 0;
+        
+        // Load vocab
+        if (load_vocab(vocab_path, &e->vocab_hash, &e->vocab_hash_size, &e->vocab_size,
+                       &e->unk_id, &e->cls_id, &e->sep_id, &e->pad_id) < 0) {
+            free(e);
+            return NULL;
+        }
+        
+        printf("Loaded WordPiece vocab: %d tokens (UNK=%d, CLS=%d, SEP=%d, PAD=%d)\n",
+               e->vocab_size, e->unk_id, e->cls_id, e->sep_id, e->pad_id);
     }
-    
-    printf("Loaded vocab: %d tokens (UNK=%d, CLS=%d, SEP=%d, PAD=%d)\n",
-           e->vocab_size, e->unk_id, e->cls_id, e->sep_id, e->pad_id);
     
     // Allocate working buffers
     e->input_ids = calloc(max_seq_length, sizeof(int64_t));
@@ -447,7 +576,8 @@ onnx_embedder_t* onnx_embedder_init(const char* model_path, const char* vocab_pa
     trt_options.trt_max_partition_iterations = 1000;
     trt_options.trt_min_subgraph_size = 1;
     trt_options.trt_max_workspace_size = 6ULL * 1024 * 1024 * 1024;  // 6GB workspace
-    trt_options.trt_fp16_enable = 1;  // 启用 FP16，加速 2x
+    // Jina model requires FP32 precision (FP16 causes embedding quality issues)
+    trt_options.trt_fp16_enable = is_jina ? 0 : 1;
     trt_options.trt_int8_enable = 0;
     trt_options.trt_engine_cache_enable = 1;  // 缓存 engine，下次启动更快
     trt_options.trt_engine_cache_path = "./trt_cache";  // engine 缓存路径
@@ -474,7 +604,11 @@ onnx_embedder_t* onnx_embedder_init(const char* model_path, const char* vocab_pa
             printf("  Using CUDA GPU acceleration\n");
         }
     } else {
-        printf("  Using TensorRT GPU acceleration (FP16)\n");
+        if (is_jina) {
+            printf("  Using TensorRT GPU acceleration (FP32 for Jina)\n");
+        } else {
+            printf("  Using TensorRT GPU acceleration (FP16)\n");
+        }
     }
     
     status = g_ort->CreateSession(e->env, model_path, session_options, &e->session);
@@ -508,7 +642,35 @@ int onnx_embedder_encode(onnx_embedder_t* e, const char* text, float* vector) {
     }
     
     // Tokenize
-    int token_count = wordpiece_tokenize(e, text, e->input_ids, e->max_seq_length);
+    int token_count;
+    if (e->tokenizer_type == TOKENIZER_BPE) {
+        TokenizerEncodeResult result;
+        // Note: tokenizers-cpp byte_level_bpe does NOT add special tokens automatically
+        // We need to add BOS/EOS manually
+        tokenizers_encode(e->tokenizers_handle, text, strlen(text), 0, &result);
+        
+        token_count = (int)result.len + 2; // +2 for BOS and EOS
+        if (token_count > e->max_seq_length) {
+            token_count = e->max_seq_length;
+        }
+        
+        // Add BOS token
+        e->input_ids[0] = e->bos_id;
+        
+        // Copy tokens
+        int max_tokens = token_count - 2;
+        if (max_tokens > (int)result.len) max_tokens = (int)result.len;
+        for (int i = 0; i < max_tokens; i++) {
+            e->input_ids[i + 1] = result.token_ids[i];
+        }
+        
+        // Add EOS token
+        e->input_ids[token_count - 1] = e->eos_id;
+        
+        tokenizers_free_encode_results(&result, 1);
+    } else {
+        token_count = wordpiece_tokenize(e, text, e->input_ids, e->max_seq_length);
+    }
     
     // Pad to max_seq_length and create attention mask
     for (int i = 0; i < e->max_seq_length; i++) {
@@ -547,7 +709,7 @@ int onnx_embedder_encode(onnx_embedder_t* e, const char* text, float* vector) {
     
     // Run inference
     const char* input_names[] = {"input_ids", "attention_mask"};
-    const char* output_names[] = {"token_embeddings"};
+    const char* output_names[] = {e->output_name};
     OrtValue* output_tensor = NULL;
     OrtValue* inputs[] = {input_tensor, mask_tensor};
     
@@ -572,8 +734,23 @@ int onnx_embedder_encode(onnx_embedder_t* e, const char* text, float* vector) {
         return -1;
     }
     
-    // Mean pooling + normalize
-    mean_pool_and_normalize(output_data, e->attention_mask, e->max_seq_length, e->dim, vector);
+    if (e->use_pooled_output) {
+        // Pooled output: directly copy and normalize
+        memcpy(vector, output_data, sizeof(float) * e->dim);
+        float norm = 0.0f;
+        for (int j = 0; j < e->dim; j++) {
+            norm += vector[j] * vector[j];
+        }
+        norm = sqrtf(norm);
+        if (norm > 0) {
+            for (int j = 0; j < e->dim; j++) {
+                vector[j] /= norm;
+            }
+        }
+    } else {
+        // Mean pooling + normalize
+        mean_pool_and_normalize(output_data, e->attention_mask, e->max_seq_length, e->dim, vector);
+    }
     
     g_ort->ReleaseValue(output_tensor);
     return 0;
@@ -601,7 +778,34 @@ int onnx_embedder_encode_batch(onnx_embedder_t* e, const char** texts, int count
         int64_t* ids = batch_input_ids + i * e->max_seq_length;
         int64_t* mask = batch_attention_mask + i * e->max_seq_length;
         
-        int token_count = wordpiece_tokenize(e, texts[i], ids, e->max_seq_length);
+        int token_count;
+        if (e->tokenizer_type == TOKENIZER_BPE) {
+            TokenizerEncodeResult result;
+            // Note: tokenizers-cpp byte_level_bpe does NOT add special tokens
+            tokenizers_encode(e->tokenizers_handle, texts[i], strlen(texts[i]), 0, &result);
+            
+            token_count = (int)result.len + 2; // +2 for BOS and EOS
+            if (token_count > e->max_seq_length) {
+                token_count = e->max_seq_length;
+            }
+            
+            // Add BOS token
+            ids[0] = e->bos_id;
+            
+            // Copy tokens
+            int max_tokens = token_count - 2;
+            if (max_tokens > (int)result.len) max_tokens = (int)result.len;
+            for (int j = 0; j < max_tokens; j++) {
+                ids[j + 1] = result.token_ids[j];
+            }
+            
+            // Add EOS token
+            ids[token_count - 1] = e->eos_id;
+            
+            tokenizers_free_encode_results(&result, 1);
+        } else {
+            token_count = wordpiece_tokenize(e, texts[i], ids, e->max_seq_length);
+        }
         
         // Pad and create attention mask
         for (int j = 0; j < e->max_seq_length; j++) {
@@ -645,7 +849,7 @@ int onnx_embedder_encode_batch(onnx_embedder_t* e, const char** texts, int count
     
     // Run inference
     const char* input_names[] = {"input_ids", "attention_mask"};
-    const char* output_names[] = {"token_embeddings"};
+    const char* output_names[] = {e->output_name};
     OrtValue* output_tensor = NULL;
     OrtValue* inputs[] = {input_tensor, mask_tensor};
     
@@ -675,12 +879,30 @@ int onnx_embedder_encode_batch(onnx_embedder_t* e, const char** texts, int count
     }
     
     // Extract vectors for each sample
-    // Output shape: [count, seq_length, dim]
-    for (int i = 0; i < count; i++) {
-        float* out = output_data + i * e->max_seq_length * e->dim;
-        int64_t* mask = batch_attention_mask + i * e->max_seq_length;
-        
-        mean_pool_and_normalize(out, mask, e->max_seq_length, e->dim, vectors + i * e->dim);
+    if (e->use_pooled_output) {
+        // Pooled output shape: [count, dim]
+        for (int i = 0; i < count; i++) {
+            float* out = output_data + i * e->dim;
+            memcpy(vectors + i * e->dim, out, sizeof(float) * e->dim);
+            float norm = 0.0f;
+            for (int j = 0; j < e->dim; j++) {
+                norm += vectors[i * e->dim + j] * vectors[i * e->dim + j];
+            }
+            norm = sqrtf(norm);
+            if (norm > 0) {
+                for (int j = 0; j < e->dim; j++) {
+                    vectors[i * e->dim + j] /= norm;
+                }
+            }
+        }
+    } else {
+        // Output shape: [count, seq_length, dim]
+        for (int i = 0; i < count; i++) {
+            float* out = output_data + i * e->max_seq_length * e->dim;
+            int64_t* mask = batch_attention_mask + i * e->max_seq_length;
+            
+            mean_pool_and_normalize(out, mask, e->max_seq_length, e->dim, vectors + i * e->dim);
+        }
     }
     
     free(batch_input_ids);
@@ -696,7 +918,12 @@ void onnx_embedder_free(onnx_embedder_t* e) {
     if (e->session) g_ort->ReleaseSession(e->session);
     if (e->env) g_ort->ReleaseEnv(e->env);
     
-    free(e->vocab_hash);
+    if (e->tokenizer_type == TOKENIZER_BPE) {
+        tokenizers_free(e->tokenizers_handle);
+    } else {
+        free(e->vocab_hash);
+    }
+    
     free(e->input_ids);
     free(e->attention_mask);
     free(e);

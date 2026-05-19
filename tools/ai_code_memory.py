@@ -482,7 +482,7 @@ class AICodeMemory:
                 start_line, end_line = ranges[range_key]
             else:
                 start_line = line
-                end_line = line + 30
+                end_line = line + 80  # 增加到80行，覆盖完整函数体
             
             content = self.parser.parse_file_content(filepath, start_line, end_line)
             if not content.strip():
@@ -638,11 +638,26 @@ class AICodeMemory:
                     "callees": unique_callees,
                 }, 0)
         
-        # 4. 保存精简版 chunks（轻量级：只存前10行作为预览）
-        # AI 根据文件路径和行号自己去读完整源码
+        # 4. 保存完整 chunks（用于向量编码）
+        # 过滤噪声：只保留有意义的符号
+        meaningful_kinds = {'function', 'method', 'class', 'struct', 'namespace', 
+                            'macro', 'typedef', 'enum', 'interface', 'prototype'}
+        
         for chunk in chunks:
-            text = f"{chunk['signature']}\n{chunk['docstring']}\n"
-            text += '\n'.join(chunk['content'].split('\n')[:10])  # 前10行
+            # 跳过低质量符号
+            if chunk['kind'] not in meaningful_kinds:
+                continue
+            
+            # 构建完整文本：签名 + 文档 + 完整代码（最多50行）
+            lines = chunk['content'].split('\n')
+            code_text = '\n'.join(lines[:50])  # 前50行，足够覆盖大多数函数体
+            
+            text = ""
+            if chunk['signature']:
+                text += f"{chunk['signature']}\n"
+            if chunk['docstring']:
+                text += f"{chunk['docstring']}\n"
+            text += code_text
             
             safe_set_json(f"{namespace}/chunks/{chunk['file']}/{chunk['name']}", {
                 "id": chunk['id'],
@@ -652,7 +667,7 @@ class AICodeMemory:
                 "language": chunk['language'],
                 "signature": chunk['signature'],
                 "docstring": chunk['docstring'],
-                "content": text[:2000],  # 限制长度
+                "content": text[:16000],  # 足够覆盖完整函数和上下文
             }, 0)
         
         # 5. 保存文件索引
