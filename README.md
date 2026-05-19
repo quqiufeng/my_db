@@ -605,15 +605,21 @@ export LD_LIBRARY_PATH=/home/dministrator/my_db:\
     $LD_LIBRARY_PATH
 
 # 编译向量生成工具（首次使用）
-make vector_generator
+make tools/vector_generator
 
-# 生成语义向量（自动使用 GPU TensorRT 加速）
-./tools/vector_generator ./ai_code_memory /code/local/stable-diffusion.cpp
+# 方式 A: 指定 namespace（任意项目）
+./tools/vector_generator ./ai_code_memory /code/local/my-project
+
+# 方式 B: 自动检测 namespace（如果 cache 中只有一个项目）
+./tools/vector_generator ./ai_code_memory
 
 # 输出：
+# Auto-detecting namespace...
+# Detected namespace: /code/local/stable-diffusion.cpp
+# Opening cache: ./ai_code_memory
 # Loading embedder...
 #   Using TensorRT GPU acceleration (FP16)
-# Collecting chunks...
+# Collecting chunks from namespace: /code/local/stable-diffusion.cpp
 #   Found 41563 items to encode
 # Encoding with batch size 512...
 #   Progress: 40960/41563
@@ -635,25 +641,34 @@ make vector_generator
 
 ```bash
 # 编译语义搜索工具（首次使用）
-gcc -O2 -o tools/vector_search tools/vector_search.c \
-    -I./include -L. -lmydb -lonnx_embedder \
-    -Wl,-rpath,'$ORIGIN/..' -lm -ldl
+make tools/vector_search
 
-# 自然语言搜索代码
+# 自然语言搜索代码（自动发现所有项目）
 ./tools/vector_search ./ai_code_memory "generate image from text" 5
 
+# 限定在特定项目搜索
+./tools/vector_search ./ai_code_memory "generate image from text" 5 /code/local/stable-diffusion.cpp
+
 # 输出：
+# Cache: ./ai_code_memory
 # Query: "generate image from text"
-# Vectors: 41563, Dim: 768
+# Max results: 5
 # 
-# Top 5 results:
+# Found 1 vector source(s):
+#   [1] /code/local/stable-diffusion.cpp (41563 vectors)
+# 
+# Loading embedder...
+# Encoding query...
+# Searching /code/local/stable-diffusion.cpp...
+# 
+# Top 5 results across 1 source(s):
 # Name                                               Score
 # ----                                               -----
-# setjmp.h_2                                         0.4414
-# data_34                                            0.4361
-# IMkvWriter_1                                       0.4361
-# ErnieImageAttention                                0.4294
-# DataUrl                                            0.4246
+# generate_image                                     0.7823
+# txt2img                                            0.7654
+# sd_image_t                                         0.7432
+# upscale_image                                      0.7211
+# preprocess_image                                   0.6987
 ```
 
 ### 查询示例
@@ -709,22 +724,17 @@ AI Agent 可以通过调用 `vector_search` C 程序来查询源码：
 
 ```python
 import subprocess
-import json
+import os
 
-def search_code(query, cache_dir="./ai_code_memory", top_k=5):
-    """AI Agent 调用 C 工具进行语义搜索"""
-    env = {
-        "LD_LIBRARY_PATH": "/home/dministrator/my_db:/opt/TensorRT-10/lib:/home/dministrator/anaconda3/envs/dl/lib"
-    }
+def search_code(query, cache_dir="./ai_code_memory", top_k=5, namespace=None):
+    """AI Agent 调用 C 工具进行语义搜索（支持任意项目）"""
+    cmd = ["./tools/vector_search", cache_dir, query, str(top_k)]
+    if namespace:
+        cmd.append(namespace)
     
-    result = subprocess.run(
-        ["./tools/vector_search", cache_dir, query, str(top_k)],
-        capture_output=True,
-        text=True,
-        env={**os.environ, **env}
-    )
+    result = subprocess.run(cmd, capture_output=True, text=True)
     
-    # 解析输出，提取结果
+    # 解析输出
     lines = result.stdout.strip().split('\n')
     results = []
     in_results = False
@@ -733,54 +743,66 @@ def search_code(query, cache_dir="./ai_code_memory", top_k=5):
         if line.startswith("Top "):
             in_results = True
             continue
-        if in_results and line.startswith("  "):
-            parts = line.strip().rsplit(None, 1)
+        if in_results and len(line) > 50:
+            # Format: "name                          score"
+            parts = line.rsplit(None, 1)
             if len(parts) == 2:
-                name, score = parts
-                results.append({
-                    "name": name.strip(),
-                    "score": float(score),
-                    "location": get_location(name.strip())  # 从 cache 查位置
-                })
+                try:
+                    score = float(parts[1])
+                    results.append({
+                        "name": parts[0].strip(),
+                        "score": score
+                    })
+                except ValueError:
+                    continue
     
     return results
 
-# AI Agent 使用示例
+# AI Agent 使用示例（支持任意项目）
 code_context = "我需要生成图像的函数"
-results = search_code("generate image from text", top_k=3)
+
+# 搜索所有项目
+results = search_code("generate image from text", top_k=5)
+
+# 或限定在特定项目
+results = search_code("generate image", top_k=3, namespace="/code/local/my-project")
 
 # 结果注入提示词
 prompt = f"用户需要: {code_context}\n\n相关源码:\n"
 for r in results:
     prompt += f"- {r['name']} (相似度: {r['score']:.2%})\n"
-    if r.get('location'):
-        prompt += f"  位置: {r['location']['file']}:{r['location']['line']}\n"
-
-# AI 基于准确的源码位置生成代码
 ```
 
 ### 完整使用示例
 
-**1. 管理员：索引新项目（一次性）**
+**1. 管理员：索引新项目（支持任意项目）**
 ```bash
-# 索引源码
-python3 tools/ai_code_memory.py ingest /opt/stable-diffusion.cpp --skip-vectors
+# 索引任意源码项目
+python3 tools/ai_code_memory.py ingest /path/to/your-project --skip-vectors
 
 # 生成向量（C 工具，GPU 加速）
 export LD_LIBRARY_PATH=/home/dministrator/my_db:/opt/TensorRT-10/lib:/home/dministrator/anaconda3/envs/dl/lib:$LD_LIBRARY_PATH
-./tools/vector_generator ./ai_code_memory /code/local/stable-diffusion.cpp
+
+# 方式 A: 指定 namespace
+./tools/vector_generator ./ai_code_memory /code/local/your-project
+
+# 方式 B: 自动检测（适合单个项目）
+./tools/vector_generator ./ai_code_memory
 ```
 
-**2. AI Agent：查询源码（运行时）**
+**2. AI Agent：查询源码（运行时，支持任意项目）**
 ```bash
-# 语义搜索
+# 语义搜索（自动发现所有项目）
 ./tools/vector_search ./ai_code_memory "how to generate image" 5
+
+# 限定在特定项目搜索
+./tools/vector_search ./ai_code_memory "how to generate image" 5 /code/local/your-project
 
 # 查具体函数签名
 python3 -c "
 from mydb.cache import open_cache
 cache = open_cache('./ai_code_memory')
-data = cache.get('/code/local/stable-diffusion.cpp/symbols/generate_image')
+data = cache.get('/code/local/your-project/symbols/generate_image')
 print(data)
 "
 
@@ -788,7 +810,7 @@ print(data)
 python3 -c "
 from mydb.cache import open_cache
 cache = open_cache('./ai_code_memory')
-data = cache.get('/code/local/stable-diffusion.cpp/callers/generate_image')
+data = cache.get('/code/local/your-project/callers/generate_image')
 print(data)
 "
 ```

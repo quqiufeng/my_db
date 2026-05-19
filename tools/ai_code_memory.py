@@ -761,163 +761,36 @@ class AICodeMemory:
         return results
     
     def _generate_vectors(self, chunks, namespace):
-        """使用 C++ 多线程批量生成向量"""
-        import struct
+        """向量生成已由 C 工具取代（tools/vector_generator）
+        
+        使用方法:
+            ./tools/vector_generator <cache_dir> [namespace]
+        
+        此 Python 方法保留用于向后兼容，但实际调用 C 工具。
+        """
         import subprocess
-        import tempfile
         
-        # 检查 C++ 工具是否存在（优先使用 V2）
-        tool_path = os.path.join(os.path.dirname(__file__), 'vector_indexer_v2')
+        tool_path = os.path.join(os.path.dirname(__file__), 'vector_generator')
         if not os.path.exists(tool_path):
-            tool_path = os.path.join(os.path.dirname(__file__), 'vector_indexer')
-        
-        if not os.path.exists(tool_path):
-            print(f"  C++ vector indexer not found: {tool_path}")
-            print("  Falling back to Python (slower)...")
-            self._generate_vectors_python(chunks, namespace)
+            print(f"  ERROR: C vector generator not found: {tool_path}")
+            print("  Please build it first: make vector_generator")
             return
         
+        print(f"  Generating vectors via C tool: {tool_path}")
+        cmd = [tool_path, self.cache._dir if hasattr(self.cache, '_dir') else './ai_code_memory', namespace]
+        
         try:
-            print(f"  Generating embeddings for {len(chunks)} symbols (C++ multi-threaded)...")
-            
-            # 1. 准备输入数据（二进制格式）
-            fd, input_bin = tempfile.mkstemp(suffix='.bin', prefix='vectors_in_')
-            
-            valid_chunks = []
-            with os.fdopen(fd, 'wb') as f:
-                # 先写入数量（稍后更新）
-                count_pos = f.tell()
-                f.write(struct.pack('I', 0))
-                
-                for chunk in chunks:
-                    text = f"{chunk['signature']}\n{chunk['docstring']}\n"
-                    text += '\n'.join(chunk['content'].split('\n')[:5])
-                    
-                    if not text.strip():
-                        continue
-                    
-                    name_bytes = chunk['name'].encode('utf-8')
-                    text_bytes = text.encode('utf-8')
-                    file_bytes = chunk['file'].encode('utf-8')
-                    
-                    f.write(struct.pack('I', len(name_bytes)))
-                    f.write(name_bytes)
-                    f.write(struct.pack('I', len(text_bytes)))
-                    f.write(text_bytes)
-                    f.write(struct.pack('I', len(file_bytes)))
-                    f.write(file_bytes)
-                    f.write(struct.pack('i', chunk['line_start']))
-                    
-                    valid_chunks.append(chunk)
-                
-                # 更新数量
-                f.seek(count_pos)
-                f.write(struct.pack('I', len(valid_chunks)))
-            
-            # 2. 运行 C++ 编码器
-            output_bin = input_bin.replace('.bin', '_out.bin')
-            
-            cmd = [tool_path, input_bin, output_bin]
-            num_threads = min(multiprocessing.cpu_count(), 8)
-            cmd.extend(['--threads', str(num_threads)])
-            
-            start_time = time.time()
-            env = os.environ.copy()
-            env['LD_LIBRARY_PATH'] = '/home/dministrator/my_db:/home/dministrator/anaconda3/envs/dl/lib'
-            result = subprocess.run(cmd, capture_output=True, text=True, env=env)
-            elapsed = time.time() - start_time
-            
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            print(result.stdout)
             if result.returncode != 0:
-                print(f"  C++ encoder failed (code {result.returncode})")
-                print(f"  Stderr: {result.stderr[:500]}")
-                print("  Falling back to Python...")
-                self._generate_vectors_python(chunks, namespace)
-                os.unlink(input_bin)
-                return
-            
-            print(f"  C++ encoder output:\n{result.stdout[:500]}")
-            
-            # 3. 读取输出并导入 cache
-            imported = 0
-            dim = 384
-            
-            with open(output_bin, 'rb') as f:
-                while True:
-                    name_len_bytes = f.read(4)
-                    if len(name_len_bytes) < 4:
-                        break
-                    
-                    name_len = struct.unpack('I', name_len_bytes)[0]
-                    if name_len > 1024:
-                        break
-                    
-                    name = f.read(name_len).decode('utf-8')
-                    
-                    vector_data = f.read(dim * 4)
-                    if len(vector_data) < dim * 4:
-                        break
-                    
-                    vector = struct.unpack(f'{dim}f', vector_data)
-                    
-                    key = f"{namespace}/vectors/{name}"
-                    self.cache.set(key, json.dumps({
-                        'name': name,
-                        'vector': list(vector),
-                    }), 0)
-                    imported += 1
-            
-            print(f"  Generated {imported} vectors in {elapsed:.1f}s "
-                  f"({imported/elapsed:.1f} items/s)")
-            
-            # 清理临时文件
-            os.unlink(input_bin)
-            os.unlink(output_bin)
-            
+                print(f"  Error: {result.stderr}")
         except Exception as e:
-            print(f"  Vector generation failed: {e}")
-            print("  Falling back to Python...")
-            self._generate_vectors_python(chunks, namespace)
+            print(f"  Failed to run vector_generator: {e}")
     
     def _generate_vectors_python(self, chunks, namespace):
-        """Python 回退方案（逐个编码）"""
-        try:
-            from mydb.onnx_embedder import OnnxEmbedder
-            
-            embedder = OnnxEmbedder()
-            print(f"  Generating embeddings (Python fallback)...")
-            
-            start_time = time.time()
-            generated = 0
-            
-            for i, chunk in enumerate(chunks):
-                text = f"{chunk['signature']}\n{chunk['docstring']}\n"
-                text += '\n'.join(chunk['content'].split('\n')[:5])
-                
-                if not text.strip():
-                    continue
-                
-                try:
-                    vector = embedder.encode(text)
-                    key = f"{namespace}/vectors/{chunk['name']}"
-                    self.cache.set(key, json.dumps({
-                        'name': chunk['name'],
-                        'vector': vector,
-                    }), 0)
-                    generated += 1
-                except:
-                    pass
-                
-                if (i + 1) % 100 == 0:
-                    elapsed = time.time() - start_time
-                    print(f"    Progress: {i + 1}/{len(chunks)} ({elapsed:.1f}s)")
-            
-            embedder.close()
-            print(f"  Generated {generated} vectors")
-            
-        except ImportError:
-            print("  ONNX embedder not available")
-        except Exception as e:
-            print(f"  Error: {e}")
+        """Python 向量生成已废弃，请使用 C 工具"""
+        print("  Python vector generation deprecated. Use: ./tools/vector_generator")
+        self._generate_vectors(chunks, namespace)
     
     # ========================================================================
     # AI Agent 查询 API - 按精准度排序
