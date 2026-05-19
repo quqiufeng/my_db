@@ -8,7 +8,7 @@
 #include "onnx_embedder.h"
 
 #define DIM 768
-#define BATCH_SIZE 128
+#define BATCH_SIZE 512
 #define MAX_TEXT_LEN 2048
 #define MAX_ITEMS 100000
 
@@ -184,18 +184,80 @@ int main(int argc, char** argv) {
     fclose(fp);
     
     // Write index file: JSON mapping name -> offset
+    // Handle duplicate names by appending _1, _2, etc.
     size_t offset = 8;  // skip header
+    
+    // Simple hash table to track duplicate names
+    typedef struct {
+        char name[256];
+        int count;
+    } name_count_t;
+    
+    name_count_t* name_table = calloc(item_count, sizeof(name_count_t));
+    int name_table_size = 0;
+    
+    // Escape string for JSON (handles quotes, backslashes, control chars)
+    char json_escaped[512];
+    
     FILE* idx_fp = fopen(idx_file, "w");
     if (idx_fp) {
         fprintf(idx_fp, "{");
         for (int i = 0; i < item_count; i++) {
+            // Check for duplicates
+            int dup_count = 0;
+            for (int j = 0; j < name_table_size; j++) {
+                if (strcmp(name_table[j].name, items[i].name) == 0) {
+                    dup_count = ++name_table[j].count;
+                    break;
+                }
+            }
+            
+            char unique_name[256];
+            if (dup_count == 0) {
+                // First occurrence
+                strcpy(name_table[name_table_size].name, items[i].name);
+                name_table[name_table_size].count = 0;
+                name_table_size++;
+                strcpy(unique_name, items[i].name);
+            } else {
+                // Duplicate, append suffix
+                snprintf(unique_name, sizeof(unique_name), "%s_%d", items[i].name, dup_count);
+            }
+            
+            // Escape the name for JSON
+            int je = 0;
+            for (int k = 0; unique_name[k] && je < 510; k++) {
+                char c = unique_name[k];
+                if (c == '"' || c == '\\') {
+                    json_escaped[je++] = '\\';
+                    json_escaped[je++] = c;
+                } else if (c == '\b') {
+                    json_escaped[je++] = '\\'; json_escaped[je++] = 'b';
+                } else if (c == '\f') {
+                    json_escaped[je++] = '\\'; json_escaped[je++] = 'f';
+                } else if (c == '\n') {
+                    json_escaped[je++] = '\\'; json_escaped[je++] = 'n';
+                } else if (c == '\r') {
+                    json_escaped[je++] = '\\'; json_escaped[je++] = 'r';
+                } else if (c == '\t') {
+                    json_escaped[je++] = '\\'; json_escaped[je++] = 't';
+                } else if ((unsigned char)c < 0x20) {
+                    // Control characters -> \u00XX
+                    je += snprintf(json_escaped + je, 512 - je, "\\u%04x", (unsigned char)c);
+                } else {
+                    json_escaped[je++] = c;
+                }
+            }
+            json_escaped[je] = '\0';
+            
             if (i > 0) fprintf(idx_fp, ",");
-            fprintf(idx_fp, "\"%s\":%zu", items[i].name, offset);
+            fprintf(idx_fp, "\"%s\":%zu", json_escaped, offset);
             offset += DIM * sizeof(float);
         }
         fprintf(idx_fp, "}\n");
         fclose(idx_fp);
     }
+    free(name_table);
     
     // Skip writing to cache (slow for large datasets)
     // Binary file is the source of truth
