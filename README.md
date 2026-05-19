@@ -620,13 +620,13 @@ make tools/vector_generator
 # Loading embedder...
 #   Using TensorRT GPU acceleration (FP16)
 # Collecting chunks from namespace: /code/local/stable-diffusion.cpp
-#   Found 41563 items to encode
-# Encoding with batch size 512...
-#   Progress: 40960/41563
-# Encoded 41563 items in 17.9s (2324.6 items/s)
+#   Found 14308 items to encode (filtered 51% noise: thirdparty, tests, examples, etc.)
+# Encoding with MPNet...
+#   Progress: 12800/14308
+# Encoded 14308/14308 items in 13.0s (1104.1 items/s)
 # Storing vectors to binary file...
-#   Stored 41563 vectors in 0.1s (415227 items/s)
-# Done! Total: 19.9s
+#   Stored 14308 vectors in 0.3s (42799.6 items/s)
+# Done! Total: 13.3s
 ```
 
 **模型选择（MPNet vs CodeBERT）**：
