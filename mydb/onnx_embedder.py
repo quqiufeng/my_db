@@ -16,6 +16,28 @@ import ctypes
 import os
 import sys
 
+# Preload TensorRT dependencies with RTLD_GLOBAL so ONNX Runtime provider can find symbols
+# This avoids LD_LIBRARY_PATH requirement
+import ctypes as _ctypes
+
+# Set dlopen flags to RTLD_GLOBAL before loading shared libraries
+# This ensures symbols are visible to subsequently loaded libraries (like ONNX providers)
+_RTLD_GLOBAL = 0x00100
+_RTLD_NOW = 0x00002
+_prev_dlopen_flags = sys.getdlopenflags()
+sys.setdlopenflags(_RTLD_NOW | _RTLD_GLOBAL)
+
+try:
+    # Load in dependency order: cuDNN first, then TensorRT core
+    _ctypes.CDLL("/home/dministrator/my_db/libcudnn.so.9")
+    _ctypes.CDLL("/home/dministrator/my_db/libnvinfer.so.10")
+    _ctypes.CDLL("/home/dministrator/my_db/libnvonnxparser.so.10")
+except Exception:
+    pass
+finally:
+    # Restore previous flags
+    sys.setdlopenflags(_prev_dlopen_flags)
+
 # 加载动态库
 # 优先查找 libonnx_embedder.so（我们会编译它）
 lib_paths = [

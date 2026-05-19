@@ -3,11 +3,27 @@
 通用 AI Agent 代码记忆系统接口
 
 支持任意已 ingest 的项目，不依赖特定项目结构。
+
+环境变量要求（确保 TensorRT 加载）：
+  export LD_LIBRARY_PATH=/home/dministrator/my_db:/opt/TensorRT-10/lib:/home/dministrator/anaconda3/envs/dl/lib:$LD_LIBRARY_PATH
 """
 
 import os
 import sys
 import json
+
+# Ensure LD_LIBRARY_PATH is set BEFORE any dynamic library loading
+_required_paths = [
+    '/home/dministrator/my_db',
+    '/opt/TensorRT-10/lib',
+    '/home/dministrator/anaconda3/envs/dl/lib'
+]
+_ld_path = os.environ.get('LD_LIBRARY_PATH', '')
+_missing = [p for p in _required_paths if p not in _ld_path]
+if _missing and not getattr(sys, '_trt_fixed', False):
+    sys._trt_fixed = True
+    os.environ['LD_LIBRARY_PATH'] = ':'.join(_required_paths + [_ld_path]) if _ld_path else ':'.join(_required_paths)
+    os.execv(sys.executable, [sys.executable] + sys.argv)
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from mydb.cache import open_cache
@@ -19,6 +35,22 @@ class CodeMemoryAgent:
     def __init__(self, cache_dir='./ai_code_memory'):
         self.cache_dir = cache_dir
         self.cache = open_cache(cache_dir)
+        self._embedder = None
+        
+        # Preload TensorRT libraries for Python process
+        import ctypes
+        import os
+        trt_paths = [
+            '/home/dministrator/my_db/libnvinfer.so.10',
+            '/home/dministrator/my_db/libnvonnxparser.so.10',
+            '/home/dministrator/my_db/libcudnn.so.9',
+        ]
+        for path in trt_paths:
+            if os.path.exists(path):
+                try:
+                    ctypes.CDLL(path, ctypes.RTLD_GLOBAL)
+                except:
+                    pass
     
     def list_repos(self):
         """列出所有已索引的仓库"""
@@ -139,6 +171,18 @@ class CodeMemoryAgent:
             return json.loads(data)
         return None
     
+    def _get_embedder(self):
+        """Lazy init embedder (reused across searches)"""
+        if self._embedder is None:
+            from mydb.onnx_embedder import OnnxEmbedder
+            self._embedder = OnnxEmbedder(
+                model_path='models/all-mpnet-base-v2/model.onnx',
+                vocab_path='models/all-mpnet-base-v2/vocab.txt',
+                max_seq_length=128,
+                dim=768
+            )
+        return self._embedder
+    
     def semantic_search(self, namespace, query, max_results=10):
         """语义搜索（读取二进制向量文件）"""
         import struct
@@ -154,13 +198,7 @@ class CodeMemoryAgent:
             return {'error': f'Vector index not found. Run vector generator first.'}
         
         try:
-            from mydb.onnx_embedder import OnnxEmbedder
-            embedder = OnnxEmbedder(
-                model_path='models/all-mpnet-base-v2/model.onnx',
-                vocab_path='models/all-mpnet-base-v2/vocab.txt',
-                max_seq_length=128,
-                dim=768
-            )
+            embedder = self._get_embedder()
             query_vec = embedder.encode(query)
             
             # Load index mapping name -> offset
