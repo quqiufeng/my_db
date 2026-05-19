@@ -4,15 +4,17 @@
 #include <ctype.h>
 #include <time.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
+#include <unistd.h>
 #include "cache.h"
 #include "onnx_embedder.h"
 
 #define DIM 768
-#define BATCH_SIZE 512
-#define MAX_TEXT_LEN 2048
+#define BATCH_SIZE 32  // CodeBERT uses Python encoder, smaller batches
+#define MAX_TEXT_LEN 4096
 #define MAX_ITEMS_INITIAL 10000
 
-#define VERSION "1.1.0"
+#define VERSION "2.0.0"
 
 typedef struct {
     char name[256];
@@ -23,20 +25,21 @@ static void build_text(const char* name, const char* json, char* text, int max_l
 static void extract_name(const char* key, char* name, int max_len);
 static void namespace_to_filename(const char* ns, char* out, size_t out_len);
 static int file_exists(const char* path);
+static int detect_namespace(const char* cache_dir, char* ns_out, size_t ns_out_len);
 
 static void print_usage(const char* prog) {
     printf("AI Agent Vector Generator v%s\n", VERSION);
     printf("Generate semantic vectors for code repositories.\n\n");
-    printf("Usage: %s <cache_dir> [namespace]\n", prog);
-    printf("\nArguments:\n");
-    printf("  cache_dir    Path to cache directory (contains cache.bin)\n");
-    printf("  namespace    Repository namespace (default: auto-detect)\n");
+    printf("Usage: %s [options] <cache_dir> [namespace]\n", prog);
+    printf("\nOptions:\n");
+    printf("  --model <type>   Model type: mpnet (default) or codebert\n");
+    printf("  --help, -h      Show this help\n");
     printf("\nExamples:\n");
     printf("  %s ./ai_code_memory\n", prog);
-    printf("  %s ./ai_code_memory /code/local/my-project\n", prog);
-    printf("  %s ./ai_code_memory /code/github/redis/redis\n", prog);
-    printf("\nEnvironment:\n");
-    printf("  Set LD_LIBRARY_PATH to include TensorRT and CUDA libraries.\n");
+    printf("  %s --model codebert ./ai_code_memory /code/local/my-project\n", prog);
+    printf("\nModels:\n");
+    printf("  mpnet    - all-mpnet-base-v2 (general text, fast C tokenizer)\n");
+    printf("  codebert - microsoft/codebert-base (code-optimized, Python tokenizer)\n");
 }
 
 static int file_exists(const char* path) {
@@ -60,12 +63,10 @@ static void namespace_to_filename(const char* ns, char* out, size_t out_len) {
     out[si] = '\0';
 }
 
-// Auto-detect namespace from cache metadata
 static int detect_namespace(const char* cache_dir, char* ns_out, size_t ns_out_len) {
     cache_t* cache = cache_open(cache_dir, 1024 * 1024 * 1024);
     if (!cache) return -1;
     
-    // Look for /code/* namespaces
     cache_iter_t* iter = cache_iter_create(cache);
     const char* key;
     const char* value;
@@ -73,7 +74,6 @@ static int detect_namespace(const char* cache_dir, char* ns_out, size_t ns_out_l
     
     while (cache_iter_next(iter, &key, &value) == 1) {
         if (strncmp(key, "/code/", 6) == 0) {
-            // Extract /code/owner/repo part
             const char* p = key + 6;
             int slashes = 0;
             size_t len = 6;
@@ -91,7 +91,6 @@ static int detect_namespace(const char* cache_dir, char* ns_out, size_t ns_out_l
     cache_iter_destroy(iter);
     cache_close(cache);
     
-    // Strip trailing slash
     if (found) {
         size_t len = strlen(ns_out);
         if (len > 0 && ns_out[len - 1] == '/') {
@@ -102,40 +101,134 @@ static int detect_namespace(const char* cache_dir, char* ns_out, size_t ns_out_l
     return found ? 0 : -1;
 }
 
+// Encode using Python CodeBERT script
+static int encode_codebert_batch(const char* model_dir, item_t* items, int count, float* vectors, int dim) {
+    // Write items to temp file
+    char temp_in[] = "/tmp/codebert_in_XXXXXX";
+    int fd = mkstemp(temp_in);
+    if (fd < 0) return -1;
+    
+    FILE* fp = fdopen(fd, "w");
+    if (!fp) {
+        close(fd);
+        unlink(temp_in);
+        return -1;
+    }
+    
+    for (int i = 0; i < count; i++) {
+        // Escape JSON special chars in text
+        fprintf(fp, "{\"name\":\"%s\",\"text\":\"", items[i].name);
+        for (char* p = items[i].text; *p; p++) {
+            if (*p == '"' || *p == '\\') fprintf(fp, "\\%c", *p);
+            else if (*p == '\n') fprintf(fp, "\\n");
+            else if (*p == '\r') fprintf(fp, "\\r");
+            else if (*p == '\t') fprintf(fp, "\\t");
+            else if ((unsigned char)*p >= 0x20) fprintf(fp, "%c", *p);
+        }
+        fprintf(fp, "\"}\n");
+    }
+    fclose(fp);
+    
+    // Run Python encoder
+    char temp_out[] = "/tmp/codebert_out_XXXXXX";
+    int fd_out = mkstemp(temp_out);
+    if (fd_out < 0) {
+        unlink(temp_in);
+        return -1;
+    }
+    close(fd_out);
+    
+    char cmd[2048];
+    snprintf(cmd, sizeof(cmd), 
+             "python3 /home/dministrator/my_db/tools/codebert_encode.py --model-dir %s --batch < %s > %s 2>/dev/null",
+             model_dir, temp_in, temp_out);
+    
+    int ret = system(cmd);
+    unlink(temp_in);
+    
+    if (ret != 0) {
+        fprintf(stderr, "CodeBERT encoder failed (exit code %d)\n", ret);
+        unlink(temp_out);
+        return -1;
+    }
+    
+    // Read results
+    fp = fopen(temp_out, "r");
+    if (!fp) {
+        unlink(temp_out);
+        return -1;
+    }
+    
+    int processed = 0;
+    char line[65536];
+    while (fgets(line, sizeof(line), fp) && processed < count) {
+        // Parse JSON: {"name":"...","vector":[0.1,0.2,...]}
+        char* vec_start = strstr(line, "\"vector\":[");
+        if (!vec_start) continue;
+        vec_start += 10; // skip "vector":[
+        
+        for (int d = 0; d < dim && *vec_start; d++) {
+            vectors[processed * dim + d] = strtof(vec_start, &vec_start);
+            if (*vec_start == ',') vec_start++;
+            else if (*vec_start == ']') break;
+        }
+        processed++;
+    }
+    fclose(fp);
+    unlink(temp_out);
+    
+    return processed;
+}
+
 int main(int argc, char** argv) {
-    if (argc < 2) {
+    const char* model_type = "mpnet";
+    const char* cache_dir = NULL;
+    const char* namespace = NULL;
+    
+    // Parse options
+    int arg_idx = 1;
+    while (arg_idx < argc && argv[arg_idx][0] == '-') {
+        if (strcmp(argv[arg_idx], "--model") == 0 && arg_idx + 1 < argc) {
+            model_type = argv[++arg_idx];
+            arg_idx++;
+        } else if (strcmp(argv[arg_idx], "--help") == 0 || strcmp(argv[arg_idx], "-h") == 0) {
+            print_usage(argv[0]);
+            return 0;
+        } else {
+            fprintf(stderr, "Unknown option: %s\n", argv[arg_idx]);
+            return 1;
+        }
+    }
+    
+    if (arg_idx >= argc) {
         print_usage(argv[0]);
         return 1;
     }
-    
-    if (strcmp(argv[1], "--help") == 0 || strcmp(argv[1], "-h") == 0) {
-        print_usage(argv[0]);
-        return 0;
+    cache_dir = argv[arg_idx++];
+    if (arg_idx < argc) {
+        namespace = argv[arg_idx];
     }
     
-    const char* cache_dir = argv[1];
+    // Validate model type
+    int use_codebert = (strcmp(model_type, "codebert") == 0);
     
-    // Validate cache_dir
     struct stat st;
     if (stat(cache_dir, &st) != 0 || !S_ISDIR(st.st_mode)) {
         fprintf(stderr, "Error: cache_dir does not exist or is not a directory: %s\n", cache_dir);
         return 1;
     }
     
-    // Determine namespace
-    char namespace[512];
-    if (argc > 2) {
-        strncpy(namespace, argv[2], sizeof(namespace) - 1);
-        namespace[sizeof(namespace) - 1] = '\0';
+    char ns[512];
+    if (namespace) {
+        strncpy(ns, namespace, sizeof(ns) - 1);
+        ns[sizeof(ns) - 1] = '\0';
     } else {
         printf("Auto-detecting namespace...\n");
-        if (detect_namespace(cache_dir, namespace, sizeof(namespace)) != 0) {
+        if (detect_namespace(cache_dir, ns, sizeof(ns)) != 0) {
             fprintf(stderr, "Error: Could not auto-detect namespace.\n");
-            fprintf(stderr, "Please specify namespace explicitly:\n");
-            fprintf(stderr, "  %s %s /code/local/your-project\n", argv[0], cache_dir);
             return 1;
         }
-        printf("Detected namespace: %s\n", namespace);
+        printf("Detected namespace: %s\n", ns);
     }
     
     printf("Opening cache: %s\n", cache_dir);
@@ -145,61 +238,51 @@ int main(int argc, char** argv) {
         return 1;
     }
     
-    printf("Loading embedder...\n");
-    onnx_embedder_t* embedder = onnx_embedder_init(
-        "models/all-mpnet-base-v2/model.onnx",
-        "models/all-mpnet-base-v2/vocab.txt",
-        128, DIM
-    );
-    if (!embedder) {
-        fprintf(stderr, "Failed: %s\n", onnx_embedder_error());
-        cache_close(cache);
-        return 1;
+    // Initialize embedder
+    onnx_embedder_t* embedder = NULL;
+    if (!use_codebert) {
+        printf("Loading MPNet embedder...\n");
+        embedder = onnx_embedder_init(
+            "models/all-mpnet-base-v2/model.onnx",
+            "models/all-mpnet-base-v2/vocab.txt",
+            128, DIM
+        );
+        if (!embedder) {
+            fprintf(stderr, "Failed: %s\n", onnx_embedder_error());
+            cache_close(cache);
+            return 1;
+        }
+    } else {
+        printf("Using CodeBERT (Python-based encoding)...\n");
+        if (!file_exists("models/codebert-base/model.onnx")) {
+            fprintf(stderr, "Error: CodeBERT model not found at models/codebert-base/model.onnx\n");
+            cache_close(cache);
+            return 1;
+        }
     }
     
-    // 收集 chunks (dynamic array)
-    printf("Collecting chunks from namespace: %s\n", namespace);
+    // Collect chunks
+    printf("Collecting chunks from namespace: %s\n", ns);
     int capacity = MAX_ITEMS_INITIAL;
     item_t* items = malloc(capacity * sizeof(item_t));
     if (!items) {
-        fprintf(stderr, "Failed to allocate memory for items\n");
-        onnx_embedder_free(embedder);
+        fprintf(stderr, "Failed to allocate memory\n");
+        if (embedder) onnx_embedder_free(embedder);
         cache_close(cache);
         return 1;
     }
     
     int item_count = 0;
-    
     char chunk_prefix[512];
-    int n = snprintf(chunk_prefix, sizeof(chunk_prefix), "%s/chunks/", namespace);
+    int n = snprintf(chunk_prefix, sizeof(chunk_prefix), "%s/chunks/", ns);
     if (n < 0 || n >= (int)sizeof(chunk_prefix)) {
         fprintf(stderr, "Error: namespace too long\n");
         free(items);
-        onnx_embedder_free(embedder);
+        if (embedder) onnx_embedder_free(embedder);
         cache_close(cache);
         return 1;
     }
     size_t prefix_len = strlen(chunk_prefix);
-    
-    // Check if vector files already exist (for resume support)
-    char vec_dir[512];
-    snprintf(vec_dir, sizeof(vec_dir), "%s/vectors", cache_dir);
-    
-    char safe_ns[256];
-    namespace_to_filename(namespace, safe_ns, sizeof(safe_ns));
-    
-    char existing_vec[1024], existing_idx[1024];
-    snprintf(existing_vec, sizeof(existing_vec), "%s/%s.bin", vec_dir, safe_ns);
-    snprintf(existing_idx, sizeof(existing_idx), "%s/%s.idx", vec_dir, safe_ns);
-    
-    // Build set of existing vector names for incremental generation
-    // (simple approach: just check if files exist, skip if both exist)
-    int skip_existing = 0;
-    if (file_exists(existing_vec) && file_exists(existing_idx)) {
-        printf("Note: Vector files already exist. Use --force to regenerate.\n");
-        printf("  %s\n", existing_vec);
-        // Still continue to check for new chunks
-    }
     
     cache_iter_t* iter = cache_iter_create(cache);
     const char* key;
@@ -211,7 +294,6 @@ int main(int argc, char** argv) {
         char name[256];
         extract_name(key, name, sizeof(name));
         
-        // Expand array if needed
         if (item_count >= capacity) {
             int new_capacity = capacity * 2;
             item_t* new_items = realloc(items, new_capacity * sizeof(item_t));
@@ -238,18 +320,18 @@ int main(int argc, char** argv) {
     if (item_count == 0) {
         printf("Nothing to do\n");
         free(items);
-        onnx_embedder_free(embedder);
+        if (embedder) onnx_embedder_free(embedder);
         cache_close(cache);
         return 0;
     }
     
-    // 编码
-    printf("Encoding with batch size %d...\n", BATCH_SIZE);
+    // Encode
+    printf("Encoding with %s...\n", use_codebert ? "CodeBERT" : "MPNet");
     float* vectors = malloc(item_count * DIM * sizeof(float));
     if (!vectors) {
         fprintf(stderr, "Failed to allocate vectors memory\n");
         free(items);
-        onnx_embedder_free(embedder);
+        if (embedder) onnx_embedder_free(embedder);
         cache_close(cache);
         return 1;
     }
@@ -257,54 +339,77 @@ int main(int argc, char** argv) {
     int processed = 0;
     clock_t encode_start = clock();
     
-    const char** texts = malloc(BATCH_SIZE * sizeof(char*));
-    if (!texts) {
-        fprintf(stderr, "Failed to allocate texts buffer\n");
-        free(vectors);
-        free(items);
-        onnx_embedder_free(embedder);
-        cache_close(cache);
-        return 1;
-    }
-    
-    for (int i = 0; i < item_count; i += BATCH_SIZE) {
-        int batch_end = i + BATCH_SIZE;
-        if (batch_end > item_count) batch_end = item_count;
-        int batch_count = batch_end - i;
-        
-        for (int j = 0; j < batch_count; j++) {
-            texts[j] = items[i + j].text;
+    if (!use_codebert) {
+        // MPNet: use C embedder with batching
+        const char** texts = malloc(BATCH_SIZE * sizeof(char*));
+        if (!texts) {
+            free(vectors);
+            free(items);
+            onnx_embedder_free(embedder);
+            cache_close(cache);
+            return 1;
         }
         
-        int ret = onnx_embedder_encode_batch(embedder, texts, batch_count, vectors + i * DIM);
-        if (ret == 0) {
-            processed += batch_count;
-        } else {
-            // Fallback to single encoding
+        for (int i = 0; i < item_count; i += BATCH_SIZE) {
+            int batch_end = i + BATCH_SIZE;
+            if (batch_end > item_count) batch_end = item_count;
+            int batch_count = batch_end - i;
+            
             for (int j = 0; j < batch_count; j++) {
-                if (onnx_embedder_encode(embedder, items[i + j].text, vectors + (i + j) * DIM) == 0) {
-                    processed++;
+                texts[j] = items[i + j].text;
+            }
+            
+            int ret = onnx_embedder_encode_batch(embedder, texts, batch_count, vectors + i * DIM);
+            if (ret == 0) {
+                processed += batch_count;
+            } else {
+                for (int j = 0; j < batch_count; j++) {
+                    if (onnx_embedder_encode(embedder, items[i + j].text, vectors + (i + j) * DIM) == 0) {
+                        processed++;
+                    }
                 }
             }
+            
+            if ((i / BATCH_SIZE) % 10 == 0 && i > 0) {
+                printf("  Progress: %d/%d\n", i, item_count);
+            }
         }
-        
-        if ((i / BATCH_SIZE) % 10 == 0 && i > 0) {
-            printf("  Progress: %d/%d\n", i, item_count);
+        free(texts);
+    } else {
+        // CodeBERT: use Python encoder
+        for (int i = 0; i < item_count; i += BATCH_SIZE) {
+            int batch_end = i + BATCH_SIZE;
+            if (batch_end > item_count) batch_end = item_count;
+            int batch_count = batch_end - i;
+            
+            int ret = encode_codebert_batch("models/codebert-base", items + i, batch_count, 
+                                             vectors + i * DIM, DIM);
+            if (ret > 0) {
+                processed += ret;
+            }
+            
+            if ((i / BATCH_SIZE) % 5 == 0 && i > 0) {
+                printf("  Progress: %d/%d\n", i, item_count);
+            }
         }
     }
     
-    free(texts);
     double encode_time = (double)(clock() - encode_start) / CLOCKS_PER_SEC;
     printf("Encoded %d/%d items in %.1fs (%.1f items/s)\n", 
            processed, item_count, encode_time, processed / encode_time);
     
-    // 存储到二进制文件
+    // Store vectors
     printf("Storing vectors to binary file...\n");
     clock_t store_start = clock();
     
+    char vec_dir[512];
+    snprintf(vec_dir, sizeof(vec_dir), "%s/vectors", cache_dir);
     if (mkdir(vec_dir, 0755) != 0) {
-        // Directory may already exist, that's fine
+        // May already exist
     }
+    
+    char safe_ns[256];
+    namespace_to_filename(ns, safe_ns, sizeof(safe_ns));
     
     char vec_file[1024], idx_file[1024];
     int n1 = snprintf(vec_file, sizeof(vec_file), "%s/%s.bin", vec_dir, safe_ns);
@@ -313,119 +418,86 @@ int main(int argc, char** argv) {
         fprintf(stderr, "Error: Path too long\n");
         free(items);
         free(vectors);
-        onnx_embedder_free(embedder);
+        if (embedder) onnx_embedder_free(embedder);
         cache_close(cache);
         return 1;
     }
     
-    // Write binary file: [count:4][dim:4][vectors...]
     FILE* fp = fopen(vec_file, "wb");
     if (!fp) {
         fprintf(stderr, "Failed to create %s\n", vec_file);
         free(items);
         free(vectors);
-        onnx_embedder_free(embedder);
+        if (embedder) onnx_embedder_free(embedder);
         cache_close(cache);
         return 1;
     }
     
     uint32_t count = item_count;
     uint32_t dim = DIM;
-    size_t written = 0;
-    written += fwrite(&count, 4, 1, fp);
-    written += fwrite(&dim, 4, 1, fp);
-    written += fwrite(vectors, sizeof(float), item_count * DIM, fp);
+    fwrite(&count, 4, 1, fp);
+    fwrite(&dim, 4, 1, fp);
+    fwrite(vectors, sizeof(float), item_count * DIM, fp);
     fclose(fp);
     
-    if (written != (size_t)(2 + item_count * DIM)) {
-        fprintf(stderr, "Warning: Incomplete write to %s\n", vec_file);
-    }
-    
-    // Write index file: JSON mapping name -> offset
-    size_t offset = 8;  // skip header
-    
-    typedef struct {
-        char name[256];
-        int count;
-    } name_count_t;
-    
+    // Write index
+    size_t offset = 8;
+    typedef struct { char name[256]; int count; } name_count_t;
     name_count_t* name_table = calloc(item_count, sizeof(name_count_t));
-    if (!name_table) {
-        fprintf(stderr, "Failed to allocate name table\n");
-        free(items);
-        free(vectors);
-        onnx_embedder_free(embedder);
-        cache_close(cache);
-        return 1;
-    }
-    
     int name_table_size = 0;
     char json_escaped[512];
     
     FILE* idx_fp = fopen(idx_file, "w");
-    if (!idx_fp) {
-        fprintf(stderr, "Failed to create %s\n", idx_file);
-        free(name_table);
-        free(items);
-        free(vectors);
-        onnx_embedder_free(embedder);
-        cache_close(cache);
-        return 1;
-    }
-    
-    fprintf(idx_fp, "{");
-    for (int i = 0; i < item_count; i++) {
-        int dup_count = 0;
-        for (int j = 0; j < name_table_size; j++) {
-            if (strcmp(name_table[j].name, items[i].name) == 0) {
-                dup_count = ++name_table[j].count;
-                break;
+    if (idx_fp) {
+        fprintf(idx_fp, "{");
+        for (int i = 0; i < item_count; i++) {
+            int dup_count = 0;
+            for (int j = 0; j < name_table_size; j++) {
+                if (strcmp(name_table[j].name, items[i].name) == 0) {
+                    dup_count = ++name_table[j].count;
+                    break;
+                }
             }
-        }
-        
-        char unique_name[256];
-        if (dup_count == 0) {
-            strncpy(name_table[name_table_size].name, items[i].name, 255);
-            name_table[name_table_size].name[255] = '\0';
-            name_table[name_table_size].count = 0;
-            name_table_size++;
-            strncpy(unique_name, items[i].name, sizeof(unique_name) - 1);
-            unique_name[sizeof(unique_name) - 1] = '\0';
-        } else {
-            snprintf(unique_name, sizeof(unique_name), "%s_%d", items[i].name, dup_count);
-        }
-        
-        // Escape for JSON
-        int je = 0;
-        for (int k = 0; unique_name[k] && je < 510; k++) {
-            char c = unique_name[k];
-            if (c == '"' || c == '\\') {
-                json_escaped[je++] = '\\';
-                json_escaped[je++] = c;
-            } else if (c == '\b') {
-                json_escaped[je++] = '\\'; json_escaped[je++] = 'b';
-            } else if (c == '\f') {
-                json_escaped[je++] = '\\'; json_escaped[je++] = 'f';
-            } else if (c == '\n') {
-                json_escaped[je++] = '\\'; json_escaped[je++] = 'n';
-            } else if (c == '\r') {
-                json_escaped[je++] = '\\'; json_escaped[je++] = 'r';
-            } else if (c == '\t') {
-                json_escaped[je++] = '\\'; json_escaped[je++] = 't';
-            } else if ((unsigned char)c < 0x20) {
-                je += snprintf(json_escaped + je, 512 - je, "\\u%04x", (unsigned char)c);
+            
+            char unique_name[256];
+            if (dup_count == 0) {
+                strncpy(name_table[name_table_size].name, items[i].name, 255);
+                name_table[name_table_size].name[255] = '\0';
+                name_table[name_table_size].count = 0;
+                name_table_size++;
+                strncpy(unique_name, items[i].name, sizeof(unique_name) - 1);
+                unique_name[sizeof(unique_name) - 1] = '\0';
             } else {
-                json_escaped[je++] = c;
+                snprintf(unique_name, sizeof(unique_name), "%s_%d", items[i].name, dup_count);
             }
+            
+            int je = 0;
+            for (int k = 0; unique_name[k] && je < 510; k++) {
+                char c = unique_name[k];
+                if (c == '"' || c == '\\') {
+                    json_escaped[je++] = '\\';
+                    json_escaped[je++] = c;
+                } else if (c == '\n') {
+                    json_escaped[je++] = '\\'; json_escaped[je++] = 'n';
+                } else if (c == '\r') {
+                    json_escaped[je++] = '\\'; json_escaped[je++] = 'r';
+                } else if (c == '\t') {
+                    json_escaped[je++] = '\\'; json_escaped[je++] = 't';
+                } else if ((unsigned char)c < 0x20) {
+                    je += snprintf(json_escaped + je, 512 - je, "\\u%04x", (unsigned char)c);
+                } else {
+                    json_escaped[je++] = c;
+                }
+            }
+            json_escaped[je] = '\0';
+            
+            if (i > 0) fprintf(idx_fp, ",");
+            fprintf(idx_fp, "\"%s\":%zu", json_escaped, offset);
+            offset += DIM * sizeof(float);
         }
-        json_escaped[je] = '\0';
-        
-        if (i > 0) fprintf(idx_fp, ",");
-        fprintf(idx_fp, "\"%s\":%zu", json_escaped, offset);
-        offset += DIM * sizeof(float);
+        fprintf(idx_fp, "}\n");
+        fclose(idx_fp);
     }
-    fprintf(idx_fp, "}\n");
-    fclose(idx_fp);
     free(name_table);
     
     printf("Binary file: %s\n", vec_file);
@@ -435,7 +507,6 @@ int main(int argc, char** argv) {
     printf("Stored %d vectors in %.1fs (%.1f items/s)\n",
            item_count, store_time, item_count / store_time);
     
-    // Verify file size
     if (stat(vec_file, &st) == 0) {
         size_t expected = 8 + item_count * DIM * sizeof(float);
         printf("File size: %ld bytes (expected: %zu) OK=%d\n", 
@@ -446,13 +517,12 @@ int main(int argc, char** argv) {
     
     free(items);
     free(vectors);
-    onnx_embedder_free(embedder);
+    if (embedder) onnx_embedder_free(embedder);
     cache_close(cache);
     
     return 0;
 }
 
-// 从 JSON 提取字段
 static int extract_field(const char* json, const char* field, char* out, int max_len) {
     char pattern[64];
     snprintf(pattern, sizeof(pattern), "\"%s\":", field);
@@ -493,12 +563,10 @@ static void build_text(const char* name, const char* json, char* text, int max_l
     extract_field(json, "content", content, sizeof(content));
     extract_field(json, "language", lang, sizeof(lang));
     
-    // Collect up to 10 non-empty code lines
     char lines[10][256];
     int line_count = 0;
     char* p = content;
     while (*p && line_count < 10) {
-        // Skip leading whitespace on each line
         while (*p && (*p == ' ' || *p == '\t')) p++;
         
         int i = 0;
@@ -507,7 +575,6 @@ static void build_text(const char* name, const char* json, char* text, int max_l
         }
         lines[line_count][i] = '\0';
         
-        // Only count non-empty lines
         if (i > 0) {
             line_count++;
         }
@@ -515,33 +582,22 @@ static void build_text(const char* name, const char* json, char* text, int max_l
     }
     
     int n = 0;
-    
-    // 1. Function name is the strongest semantic signal
     if (name[0]) {
         n += snprintf(text + n, max_len - n, "%s ", name);
     }
-    
-    // 2. Language context
     if (lang[0]) {
         n += snprintf(text + n, max_len - n, "(%s) ", lang);
     }
-    
-    // 3. Signature
     if (sig[0]) {
         n += snprintf(text + n, max_len - n, "%s ", sig);
     }
-    
-    // 4. Docstring
     if (doc[0]) {
         n += snprintf(text + n, max_len - n, "%s ", doc);
     }
-    
-    // 5. Code body (non-empty lines)
     for (int i = 0; i < line_count && n < max_len - 1; i++) {
         n += snprintf(text + n, max_len - n, "%s ", lines[i]);
     }
     
-    // Trim trailing space
     if (n > 0 && text[n-1] == ' ') {
         text[n-1] = '\0';
     }

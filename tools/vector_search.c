@@ -383,6 +383,8 @@ int main(int argc, char** argv) {
     int max_results = MAX_RESULTS;
     const char* target_ns = NULL;
     
+    const char* model_type = "mpnet";
+    
     // Parse arguments
     int arg_idx = 1;
     while (arg_idx < argc && argv[arg_idx][0] == '-') {
@@ -392,16 +394,20 @@ int main(int argc, char** argv) {
         } else if (strcmp(argv[arg_idx], "--rich") == 0) {
             output_rich = 1;
             arg_idx++;
+        } else if (strcmp(argv[arg_idx], "--model") == 0 && arg_idx + 1 < argc) {
+            model_type = argv[++arg_idx];
+            arg_idx++;
         } else if (strcmp(argv[arg_idx], "--help") == 0 || strcmp(argv[arg_idx], "-h") == 0) {
             printf("AI Agent Semantic Code Search\n");
             printf("Usage: %s [options] <cache_dir> <query> [max_results] [namespace]\n", argv[0]);
             printf("\nOptions:\n");
             printf("  --json       Output results as JSON\n");
             printf("  --rich       Include full code context (file, line, signature, content)\n");
+            printf("  --model      Model type: mpnet (default) or codebert\n");
             printf("  -h, --help   Show this help\n");
             printf("\nExamples:\n");
             printf("  %s ./ai_code_memory \"generate image\" 5\n", argv[0]);
-            printf("  %s --rich ./ai_code_memory \"CUDA kernel\" 10\n", argv[0]);
+            printf("  %s --model codebert ./ai_code_memory \"CUDA kernel\" 10\n", argv[0]);
             printf("  %s --json --rich ./ai_code_memory \"memory allocation\" 5 /code/local/project\n", argv[0]);
             return 0;
         } else {
@@ -473,26 +479,84 @@ int main(int argc, char** argv) {
     }
     
     // Load embedder
-    if (!output_json) {
-        printf("Loading embedder...\n");
-    }
-    onnx_embedder_t* embedder = onnx_embedder_init(
-        "models/all-mpnet-base-v2/model.onnx",
-        "models/all-mpnet-base-v2/vocab.txt",
-        128, DIM
-    );
-    if (!embedder) {
-        fprintf(stderr, "Failed to load embedder: %s\n", onnx_embedder_error());
-        if (cache) cache_close(cache);
-        return 1;
-    }
+    int use_codebert = (strcmp(model_type, "codebert") == 0);
     
     float query_vec[DIM];
-    if (onnx_embedder_encode(embedder, query, query_vec) != 0) {
-        fprintf(stderr, "Failed to encode query\n");
+    
+    if (!use_codebert) {
+        // MPNet: use C embedder
+        if (!output_json) {
+            printf("Loading MPNet embedder...\n");
+        }
+        onnx_embedder_t* embedder = onnx_embedder_init(
+            "models/all-mpnet-base-v2/model.onnx",
+            "models/all-mpnet-base-v2/vocab.txt",
+            128, DIM
+        );
+        if (!embedder) {
+            fprintf(stderr, "Failed to load embedder: %s\n", onnx_embedder_error());
+            if (cache) cache_close(cache);
+            return 1;
+        }
+        
+        if (onnx_embedder_encode(embedder, query, query_vec) != 0) {
+            fprintf(stderr, "Failed to encode query\n");
+            onnx_embedder_free(embedder);
+            if (cache) cache_close(cache);
+            return 1;
+        }
         onnx_embedder_free(embedder);
-        if (cache) cache_close(cache);
-        return 1;
+    } else {
+        // CodeBERT: use Python encoder
+        if (!output_json) {
+            printf("Loading CodeBERT encoder...\n");
+        }
+        
+        char cmd[2048];
+        char escaped_query[4096];
+        int j = 0;
+        for (int i = 0; query[i] && j < sizeof(escaped_query) - 3; i++) {
+            if (query[i] == '"' || query[i] == '\\') {
+                escaped_query[j++] = '\\';
+            }
+            escaped_query[j++] = query[i];
+        }
+        escaped_query[j] = '\0';
+        
+        snprintf(cmd, sizeof(cmd), 
+                 "python3 /home/dministrator/my_db/tools/codebert_encode.py --model-dir models/codebert-base --query \"%s\" 2>/dev/null",
+                 escaped_query);
+        
+        FILE* fp = popen(cmd, "r");
+        if (!fp) {
+            fprintf(stderr, "Failed to run CodeBERT encoder\n");
+            if (cache) cache_close(cache);
+            return 1;
+        }
+        
+        char line[65536];
+        if (fgets(line, sizeof(line), fp) == NULL) {
+            fprintf(stderr, "Failed to read CodeBERT output\n");
+            pclose(fp);
+            if (cache) cache_close(cache);
+            return 1;
+        }
+        pclose(fp);
+        
+        // Parse JSON: {"vector":[0.1,0.2,...]}
+        char* vec_start = strstr(line, "\"vector\":[");
+        if (!vec_start) {
+            fprintf(stderr, "Failed to parse CodeBERT output\n");
+            if (cache) cache_close(cache);
+            return 1;
+        }
+        vec_start += 10;
+        
+        for (int d = 0; d < DIM && *vec_start; d++) {
+            query_vec[d] = strtof(vec_start, &vec_start);
+            if (*vec_start == ',') vec_start++;
+            else if (*vec_start == ']') break;
+        }
     }
     
     float query_norm = 0.0f;
@@ -522,8 +586,6 @@ int main(int argc, char** argv) {
             free(src_results);
         }
     }
-    
-    onnx_embedder_free(embedder);
     
     if (total_results == 0) {
         if (output_json) {

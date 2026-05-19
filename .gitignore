@@ -53,3 +53,6 @@ tools/vector_generator
 
 # Temporary files
 /tmp/
+models/codebert-base/
+models/all-mpnet-base-v2/
+models/all-MiniLM-L6-v2/
