@@ -91,6 +91,14 @@ static int detect_namespace(const char* cache_dir, char* ns_out, size_t ns_out_l
     cache_iter_destroy(iter);
     cache_close(cache);
     
+    // Strip trailing slash
+    if (found) {
+        size_t len = strlen(ns_out);
+        if (len > 0 && ns_out[len - 1] == '/') {
+            ns_out[len - 1] = '\0';
+        }
+    }
+    
     return found ? 0 : -1;
 }
 
