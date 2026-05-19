@@ -324,25 +324,31 @@ static void write_chunk(FILE* fp, const char* name, const char* file,
 static void worker_process(worker_t* worker, int worker_id) {
     printf("[Worker %d] Processing %d files...\n", worker_id, worker->file_count);
     
-    char cmd[65536];
-    int cmd_len = snprintf(cmd, sizeof(cmd), 
-        "ctags-universal --output-format=json --fields=+nKzS "
-        "--extras=+r+f --sort=no -R ");
-    
-    for (int i = 0; i < worker->file_count && cmd_len < sizeof(cmd) - 2; i++) {
-        const char* path = worker->files[i];
-        if (strchr(path, ' ')) {
-            cmd_len += snprintf(cmd + cmd_len, sizeof(cmd) - cmd_len, "\"%s\" ", path);
-        } else {
-            cmd_len += snprintf(cmd + cmd_len, sizeof(cmd) - cmd_len, "%s ", path);
-        }
+    // Write file list to temp file (avoid command line length limit)
+    char file_list[256];
+    snprintf(file_list, sizeof(file_list), "/tmp/code_indexer_files_%d.txt", worker_id);
+    FILE* list_fp = fopen(file_list, "w");
+    if (!list_fp) {
+        fprintf(stderr, "[Worker %d] Failed to create file list\n", worker_id);
+        return;
     }
+    for (int i = 0; i < worker->file_count; i++) {
+        fprintf(list_fp, "%s\n", worker->files[i]);
+    }
+    fclose(list_fp);
     
     char output_file[256];
     snprintf(output_file, sizeof(output_file), "/tmp/code_indexer_worker_%d.json", worker_id);
-    snprintf(cmd + cmd_len, sizeof(cmd) - cmd_len, "> %s 2>/dev/null", output_file);
+    
+    char cmd[1024];
+    snprintf(cmd, sizeof(cmd),
+        "ctags-universal --output-format=json --fields=+nKzS "
+        "--extras=+r+f --sort=no -L %s > %s 2>/dev/null",
+        file_list, output_file);
     
     int ret = system(cmd);
+    unlink(file_list); // Clean up file list
+    
     if (ret != 0) {
         fprintf(stderr, "[Worker %d] ctags failed: %d\n", worker_id, ret);
         return;
