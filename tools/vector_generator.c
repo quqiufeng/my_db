@@ -7,8 +7,8 @@
 #include "cache.h"
 #include "onnx_embedder.h"
 
-#define DIM 384
-#define BATCH_SIZE 64
+#define DIM 768
+#define BATCH_SIZE 128
 #define MAX_TEXT_LEN 2048
 #define MAX_ITEMS 100000
 
@@ -38,8 +38,8 @@ int main(int argc, char** argv) {
     
     printf("Loading embedder...\n");
     onnx_embedder_t* embedder = onnx_embedder_init(
-        "models/all-MiniLM-L6-v2/model.onnx",
-        "models/all-MiniLM-L6-v2/vocab.txt",
+        "models/all-mpnet-base-v2/model.onnx",
+        "models/all-mpnet-base-v2/vocab.txt",
         128, DIM
     );
     if (!embedder) {
@@ -153,9 +153,17 @@ int main(int argc, char** argv) {
     }
     safe_ns[si] = '\0';
     
-    char vec_file[512], idx_file[512];
-    snprintf(vec_file, sizeof(vec_file), "%s/%s.bin", vec_dir, safe_ns);
-    snprintf(idx_file, sizeof(idx_file), "%s/%s.idx", vec_dir, safe_ns);
+    char vec_file[1024], idx_file[1024];
+    int n1 = snprintf(vec_file, sizeof(vec_file), "%s/%s.bin", vec_dir, safe_ns);
+    int n2 = snprintf(idx_file, sizeof(idx_file), "%s/%s.idx", vec_dir, safe_ns);
+    if (n1 >= (int)sizeof(vec_file) || n2 >= (int)sizeof(idx_file)) {
+        fprintf(stderr, "Path too long\n");
+        free(items);
+        free(vectors);
+        onnx_embedder_free(embedder);
+        cache_close(cache);
+        return 1;
+    }
     
     // Write binary file: [count:4][dim:4][vectors...]
     FILE* fp = fopen(vec_file, "wb");

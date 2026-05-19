@@ -18,12 +18,12 @@ sys.path.insert(0, '/home/dministrator/my_db')
 from mydb.cache import open_cache
 from mydb.onnx_embedder import OnnxEmbedder
 
-DIM = 384
+DIM = 768
 BATCH_SIZE = 64
 MAX_ITEMS = 50000
 
 
-def generate_vectors(cache_dir, namespace, model_dir='models/all-MiniLM-L6-v2'):
+def generate_vectors(cache_dir, namespace, model_dir='models/all-mpnet-base-v2'):
     """生成语义向量并存储到二进制文件"""
     
     cache = open_cache(cache_dir)
