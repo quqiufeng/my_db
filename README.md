@@ -629,6 +629,33 @@ make tools/vector_generator
 # Done! Total: 19.9s
 ```
 
+**模型选择（MPNet vs CodeBERT）**：
+
+| 模型 | 适用场景 | 速度 | 特点 |
+|------|---------|------|------|
+| **MPNet** (默认) | 电子书、文档、通用文本 | ⭐⭐⭐⭐⭐ | 通用文本理解，C 原生 tokenizer |
+| **CodeBERT** | 代码仓库 | ⭐⭐⭐ | 代码语义理解，需 Python tokenizer |
+
+```bash
+# 使用 MPNet（默认，适合通用文本）
+./tools/vector_generator ./ai_code_memory /code/local/project
+
+# 使用 CodeBERT（代码专用，理解命名约定）
+# 先下载模型: https://huggingface.co/microsoft/codebert-base
+./tools/vector_generator --model codebert ./ai_code_memory /code/local/project
+```
+
+**CodeBERT 模型准备**：
+```bash
+# 1. 下载模型到 /opt/codebert
+# 从 https://huggingface.co/microsoft/codebert-base/tree/main 下载:
+#   pytorch_model.bin, vocab.json, merges.txt, config.json, tokenizer_config.json
+
+# 2. 导出 ONNX（只需执行一次）
+python3 tools/export_codebert_onnx.py
+# 输出: models/codebert-base/model.onnx + vocab.txt
+```
+
 **性能对比**：
 
 | 方案 | 速度 | 41K 向量耗时 | 显存 |
