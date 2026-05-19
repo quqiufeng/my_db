@@ -17,6 +17,7 @@ class CodeMemoryAgent:
     """通用代码记忆 Agent"""
     
     def __init__(self, cache_dir='./ai_code_memory'):
+        self.cache_dir = cache_dir
         self.cache = open_cache(cache_dir)
     
     def list_repos(self):
@@ -139,31 +140,50 @@ class CodeMemoryAgent:
         return None
     
     def semantic_search(self, namespace, query, max_results=10):
-        """语义搜索（需要向量索引）"""
+        """语义搜索（读取二进制向量文件）"""
+        import struct
+        import os
+        
+        # Build binary file path
+        safe_ns = namespace.replace('/', '_').strip('_')
+        vec_dir = os.path.join(self.cache_dir, 'vectors')
+        vec_file = os.path.join(vec_dir, f"{safe_ns}.bin")
+        idx_file = os.path.join(vec_dir, f"{safe_ns}.idx")
+        
+        if not os.path.exists(vec_file) or not os.path.exists(idx_file):
+            return {'error': f'Vector index not found. Run vector generator first.'}
+        
         try:
             from mydb.onnx_embedder import OnnxEmbedder
-            embedder = OnnxEmbedder()
+            embedder = OnnxEmbedder(
+                model_path='models/all-mpnet-base-v2/model.onnx',
+                vocab_path='models/all-mpnet-base-v2/vocab.txt',
+                max_seq_length=128,
+                dim=768
+            )
             query_vec = embedder.encode(query)
             
-            results = []
-            prefix = f"{namespace}/vectors/"
+            # Load index mapping name -> offset
+            with open(idx_file, 'r') as f:
+                index = json.load(f)
             
-            for key in self.cache.keys():
-                if not key.startswith(prefix):
-                    continue
+            # Read vectors and compute similarity
+            results = []
+            with open(vec_file, 'rb') as f:
+                # Read header
+                count, dim = struct.unpack('II', f.read(8))
                 
-                data = json.loads(self.cache.get(key))
-                vec = data.get('vector', [])
-                if not vec:
-                    continue
-                
-                # Cosine similarity
-                dot = sum(a*b for a,b in zip(query_vec, vec))
-                norm_q = sum(a*a for a in query_vec) ** 0.5
-                norm_v = sum(a*a for a in vec) ** 0.5
-                sim = dot / (norm_q * norm_v) if norm_q > 0 and norm_v > 0 else 0
-                
-                results.append((sim, data.get('name', key.split('/')[-1])))
+                for name, offset in index.items():
+                    f.seek(offset)
+                    vec = struct.unpack(f'{dim}f', f.read(dim * 4))
+                    
+                    # Cosine similarity
+                    dot = sum(a*b for a,b in zip(query_vec, vec))
+                    norm_q = sum(a*a for a in query_vec) ** 0.5
+                    norm_v = sum(a*a for a in vec) ** 0.5
+                    sim = dot / (norm_q * norm_v) if norm_q > 0 and norm_v > 0 else 0
+                    
+                    results.append((sim, name))
             
             results.sort(reverse=True)
             return [{'name': name, 'score': f'{sim:.3f}'} for sim, name in results[:max_results]]
