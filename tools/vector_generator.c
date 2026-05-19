@@ -288,8 +288,34 @@ int main(int argc, char** argv) {
     const char* key;
     const char* value;
     
+    // Noise directory filters
+    const char* noise_dirs[] = {
+        "thirdparty/", "3rdparty/", "third_party/", "third-party/",
+        "external/", "deps/", "dependencies/", "vendor/",
+        "build/", "cmake-build/", "CMakeFiles/", "out/", "bin/", "obj/",
+        "test/", "tests/", "testing/", "gtest/", "googletest/",
+        "examples/", "demo/", "demos/", "sample/", "samples/",
+        "docs/", "doc/", "documentation/", "website/",
+        "scripts/", "tools/", "utils/", "benchmark/", "benchmarks/",
+        ".git/", "node_modules/", "__pycache__/", ".pytest_cache/",
+        NULL
+    };
+    
     while (cache_iter_next(iter, &key, &value) == 1) {
         if (strncmp(key, chunk_prefix, prefix_len) != 0) continue;
+        
+        // Extract file path from key: {namespace}/chunks/{filepath}/{name}
+        const char* file_path = key + prefix_len;
+        
+        // Skip noise directories
+        int is_noise = 0;
+        for (int d = 0; noise_dirs[d]; d++) {
+            if (strstr(file_path, noise_dirs[d])) {
+                is_noise = 1;
+                break;
+            }
+        }
+        if (is_noise) continue;
         
         char name[256];
         extract_name(key, name, sizeof(name));

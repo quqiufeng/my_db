@@ -51,13 +51,28 @@ CACHE_MAX_KEY_LEN = 1024
 CACHE_MAX_VALUE_LEN = 1024 * 1024
 MAX_CONTENT_LEN = 80000  # content 字段最大长度，超过则截断
 
-DEFAULT_EXCLUDES = [
-    '.git', 'node_modules', 'vendor', 'build', 'dist', 'target',
-    '__pycache__', '.pytest_cache', '*.egg-info', '.tox',
-    'third_party', '3rdparty', 'third-party',
-    'CMakeFiles', '*.cmake', 'Makefile', 'configure',
-    '*.min.js', '*.min.css', '*.map', '*.a', '*.o', '*.so',
+# Noise directories that bloat index with irrelevant symbols
+NOISE_DIRS = [
+    'thirdparty', '3rdparty', 'third_party', 'third-party',
+    'external', 'deps', 'dependencies', 'vendor',
+    'build', 'cmake-build', 'CMakeFiles', 'out', 'bin', 'obj',
+    'test', 'tests', 'testing', 'gtest', 'googletest',
+    'examples', 'demo', 'demos', 'sample', 'samples',
+    'docs', 'doc', 'documentation', 'website',
+    'scripts', 'tools', 'utils', 'benchmark', 'benchmarks',
+    '.git', 'node_modules', '__pycache__', '.pytest_cache',
+    '*.egg-info', '.tox', 'dist', 'target',
 ]
+
+# File patterns to exclude
+NOISE_FILES = [
+    '*.cmake', 'Makefile', 'configure', 'CMakeLists.txt',
+    '*.min.js', '*.min.css', '*.map', '*.a', '*.o', '*.so', '*.dll',
+    '*.md', '*.rst', '*.txt', 'LICENSE', 'COPYING', 'AUTHORS',
+    'CHANGELOG', 'NEWS', 'TODO', 'CONTRIBUTING',
+]
+
+DEFAULT_EXCLUDES = NOISE_DIRS + NOISE_FILES
 
 SOURCE_EXTENSIONS = {
     '.c', '.h', '.cpp', '.cc', '.cxx', '.hpp',
