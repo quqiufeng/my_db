@@ -569,67 +569,75 @@ cache_search_vector(cache, query_vector, 384, top_k=5, min_score=0.3, &opts, &re
 | **向量生成** | `tools/vector_generator.c` | GPU 编码语义向量 | C + TensorRT |
 | **语义搜索** | `tools/vector_search.c` | 自然语言查询代码 | C + 二进制向量 |
 
-### 完整工作流程
+### 完整工作流程（llama.cpp 示例）
 
-**Step 1: 扫描代码目录生成索引**
-
-```bash
-# 索引源码项目（仅生成符号索引，不包含向量）
-python3 tools/ai_code_memory.py ingest /opt/stable-diffusion.cpp --skip-vectors
-
-# 输出：
-# Phase 1: Parsing symbols with ctags...
-#   Found 41267 raw tags
-# Phase 3: Building code chunks...
-#   Created 41598 code chunks
-# Phase 6: Storing to memory...
-# Ingest complete!  Chunks: 41598, Symbols: 31020
-```
-
-**存储结构**：
-```
-ai_code_memory/
-├── cache.bin              # 代码片段、符号、调用图
-├── index.bin              # 持久化索引（Hash + Sorted + Namespace）
-└── vectors/               # 语义向量（由 Step 2 生成）
-    └── code_local_stable-diffusion.cpp.mpnet.bin    # MPNet 二进制向量
-    └── code_local_stable-diffusion.cpp.mpnet.idx    # MPNet 名称→偏移索引
-    └── code_local_stable-diffusion.cpp.jina.bin     # Jina 二进制向量（代码专用）
-    └── code_local_stable-diffusion.cpp.jina.idx     # Jina 名称→偏移索引
-```
-
-**Step 2: 生成向量索引（C + TensorRT GPU）**
+**Step 0: 环境准备（必须执行）**
 
 ```bash
-# 设置环境变量（确保 TensorRT 库可被加载）
+# 设置 GPU 库路径（TensorRT + cuDNN + CUDA）
 export LD_LIBRARY_PATH=/home/dministrator/my_db:\
     /opt/TensorRT-10/lib:\
     /home/dministrator/anaconda3/envs/dl/lib:\
     $LD_LIBRARY_PATH
 
-# 编译向量生成工具（首次使用）
-make tools/vector_generator
+# 验证 GPU 可用
+nvidia-smi
+```
 
-# 方式 A: 指定 namespace（任意项目）
-./tools/vector_generator ./ai_code_memory /code/local/my-project
+**Step 1: 扫描代码目录生成索引**
 
-# 方式 B: 自动检测 namespace（如果 cache 中只有一个项目）
-./tools/vector_generator ./ai_code_memory
+```bash
+# 使用 C 多进程索引器（比 Python 快 37x）
+# 参数：源码路径  输出目录  工作进程数
+./tools/code_indexer /home/dministrator/llama.cpp ./ai_code_memory 4
 
 # 输出：
-# Auto-detecting namespace...
-# Detected namespace: /code/local/stable-diffusion.cpp
-# Opening cache: ./ai_code_memory
-# Loading embedder...
-#   Using TensorRT GPU acceleration (FP16)
-# Collecting chunks from namespace: /code/local/stable-diffusion.cpp
-#   Found 14308 items to encode (filtered 51% noise: thirdparty, tests, examples, etc.)
-# Encoding with MPNet...
-#   Progress: 12800/14308
-# Encoded 14308/14308 items in 13.0s (1104.1 items/s)
-# Storing vectors to binary file...
-#   Stored 14308 vectors in 0.3s (42799.6 items/s)
-# Done! Total: 13.3s
+# Phase 1: Scanning source files...
+#   Found 677 source files
+# Phase 2: Forking 4 workers...
+#   Worker 0: 170 files
+# Phase 3: Waiting for workers...
+#   4/4 workers completed
+# Phase 4: Merging output files...
+# 
+# Indexing complete!
+#   Files: 677
+#   Chunks: 18742
+#   Workers: 4
+#   Time: 0.5s
+#   Output: ./ai_code_memory/chunks_text.txt, ./ai_code_memory/chunks_meta.jsonl
+```
+
+**输出文件**：
+```
+ai_code_memory/
+├── chunks_text.txt        # 代码内容（一行一个 chunk，用于向量生成）
+├── chunks_meta.jsonl      # 元数据（名称/文件/行号/签名，用于搜索展示）
+└── vectors/               # 语义向量（由 Step 2 自动生成）
+    └── code_local_llama.cpp.jina.bin    # Jina 二进制向量
+    └── code_local_llama.cpp.jina.idx    # 名称→偏移索引
+```
+
+**Step 2: 生成向量索引（C + TensorRT GPU）**
+
+```bash
+# 编译（首次使用）
+make tools/batch_embedder
+
+# 生成 Jina v2 向量（代码专用，推荐）
+./tools/batch_embedder ./ai_code_memory --model jina
+
+# 输出：
+# Loading items from ./ai_code_memory...
+# Loaded 18742 items
+# Loading jina embedder...
+#   Using TensorRT GPU acceleration (FP32 for Jina)
+# Encoding...
+#   Progress: 6400/18742 (81 items/s)
+#   Progress: 12800/18742 (86 items/s)
+# Done in 207.0s (91 items/s)
+# Saved vectors to ./ai_code_memory/vectors/code_local_llama.cpp.jina.bin
+# Saved index to ./ai_code_memory/vectors/code_local_llama.cpp.jina.idx
 ```
 
 **模型选择（MPNet vs Jina v2）**：
@@ -695,42 +703,41 @@ CodeBERT 的自编码器架构使其向量高度集中在同一区域，导致�
 # 编译语义搜索工具（首次使用）
 make tools/vector_search
 
-# 自然语言搜索代码（自动发现所有项目）
-./tools/vector_search ./ai_code_memory "generate image from text" 5
+# 自然语言搜索代码（自动发现所有向量文件）
+./tools/vector_search --model jina ./ai_code_memory "quantization" 5
 
-# 限定在特定项目搜索（支持模糊匹配）
-./tools/vector_search ./ai_code_memory "generate image from text" 5 /code/local/stable-diffusion.cpp
-
-# Rich 模式：返回完整代码上下文（AI 最友好的方式）
-./tools/vector_search --rich ./ai_code_memory "generate image from text" 5
+# Rich 模式：返回完整代码上下文（文件路径、行号、签名）
+./tools/vector_search --model jina --rich ./ai_code_memory "quantization" 5
 
 # JSON 模式：结构化输出，AI 可直接解析
-./tools/vector_search --json --rich ./ai_code_memory "generate image from text" 5
+./tools/vector_search --model jina --json --rich ./ai_code_memory "quantization" 5
 
-# 使用 Jina 模型搜索（推荐，代码专用）
-./tools/vector_search --model jina --rich ./ai_code_memory "upscale image" 5
+# 搜索示例输出（Rich 模式）：
+# Top 5 results:
+# ──────────────────────────────────────────────────────────────────────
+# [1] GGMLQuantizationType (0.0800)
+#     Location:  /home/dministrator/llama.cpp/gguf-py/gguf/gguf_writer.py:23
+#     Language:  python
+# 
+# ──────────────────────────────────────────────────────────────────────
+# [2] tensor_allows_quantization (0.0800)
+#     Signature: (const llama_model_quantize_params * params,llm_arch arch,const ggml_tensor * tensor)
+#     Location:  /home/dministrator/llama.cpp/src/llama-quant.cpp:288
+#     Language:  cpp
+#
+# ──────────────────────────────────────────────────────────────────────
+# [3] llama_quant_tensor_allows_quantization (0.0800)
+#     Signature: (const quantize_state_impl * qs,const ggml_tensor * tensor)
+#     Location:  /home/dministrator/llama.cpp/src/llama-quant.cpp:1363
+#     Language:  cpp
+```
 
-# 使用 CodeBERT 模型搜索（不推荐）
-./tools/vector_search --model codebert --rich ./ai_code_memory "CUDA kernel" 5 /code/local/stable-diffusion.cpp
+# 高级过滤（按函数类型、语言、文件名）
+./tools/vector_search --model jina --kind function --lang cpp ./ai_code_memory "memory allocation" 5
+./tools/vector_search --model jina --file quant ./ai_code_memory "GGML" 5
 
 # 查看所有选项和已生成的向量文件
 ./tools/vector_search --help
-
-# 查看所有选项
-./tools/vector_search --help
-
-# 输出示例（--rich 模式）：
-# [1] txt2img (0.6245)
-#     Signature: sd_image_t* txt2img(...)
-#     Location:  examples/cli/main.cpp:234
-#     Language:  cpp
-#     Doc:
-#       Generate image from text prompt using stable diffusion
-#     Code:
-#       | sd_image_t* txt2img(...) {
-#       |     // generate image from text prompt
-#       |     ...
-#       | }
 ```
 
 ### 查询示例
@@ -855,45 +862,42 @@ for r in results:
 
 ### 完整使用示例
 
-**1. 管理员：索引新项目（支持任意项目）**
-```bash
-# 索引任意源码项目
-python3 tools/ai_code_memory.py ingest /path/to/your-project --skip-vectors
+**llama.cpp（中小型项目，677 文件）**
 
-# 生成向量（C 工具，GPU 加速）
+```bash
+# 1. 索引（0.7 秒）
+./tools/code_indexer /home/dministrator/llama.cpp ./ai_code_memory 4
+
+# 2. 生成向量（3.5 分钟，TensorRT GPU）
 export LD_LIBRARY_PATH=/home/dministrator/my_db:/opt/TensorRT-10/lib:/home/dministrator/anaconda3/envs/dl/lib:$LD_LIBRARY_PATH
+./tools/batch_embedder ./ai_code_memory --model jina
 
-# 方式 A: 指定 namespace
-./tools/vector_generator ./ai_code_memory /code/local/your-project
-
-# 方式 B: 自动检测（适合单个项目）
-./tools/vector_generator ./ai_code_memory
+# 3. 搜索（即时响应）
+./tools/vector_search --model jina --rich ./ai_code_memory "quantization" 5
 ```
 
-**2. AI Agent：查询源码（运行时，支持任意项目）**
+**Linux Kernel（大型项目，58K 文件）**
+
 ```bash
-# 语义搜索（自动发现所有项目）
-./tools/vector_search ./ai_code_memory "how to generate image" 5
+# 1. 索引（43 秒，8 进程）
+./tools/code_indexer /opt/linux ./linux_cache 8
 
-# 限定在特定项目搜索
-./tools/vector_search ./ai_code_memory "how to generate image" 5 /code/local/your-project
+# 2. 生成向量（约 2.5 小时，88 万函数/结构体，TensorRT GPU）
+export LD_LIBRARY_PATH=/home/dministrator/my_db:/opt/TensorRT-10/lib:/home/dministrator/anaconda3/envs/dl/lib:$LD_LIBRARY_PATH
+./tools/batch_embedder ./linux_cache --model jina
 
-# 查具体函数签名
-python3 -c "
-from mydb.cache import open_cache
-cache = open_cache('./ai_code_memory')
-data = cache.get('/code/local/your-project/symbols/generate_image')
-print(data)
-"
-
-# 查调用关系
-python3 -c "
-from mydb.cache import open_cache
-cache = open_cache('./ai_code_memory')
-data = cache.get('/code/local/your-project/callers/generate_image')
-print(data)
-"
+# 3. 搜索（即时响应）
+./tools/vector_search --model jina --rich ./linux_cache "memory allocation" 5
+./tools/vector_search --model jina --kind function --lang c ./linux_cache "scheduler" 5
+./tools/vector_search --model jina --file mm ./linux_cache "page fault" 5
 ```
+
+**性能基准**：
+
+| 项目 | 文件数 | 索引时间 | 向量数 | 向量时间 | 查询速度 |
+|------|--------|----------|--------|----------|----------|
+| llama.cpp | 677 | 0.7s | 18,742 | 207s | < 1s |
+| Linux kernel | 58,373 | 43s | 881,575 | ~2.5h | < 1s |
 
 ### 性能基准
 

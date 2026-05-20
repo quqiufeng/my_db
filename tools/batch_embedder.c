@@ -5,6 +5,7 @@
 #include <time.h>
 #include <stdint.h>
 #include <sys/stat.h>
+#include <sys/types.h>
 #include "onnx_embedder.h"
 
 #define DIM 768
@@ -197,13 +198,33 @@ int main(int argc, char** argv) {
     double elapsed = (double)(clock() - start) / CLOCKS_PER_SEC;
     printf("Done in %.1fs (%.0f items/s)\n", elapsed, count / elapsed);
 
-    // Save
+    // Auto-detect repo name from cache_dir path
+    // e.g., "./linux_cache" -> "linux", "./ai_code_memory" -> "llama.cpp"
+    const char* repo_name = strrchr(cache_dir, '/');
+    if (repo_name) repo_name++;
+    else repo_name = cache_dir;
+    
+    // Remove "_cache" suffix if present
+    char safe_name[256];
+    strncpy(safe_name, repo_name, sizeof(safe_name) - 1);
+    safe_name[sizeof(safe_name) - 1] = '\0';
+    char* suffix = strstr(safe_name, "_cache");
+    if (suffix) *suffix = '\0';
+    if (strlen(safe_name) == 0) strcpy(safe_name, "unknown");
+    
+    // Create vectors/ directory
+    char vec_dir[512];
+    snprintf(vec_dir, sizeof(vec_dir), "%s/vectors", cache_dir);
+    mkdir(vec_dir, 0755);
+    
+    // Build filenames: code_local_<repo>.jina.bin
     char bin_file[512], idx_file[512];
-    snprintf(bin_file, sizeof(bin_file), "%s/vectors.jina.bin", cache_dir);
-    snprintf(idx_file, sizeof(idx_file), "%s/vectors.jina.index", cache_dir);
+    snprintf(bin_file, sizeof(bin_file), "%s/code_local_%s.jina.bin", vec_dir, safe_name);
+    snprintf(idx_file, sizeof(idx_file), "%s/code_local_%s.jina.idx", vec_dir, safe_name);
 
     save_vectors(bin_file, idx_file, items, vectors, count);
-    printf("Saved to %s\n", bin_file);
+    printf("Saved vectors to %s\n", bin_file);
+    printf("Saved index to %s\n", idx_file);
 
     // Cleanup
     onnx_embedder_free(embedder);
