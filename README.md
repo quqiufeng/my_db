@@ -19,6 +19,39 @@
 ./ai_code_search.sh snippet ./sd_cache ./my_kernel.cpp 5
 ```
 
+**🐧 AI Agent Linux 内核开发（大项目分治）**: `./ai_code_search_large.sh` - 针对 Linux 内核等超大项目（5万+文件）的智能分治分析
+
+```bash
+# 1. 初始化（自动按子系统拆分，排除测试/文档目录）
+./ai_code_search_large.sh init /opt/linux
+
+# 2. 索引核心子系统
+./ai_code_search_large.sh index 8
+
+# 3. 生成语义向量
+./ai_code_search_large.sh vector 2
+
+# 4. 搜索内存分配机制
+./ai_code_search_large.sh search-sub mm "page allocation" 10
+
+# 5. 追踪 task_struct 数据流
+./ai_code_search_large.sh dataflow task_struct
+```
+
+**大项目分治策略**:
+- **自动拆分**: `drivers/` → 40+ 子系统，`arch/` → 17 个架构，`kernel/`/`mm/` → 直接保留
+- **智能排除**: 自动跳过 `testing/`, `Documentation/`, `samples/` 等非核心目录
+- **子系统隔离**: 每个子系统独立索引/向量，避免 4 小时+的向量生成
+- **开发闭环**: 理解代码 → 修改 → 编译 → QEMU 运行 → 验证
+
+**实测数据（Linux 内核）**:
+| 子系统 | 文件数 | Chunks | 索引时间 | 向量时间 |
+|--------|--------|--------|---------|---------|
+| kernel | 630 | 29,411 | 0.8s | ~5min |
+| mm | 188 | 11,405 | 0.1s | 2min |
+| fs | 2,160 | 76,092 | 0.9s | ~10min |
+| net | 1,729 | 66,571 | 0.7s | ~9min |
+
 技术栈：C 多进程索引 + Jina v2 代码语义模型 + TensorRT GPU 向量生成 + 调用关系图分析
 
 ## 项目定位
