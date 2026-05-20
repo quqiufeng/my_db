@@ -4,25 +4,26 @@
 # ===========================================
 #
 # 针对 Linux 内核等超大项目（5万+文件），按子系统分治处理：
+# - 自动分析项目结构，智能拆分子系统
 # - 每个子系统独立索引和生成向量
 # - 支持全局跨子系统搜索
 # - 保留子系统间调用关系
 #
 # 使用方式:
-#   ./ai_code_search_large.sh init <repo_path> [config]    # 初始化子系统配置
-#   ./ai_code_search_large.sh index <repo_path> [workers]  # 索引所有子系统
+#   ./ai_code_search_large.sh init <repo_path> [config]    # 初始化（自动分析结构）
+#   ./ai_code_search_large.sh index [workers]              # 索引所有子系统
 #   ./ai_code_search_large.sh vector [workers]             # 生成所有子系统向量
 #   ./ai_code_search_large.sh search <query> [n]           # 全局搜索所有子系统
 #   ./ai_code_search_large.sh search-sub <sub> <query> [n] # 搜索指定子系统
-#   ./ai_code_search_large.sh dataflow <var>               # 全局变量追踪
+#   ./ai_code_search_large.sh dataflow <var> [sub]         # 全局变量追踪
 #   ./ai_code_search_large.sh status                       # 查看处理状态
 #
 # 示例:
 #   ./ai_code_search_large.sh init /opt/linux
-#   ./ai_code_search_large.sh index /opt/linux 8
-#   ./ai_code_search_large.sh vector 4
+#   ./ai_code_search_large.sh index 8
+#   ./ai_code_search_large.sh vector 2
 #   ./ai_code_search_large.sh search "schedule task" 10
-#   ./ai_code_search_large.sh search-sub mm "page fault" 5
+#   ./ai_code_search_large.sh search-sub kernel "scheduler" 5
 #   ./ai_code_search_large.sh dataflow task_struct
 
 set -euo pipefail
@@ -43,28 +44,9 @@ warn()  { echo -e "${YELLOW}[WARN]${NC} $*"; }
 error() { echo -e "${RED}[ERROR]${NC} $*" >&2; }
 
 # ============================================
-# 子系统配置
+# 配置管理
 # ============================================
-# Linux 内核默认子系统映射
-declare -A DEFAULT_SUBSYSTEMS=(
-    ["kernel"]="kernel"
-    ["mm"]="mm"
-    ["fs"]="fs"
-    ["net"]="net"
-    ["drivers"]="drivers"
-    ["arch"]="arch"
-    ["ipc"]="ipc"
-    ["security"]="security"
-    ["crypto"]="crypto"
-    ["block"]="block"
-    ["init"]="init"
-    ["lib"]="lib"
-    ["include"]="include"
-    ["scripts"]="scripts"
-    ["tools"]="tools"
-)
 
-# 加载配置
 load_config() {
     if [[ ! -f "$LARGE_CONFIG" ]]; then
         error "未找到配置文件: $LARGE_CONFIG"
@@ -74,8 +56,21 @@ load_config() {
     source "$LARGE_CONFIG"
 }
 
+# 获取子系统的源路径（支持多路径，空格分隔）
+get_sub_path() {
+    local sub="$1"
+    local var_name="SUB_${sub}"
+    echo "${!var_name:-}"
+}
+
+# 获取子系统的 cache 路径
+get_sub_cache() {
+    local sub="$1"
+    echo "${BASE_CACHE}/${sub}_cache"
+}
+
 # ============================================
-# 子命令: init - 初始化配置
+# 子命令: init - 初始化配置（智能分析）
 # ============================================
 cmd_init() {
     local repo_path="${1:-}"
@@ -85,6 +80,9 @@ cmd_init() {
         echo "用法: $0 init <repo_path> [config_file]"
         echo "  repo_path:   源码目录路径"
         echo "  config_file: 配置文件路径 (默认: .large_project_config)"
+        echo ""
+        echo "说明: 自动分析项目结构，按文件数量智能拆分子系统"
+        echo "      大目录(如drivers/)拆成子目录，小目录合并到misc"
         echo ""
         echo "示例: $0 init /opt/linux"
         exit 1
@@ -104,24 +102,155 @@ cmd_init() {
     info "  路径: $repo_path"
     info "  配置: $config_file"
     
-    # 检测子系统目录
-    info "检测子系统目录..."
+    # 统计总文件数
+    local total_files=$(find "$repo_path" -type f \( -name "*.c" -o -name "*.h" -o -name "*.cpp" -o -name "*.hpp" \) 2>/dev/null | wc -l)
+    info "  总文件数: $total_files"
+    
+    # 如果是超大项目(>10000文件)，调用智能分析
+    local use_smart_split=0
+    if [[ $total_files -gt 10000 ]]; then
+        info "检测到超大项目，启用智能子系统拆分..."
+        use_smart_split=1
+    fi
+    
+    if [[ $use_smart_split -eq 1 && -x "${SCRIPT_DIR}/tools/analyze_project_structure.sh" ]]; then
+        # 使用智能分析
+        info "运行项目结构分析..."
+        "${SCRIPT_DIR}/tools/analyze_project_structure.sh" "$repo_path" 100000 100 > /tmp/project_analysis.txt 2>&1 || true
+        
+        # 从分析结果提取建议的子系统列表
+        # 这里简化处理：直接使用分析脚本的输出格式
+        info "使用智能拆分方案生成配置..."
+        generate_smart_config "$repo_path" "$config_file" "$base_cache" "$project_name"
+    else
+        # 使用简单拆分
+        info "使用简单子系统拆分..."
+        generate_simple_config "$repo_path" "$config_file" "$base_cache" "$project_name"
+    fi
+    
+    ok "配置已保存到: $config_file"
+    
+    # 创建 cache 目录
+    load_config
+    mkdir -p "$base_cache"
+    for sub in "${SUBSYSTEMS[@]}"; do
+        mkdir -p "${BASE_CACHE}/${sub}_cache"
+    done
+    ok "Cache 目录已创建"
+    ok "子系统数: ${#SUBSYSTEMS[@]}"
+}
+
+# 生成智能配置（按文件数拆分）
+generate_smart_config() {
+    local repo_path="$1"
+    local config_file="$2"
+    local base_cache="$3"
+    local project_name="$4"
+    
+    local max_chunks=100000
+    local min_files=100
+    
+    cat > "$config_file" << EOF
+# AI Agent 超大项目配置 - 智能拆分
+# 项目: $project_name
+# 生成时间: $(date)
+# 拆分策略: 大目录按二级目录拆分，小目录合并到misc
+
+REPO_PATH="$repo_path"
+PROJECT_NAME="$project_name"
+BASE_CACHE="$base_cache"
+
+# 子系统列表
+EOF
+
+    local subs=()
+    local misc_paths=()
+    
+    # 遍历顶层目录
+    for dir in "$repo_path"/*/; do
+        [[ ! -d "$dir" ]] && continue
+        local local_name=$(basename "$dir")
+        local file_count=$(find "$dir" -type f \( -name "*.c" -o -name "*.h" -o -name "*.cpp" -o -name "*.hpp" \) 2>/dev/null | wc -l)
+        local est_chunks=$((file_count * 25))
+        
+        if [[ $est_chunks -gt $max_chunks ]]; then
+            # 大目录：按二级目录拆分
+            for subdir in "$dir"/*/; do
+                [[ ! -d "$subdir" ]] && continue
+                local sub_name=$(basename "$subdir")
+                local sub_files=$(find "$subdir" -type f \( -name "*.c" -o -name "*.h" -o -name "*.cpp" -o -name "*.hpp" \) 2>/dev/null | wc -l)
+                
+                if [[ $sub_files -ge $min_files ]]; then
+                    local sub_key="${local_name}_${sub_name}"
+                    subs+=("$sub_key")
+                    echo "SUB_${sub_key}=\"$subdir\"" >> "$config_file"
+                else
+                    misc_paths+=("$subdir")
+                fi
+            done
+        elif [[ $file_count -ge $min_files ]]; then
+            # 中等目录：作为独立子系统
+            subs+=("$local_name")
+            echo "SUB_${local_name}=\"$dir\"" >> "$config_file"
+        else
+            # 小目录：加入misc
+            misc_paths+=("$dir")
+        fi
+    done
+    
+    # 添加 misc 子系统（合并所有小目录）
+    if [[ ${#misc_paths[@]} -gt 0 ]]; then
+        subs+=("misc")
+        local misc_value=""
+        for p in "${misc_paths[@]}"; do
+            misc_value="$misc_value $p"
+        done
+        echo "SUB_misc=\"${misc_value# }\"" >> "$config_file"
+    fi
+    
+    # 输出 SUBSYSTEMS 数组
+    {
+        echo ""
+        echo -n "SUBSYSTEMS=("
+        local first=1
+        for s in "${subs[@]}"; do
+            if [[ $first -eq 1 ]]; then
+                first=0
+            else
+                echo -n " "
+            fi
+            echo -n "$s"
+        done
+        echo ")"
+        echo ""
+        echo "# 最大 chunk 数（超过则跳过向量生成）"
+        echo "MAX_CHUNKS_PER_SUB=$max_chunks"
+        echo ""
+        echo "# 全局符号表文件"
+        echo "GLOBAL_SYMBOLS=\"${base_cache}/global_symbols.jsonl\""
+    } >> "$config_file"
+}
+
+# 生成简单配置（固定子系统列表）
+generate_simple_config() {
+    local repo_path="$1"
+    local config_file="$2"
+    local base_cache="$3"
+    local project_name="$4"
+    
     local detected_subs=()
-    for sub in "${!DEFAULT_SUBSYSTEMS[@]}"; do
+    for sub in kernel mm fs net drivers arch ipc security crypto block init lib include scripts tools; do
         if [[ -d "${repo_path}/${sub}" ]]; then
             detected_subs+=("$sub")
-            info "  ✓ $sub"
         fi
     done
     
     if [[ ${#detected_subs[@]} -eq 0 ]]; then
-        warn "未检测到默认子系统，使用整个项目作为单个子系统"
         detected_subs=("main")
     fi
     
-    # 生成配置文件
     cat > "$config_file" << EOF
-# AI Agent 超大项目配置 - 自动生成
+# AI Agent 超大项目配置
 # 项目: $project_name
 # 生成时间: $(date)
 
@@ -149,29 +278,13 @@ MAX_CHUNKS_PER_SUB=200000
 # 全局符号表文件（轻量级，不生成向量）
 GLOBAL_SYMBOLS="${base_cache}/global_symbols.jsonl"
 EOF
-    
-    ok "配置已保存到: $config_file"
-    info "检测到 ${#detected_subs[@]} 个子系统"
-    
-    # 创建 cache 目录
-    mkdir -p "$base_cache"
-    for sub in "${detected_subs[@]}"; do
-        mkdir -p "${base_cache}/${sub}_cache"
-    done
-    ok "Cache 目录已创建"
 }
 
 # ============================================
 # 子命令: index - 索引所有子系统
 # ============================================
 cmd_index() {
-    local repo_path="${1:-}"
-    local workers="${2:-$(nproc)}"
-    
-    # 如果传了 repo_path，先 init
-    if [[ -n "$repo_path" ]]; then
-        cmd_init "$repo_path"
-    fi
+    local workers="${1:-$(nproc)}"
     
     load_config
     
@@ -185,10 +298,24 @@ cmd_index() {
     local idx=0
     
     for sub in "${SUBSYSTEMS[@]}"; do
-        local sub_path="${repo_path}/${sub}"
-        local sub_cache="${BASE_CACHE}/${sub}_cache"
+        local sub_path=$(get_sub_path "$sub")
+        local sub_cache=$(get_sub_cache "$sub")
         
-        if [[ ! -d "$sub_path" ]]; then
+        if [[ -z "$sub_path" ]]; then
+            warn "跳过未配置的子系统: $sub"
+            continue
+        fi
+        
+        # 检查路径是否存在（支持多路径）
+        local path_exists=0
+        for p in $sub_path; do
+            if [[ -d "$p" ]]; then
+                path_exists=1
+                break
+            fi
+        done
+        
+        if [[ $path_exists -eq 0 ]]; then
             warn "跳过不存在的子系统: $sub"
             continue
         fi
@@ -197,7 +324,35 @@ cmd_index() {
         
         # 后台索引
         (
-            "${SCRIPT_DIR}/tools/code_indexer" "$sub_path" "$sub_cache" "$workers" 2>/dev/null
+            if [[ "$sub" == "misc" ]]; then
+                # misc 是多路径，需要创建临时目录列表
+                local temp_file_list="/tmp/ai_large_files_${sub}_$$.txt"
+                > "$temp_file_list"
+                for p in $sub_path; do
+                    if [[ -d "$p" ]]; then
+                        find "$p" -type f \( -name "*.c" -o -name "*.h" -o -name "*.cpp" -o -name "*.hpp" \) >> "$temp_file_list"
+                    fi
+                done
+                
+                # 使用 code_indexer 的文件列表模式（如果支持）
+                # 如果不支持，创建临时符号链接目录
+                local temp_repo="/tmp/ai_large_repo_${sub}_$$"
+                mkdir -p "$temp_repo"
+                while IFS= read -r file; do
+                    local rel_path=$(echo "$file" | sed "s|${REPO_PATH}/||")
+                    local target_dir="$temp_repo/$(dirname "$rel_path")"
+                    mkdir -p "$target_dir"
+                    ln -sf "$file" "$temp_repo/$rel_path" 2>/dev/null || true
+                done < "$temp_file_list"
+                
+                "${SCRIPT_DIR}/tools/code_indexer" "$temp_repo" "$sub_cache" "$workers" 2>/dev/null || true
+                
+                rm -rf "$temp_repo" "$temp_file_list"
+            else
+                # 单路径，直接索引
+                "${SCRIPT_DIR}/tools/code_indexer" "$sub_path" "$sub_cache" "$workers" 2>/dev/null
+            fi
+            
             local chunks=$(wc -l < "${sub_cache}/chunks_meta.jsonl" 2>/dev/null || echo 0)
             ok "[$sub] 索引完成: $chunks chunks"
         ) &
@@ -228,7 +383,7 @@ cmd_index() {
 # 子命令: vector - 生成所有子系统向量
 # ============================================
 cmd_vector() {
-    local workers="${1:-2}"
+    local workers="${1:-1}"
     
     load_config
     
@@ -238,7 +393,7 @@ cmd_vector() {
     
     local idx=0
     for sub in "${SUBSYSTEMS[@]}"; do
-        local sub_cache="${BASE_CACHE}/${sub}_cache"
+        local sub_cache=$(get_sub_cache "$sub")
         
         if [[ ! -f "${sub_cache}/chunks_text.txt" ]]; then
             warn "跳过未索引的子系统: $sub"
@@ -303,7 +458,7 @@ cmd_search() {
     > "$tmp_results"
     
     for sub in "${SUBSYSTEMS[@]}"; do
-        local sub_cache="${BASE_CACHE}/${sub}_cache"
+        local sub_cache=$(get_sub_cache "$sub")
         
         if [[ ! -d "${sub_cache}/vectors" ]]; then
             continue
@@ -350,7 +505,7 @@ cmd_search_sub() {
     
     load_config
     
-    local sub_cache="${BASE_CACHE}/${sub}_cache"
+    local sub_cache=$(get_sub_cache "$sub")
     
     if [[ ! -d "${sub_cache}/vectors" ]]; then
         error "子系统未生成向量: $sub"
@@ -388,7 +543,7 @@ cmd_dataflow() {
     
     if [[ -n "$sub_filter" ]]; then
         # 只搜索指定子系统
-        local sub_cache="${BASE_CACHE}/${sub_filter}_cache"
+        local sub_cache=$(get_sub_cache "$sub_filter")
         if [[ -f "${sub_cache}/chunks_meta.jsonl" ]]; then
             "${SCRIPT_DIR}/tools/dataflow" show "$sub_cache" "$var_name" 2>/dev/null
         else
@@ -397,7 +552,7 @@ cmd_dataflow() {
     else
         # 搜索所有子系统
         for sub in "${SUBSYSTEMS[@]}"; do
-            local sub_cache="${BASE_CACHE}/${sub}_cache"
+            local sub_cache=$(get_sub_cache "$sub")
             
             if [[ ! -f "${sub_cache}/chunks_meta.jsonl" ]]; then
                 continue
@@ -426,14 +581,14 @@ cmd_status() {
     echo "║ 路径: $REPO_PATH"
     echo "╚══════════════════════════════════════════════════════════════════╝"
     echo ""
-    printf "%-15s %-12s %-12s %-10s\n" "子系统" "Chunks" "向量" "调用图"
-    printf "%-15s %-12s %-12s %-10s\n" "---------------" "------------" "------------" "----------"
+    printf "%-25s %-12s %-12s %-10s\n" "子系统" "Chunks" "向量" "调用图"
+    printf "%-25s %-12s %-12s %-10s\n" "─────────────────────────" "────────────" "────────────" "──────────"
     
     local total_chunks=0
     local total_vectors=0
     
     for sub in "${SUBSYSTEMS[@]}"; do
-        local sub_cache="${BASE_CACHE}/${sub}_cache"
+        local sub_cache=$(get_sub_cache "$sub")
         local chunks="-"
         local vectors="-"
         local callgraph="-"
@@ -453,11 +608,11 @@ cmd_status() {
             callgraph="✓"
         fi
         
-        printf "%-15s %-12s %-12s %-10s\n" "$sub" "$chunks" "$vectors" "$callgraph"
+        printf "%-25s %-12s %-12s %-10s\n" "$sub" "$chunks" "$vectors" "$callgraph"
     done
     
-    printf "%-15s %-12s %-12s %-10s\n" "---------------" "------------" "------------" "----------"
-    printf "%-15s %-12s\n" "总计" "$total_chunks"
+    printf "%-25s %-12s\n" "─────────────────────────" "────────────"
+    printf "%-25s %-12s\n" "总计" "$total_chunks"
     echo ""
     echo "Cache 目录: $BASE_CACHE"
 }
@@ -495,11 +650,15 @@ main() {
             echo "AI Agent 超大项目语义搜索系统"
             echo "==============================="
             echo ""
-            echo "针对 Linux 内核等超大项目（5万+文件），按子系统分治处理"
+            echo "针对 Linux 内核等超大项目（5万+文件），智能分治处理："
+            echo "- 自动分析项目结构，按文件数量拆分子系统"
+            echo "- 大目录(如drivers/)按二级目录拆分"
+            echo "- 小目录合并到 misc 子系统"
+            echo "- 每个子系统独立索引和生成向量"
             echo ""
             echo "子命令:"
-            echo "  init <repo> [config]        - 初始化子系统配置"
-            echo "  index <repo> [workers]      - 索引所有子系统"
+            echo "  init <repo> [config]        - 初始化（自动分析并拆分子系统）"
+            echo "  index [workers]             - 索引所有子系统"
             echo "  vector [workers]            - 生成所有子系统向量"
             echo "  search <query> [n]          - 全局搜索（聚合所有子系统）"
             echo "  search-sub <sub> <query> [n] - 搜索指定子系统"
@@ -508,10 +667,10 @@ main() {
             echo ""
             echo "示例:"
             echo "  $0 init /opt/linux"
-            echo "  $0 index /opt/linux 8"
-            echo "  $0 vector 2"
+            echo "  $0 index 8"
+            echo "  $0 vector 1"
             echo "  $0 search \"schedule task\" 10"
-            echo "  $0 search-sub mm \"page fault\" 5"
+            echo "  $0 search-sub kernel \"scheduler\" 5"
             echo "  $0 dataflow task_struct"
             ;;
     esac
