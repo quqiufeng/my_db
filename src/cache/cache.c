@@ -747,7 +747,8 @@ int cache_batch_set(cache_t* cache, const cache_batch_item_t* items, size_t coun
     sorted->count = new_count;
     free(offsets);
     
-    cache_sorted_rebuild(cache);
+    // Delay sorting until cache_close or explicit rebuild
+    sorted->dirty = 1;
     
     return CACHE_OK;
 }

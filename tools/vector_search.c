@@ -14,6 +14,34 @@
 #define MAX_QUERY_LEN 1024
 #define MAX_NAMESPACES 32
 #define MAX_RESULT_DETAILS 100
+#define META_HASH_SIZE 262144  // 256K buckets for fast lookup
+
+// Simple in-memory metadata entry (no cache needed)
+typedef struct meta_entry {
+    char name[256];
+    char file[512];
+    char kind[32];
+    char language[32];
+    char signature[512];
+    char content[4096];
+    int line_start;
+    int line_end;
+    struct meta_entry* next;  // hash collision chain
+} meta_entry_t;
+
+// Global metadata hash table
+static meta_entry_t** g_meta_hash = NULL;
+static int g_meta_loaded = 0;
+
+// FNV-1a hash for name lookup
+static uint64_t hash_name(const char* name) {
+    uint64_t h = 0xcbf29ce484222325;
+    for (const char* p = name; *p; p++) {
+        h ^= (unsigned char)*p;
+        h *= 0x100000001b3;
+    }
+    return h;
+}
 
 typedef struct {
     char name[256];
@@ -245,53 +273,99 @@ static int extract_json_field(const char* json, const char* field, char* out, in
             }
             p++;
         }
+    } else {
+        // Handle integer values (e.g., "line_start":8)
+        while (*p && (isdigit((unsigned char)*p) || *p == '-') && i < max_len - 1) {
+            out[i++] = *p++;
+        }
     }
     out[i] = '\0';
     return i;
 }
 
-// Get rich details from cache
+// Load chunks_meta.jsonl into memory hash table
+static int load_meta_jsonl(const char* cache_dir) {
+    if (g_meta_loaded) return 0;
+    
+    char meta_path[512];
+    snprintf(meta_path, sizeof(meta_path), "%s/chunks_meta.jsonl", cache_dir);
+    
+    FILE* fp = fopen(meta_path, "r");
+    if (!fp) {
+        fprintf(stderr, "Warning: No chunks_meta.jsonl found at %s\n", meta_path);
+        return -1;
+    }
+    
+    // Allocate hash table
+    g_meta_hash = calloc(META_HASH_SIZE, sizeof(meta_entry_t*));
+    if (!g_meta_hash) {
+        fclose(fp);
+        return -1;
+    }
+    
+    char line[65536];
+    int count = 0;
+    while (fgets(line, sizeof(line), fp)) {
+        meta_entry_t* entry = calloc(1, sizeof(meta_entry_t));
+        if (!entry) continue;
+        
+        extract_json_field(line, "name", entry->name, sizeof(entry->name));
+        extract_json_field(line, "file", entry->file, sizeof(entry->file));
+        extract_json_field(line, "kind", entry->kind, sizeof(entry->kind));
+        extract_json_field(line, "language", entry->language, sizeof(entry->language));
+        extract_json_field(line, "signature", entry->signature, sizeof(entry->signature));
+        extract_json_field(line, "content", entry->content, sizeof(entry->content));
+        
+        char line_buf[32];
+        if (extract_json_field(line, "line_start", line_buf, sizeof(line_buf)) > 0) {
+            entry->line_start = atoi(line_buf);
+        }
+        if (extract_json_field(line, "line_end", line_buf, sizeof(line_buf)) > 0) {
+            entry->line_end = atoi(line_buf);
+        }
+        
+        if (entry->name[0]) {
+            uint64_t h = hash_name(entry->name) % META_HASH_SIZE;
+            entry->next = g_meta_hash[h];
+            g_meta_hash[h] = entry;
+            count++;
+        } else {
+            free(entry);
+        }
+    }
+    
+    fclose(fp);
+    g_meta_loaded = 1;
+    printf("Loaded %d metadata entries from %s\n", count, meta_path);
+    return 0;
+}
+
+// Get rich details from memory hash table (O(1))
 static int get_result_details(cache_t* cache, const char* namespace, const char* name,
                               result_detail_t* detail) {
+    (void)cache; (void)namespace;  // unused
     memset(detail, 0, sizeof(result_detail_t));
     strncpy(detail->name, name, sizeof(detail->name) - 1);
     
-    // Try to find chunk by searching all file subdirectories
-    // Format: {namespace}/chunks/{file}/{name}
-    cache_iter_t* iter = cache_iter_create(cache);
-    const char* key;
-    const char* value;
+    if (!g_meta_hash) return 0;
     
-    char chunk_prefix[512];
-    snprintf(chunk_prefix, sizeof(chunk_prefix), "%s/chunks/", namespace);
-    size_t prefix_len = strlen(chunk_prefix);
+    uint64_t h = hash_name(name) % META_HASH_SIZE;
+    meta_entry_t* entry = g_meta_hash[h];
     
-    int found = 0;
-    while (cache_iter_next(iter, &key, &value) == 1) {
-        if (strncmp(key, chunk_prefix, prefix_len) != 0) continue;
-        
-        const char* last_slash = strrchr(key, '/');
-        if (last_slash && strcmp(last_slash + 1, name) == 0) {
-            extract_json_field(value, "file", detail->file, sizeof(detail->file));
-            extract_json_field(value, "signature", detail->signature, sizeof(detail->signature));
-            extract_json_field(value, "docstring", detail->docstring, sizeof(detail->docstring));
-            extract_json_field(value, "content", detail->content, sizeof(detail->content));
-            extract_json_field(value, "language", detail->language, sizeof(detail->language));
-            extract_json_field(value, "kind", detail->kind, sizeof(detail->kind));
-            
-            char line_buf[32];
-            if (extract_json_field(value, "line_start", line_buf, sizeof(line_buf)) > 0) {
-                detail->line_start = atoi(line_buf);
-            }
-            if (extract_json_field(value, "line_end", line_buf, sizeof(line_buf)) > 0) {
-                detail->line_end = atoi(line_buf);
-            }
-            found = 1;
-            break;
+    while (entry) {
+        if (strcmp(entry->name, name) == 0) {
+            strncpy(detail->file, entry->file, sizeof(detail->file) - 1);
+            strncpy(detail->kind, entry->kind, sizeof(detail->kind) - 1);
+            strncpy(detail->language, entry->language, sizeof(detail->language) - 1);
+            strncpy(detail->signature, entry->signature, sizeof(detail->signature) - 1);
+            strncpy(detail->content, entry->content, sizeof(detail->content) - 1);
+            detail->line_start = entry->line_start;
+            detail->line_end = entry->line_end;
+            return 1;
         }
+        entry = entry->next;
     }
-    cache_iter_destroy(iter);
-    return found;
+    return 0;
 }
 
 static int compare_results(const void* a, const void* b) {
@@ -705,21 +779,16 @@ int main(int argc, char** argv) {
         return 1;
     }
     
-    // Open cache for rich mode or filtering
-    cache_t* cache = NULL;
-    if (output_rich || use_filter) {
-        cache = cache_open(cache_dir, 1024 * 1024 * 1024);
-        if (!cache) {
-            if (output_rich) {
-                fprintf(stderr, "Warning: Failed to open cache, rich mode disabled\n");
-                output_rich = 0;
-            }
-            if (use_filter) {
-                fprintf(stderr, "Error: Failed to open cache, filtering requires cache\n");
-                return 1;
-            }
-        }
+    // Load metadata from JSONL (fast O(1) lookup, no cache needed)
+    int meta_ok = (load_meta_jsonl(cache_dir) == 0);
+    if (!meta_ok && (output_rich || use_filter)) {
+        fprintf(stderr, "Warning: No chunks_meta.jsonl found, rich mode and filtering disabled\n");
+        output_rich = 0;
+        use_filter = 0;
     }
+    
+    // Open cache only as fallback (optional)
+    cache_t* cache = NULL;
     
     // Load embedder based on model type
     float query_vec[DIM];
@@ -836,7 +905,7 @@ int main(int argc, char** argv) {
             printf("      \"name\": \"%s\",\n", escaped_name);
             printf("      \"score\": %.4f", all_results[i].score);
             
-            if (output_rich && cache) {
+                if (output_rich && (cache || g_meta_hash)) {
                 result_detail_t detail;
                 if (get_result_details(cache, sources[active_sources[0]].namespace, 
                                        all_results[i].name, &detail)) {
@@ -873,7 +942,7 @@ int main(int argc, char** argv) {
                 
                 printf("[%d] %s (%.4f)\n", i + 1, all_results[i].name, all_results[i].score);
                 
-                if (output_rich && cache) {
+            if (output_rich && (cache || g_meta_hash)) {
                     result_detail_t detail;
                     if (get_result_details(cache, sources[active_sources[0]].namespace,
                                            all_results[i].name, &detail)) {

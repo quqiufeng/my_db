@@ -188,7 +188,7 @@ static int needs_range(const char* kind) {
         strcmp(kind, "function") == 0 || strcmp(kind, "method") == 0 ||
         strcmp(kind, "class") == 0 || strcmp(kind, "struct") == 0 ||
         strcmp(kind, "union") == 0 || strcmp(kind, "enum") == 0 ||
-        strcmp(kind, "namespace") == 0 || strcmp(kind, "macro") == 0
+        strcmp(kind, "namespace") == 0
     );
 }
 
@@ -200,44 +200,46 @@ static int find_end_line(const char* filepath, int start_line) {
     int brace_depth = 0;
     int in_string = 0;
     int string_char = 0;
-    int found_start = 0;
+    int found_open = 0;
+    int is_declaration = 0;
     char line[4096];
     
+    // Phase 1: read lines from start_line, looking for '{'
     while (fgets(line, sizeof(line), fp)) {
         current_line++;
         if (current_line < start_line) continue;
         
-        if (current_line == start_line) {
-            char* p = line;
-            while (*p) {
-                if (!in_string) {
-                    if (*p == '"' || *p == '\'') {
-                        in_string = 1; string_char = *p;
-                    } else if (*p == '{') {
-                        brace_depth++; found_start = 1;
-                    } else if (*p == '}') {
-                        if (brace_depth > 0) brace_depth--;
-                    }
-                } else {
-                    if (*p == string_char && *(p-1) != '\\') in_string = 0;
-                }
-                p++;
-            }
-            if (!found_start) { fclose(fp); return start_line; }
-            if (brace_depth == 0) { fclose(fp); return current_line; }
-            continue;
+        // Check if this is a declaration (ends with ; before any {)
+        char* semicolon = strchr(line, ';');
+        char* brace = strchr(line, '{');
+        
+        if (!found_open && semicolon && (!brace || semicolon < brace)) {
+            // It's a declaration, skip
+            fclose(fp);
+            return 0;  // 0 means no body (declaration only)
         }
         
+        // Process the line character by character
         char* p = line;
         while (*p) {
             if (!in_string) {
-                if (*p == '"' || *p == '\'') { in_string = 1; string_char = *p; }
-                else if (*p == '/' && *(p+1) == '/') break;
-                else if (*p == '/' && *(p+1) == '*') in_string = 2;
-                else if (*p == '{') brace_depth++;
-                else if (*p == '}') {
-                    brace_depth--;
-                    if (brace_depth == 0) { fclose(fp); return current_line; }
+                if (*p == '"' || *p == '\'') {
+                    in_string = 1; string_char = *p;
+                } else if (*p == '/' && *(p+1) == '/') {
+                    break;  // C++ style comment
+                } else if (*p == '/' && *(p+1) == '*') {
+                    in_string = 2;  // Multi-line comment start
+                } else if (*p == '{') {
+                    brace_depth++;
+                    found_open = 1;
+                } else if (*p == '}') {
+                    if (brace_depth > 0) {
+                        brace_depth--;
+                        if (brace_depth == 0 && found_open) {
+                            fclose(fp);
+                            return current_line;
+                        }
+                    }
                 }
             } else if (in_string == 2) {
                 if (*p == '*' && *(p+1) == '/') { in_string = 0; p++; }
@@ -247,21 +249,32 @@ static int find_end_line(const char* filepath, int start_line) {
             p++;
         }
         
-        if (current_line > start_line + 500) { fclose(fp); return current_line; }
+        // Safety limits
+        if (!found_open && current_line > start_line + 10) {
+            // No opening brace found within 10 lines, likely a declaration
+            fclose(fp);
+            return 0;
+        }
+        if (found_open && current_line > start_line + 500) {
+            fclose(fp);
+            return current_line;
+        }
     }
     
     fclose(fp);
     return current_line;
 }
 
-static int extract_content(const char* filepath, int start_line, int end_line, 
-                           char* out, int max_len) {
-    FILE* fp = fopen(filepath, "r");
+static int extract_content_fp(FILE* fp, int start_line, int end_line, 
+                                char* out, int max_len) {
     if (!fp) return 0;
     
     int current_line = 0;
     int pos = 0;
     char line[4096];
+    
+    // Reset to beginning if we need to read from earlier lines
+    rewind(fp);
     
     while (fgets(line, sizeof(line), fp) && current_line < end_line) {
         current_line++;
@@ -273,7 +286,6 @@ static int extract_content(const char* filepath, int start_line, int end_line,
         } else break;
     }
     
-    fclose(fp);
     out[pos] = '\0';
     return pos;
 }
@@ -301,24 +313,42 @@ static int json_escape_str(const char* src, char* dst, int max_len) {
     return j;
 }
 
-static void write_chunk(FILE* fp, const char* name, const char* file, 
+static void write_chunk(FILE* fp, FILE* text_fp, FILE* meta_fp,
+                        const char* name, const char* file,
                         const char* kind, int line_start, int line_end,
-                        const char* lang, const char* signature, 
+                        const char* lang, const char* signature,
                         const char* content, const char* docstring) {
     char esc_name[512], esc_file[1024], esc_kind[64], esc_sig[4096];
     char esc_content[65536], esc_doc[8192];
-    
+
     json_escape_str(name, esc_name, sizeof(esc_name));
     json_escape_str(file, esc_file, sizeof(esc_file));
     json_escape_str(kind, esc_kind, sizeof(esc_kind));
     json_escape_str(signature, esc_sig, sizeof(esc_sig));
     json_escape_str(content, esc_content, sizeof(esc_content));
     json_escape_str(docstring, esc_doc, sizeof(esc_doc));
-    
+
     fprintf(fp, "{\"name\":\"%s\",\"file\":\"%s\",\"kind\":\"%s\","
             "\"line_start\":%d,\"line_end\":%d,\"language\":\"%s\","
             "\"signature\":\"%s\",\"content\":\"%s\",\"docstring\":\"%s\"}\n",
             esc_name, esc_file, esc_kind, line_start, line_end, lang, esc_sig, esc_content, esc_doc);
+
+    // Write content as plain text (one line per chunk, for vector generation)
+    if (text_fp) {
+        // Replace newlines with spaces for single-line format
+        for (const char* p = content; *p; p++) {
+            fputc((*p == '\n' || *p == '\r') ? ' ' : *p, text_fp);
+        }
+        fputc('\n', text_fp);
+    }
+
+    // Write metadata (for search)
+    if (meta_fp) {
+        fprintf(meta_fp, "{\"name\":\"%s\",\"file\":\"%s\",\"kind\":\"%s\","
+                "\"line_start\":%d,\"line_end\":%d,\"language\":\"%s\","
+                "\"signature\":\"%s\"}\n",
+                esc_name, esc_file, esc_kind, line_start, line_end, lang, esc_sig);
+    }
 }
 
 static void worker_process(worker_t* worker, int worker_id) {
@@ -342,7 +372,7 @@ static void worker_process(worker_t* worker, int worker_id) {
     
     char cmd[1024];
     snprintf(cmd, sizeof(cmd),
-        "ctags-universal --output-format=json --fields=+nKzS "
+        "ctags-universal --output-format=json --fields=+nKzSe "
         "--extras=+r+f --sort=no -L %s > %s 2>/dev/null",
         file_list, output_file);
     
@@ -368,11 +398,28 @@ static void worker_process(worker_t* worker, int worker_id) {
         fclose(ctags_fp);
         return;
     }
-    
-    char line[8192];
+
+    char text_file[256];
+    snprintf(text_file, sizeof(text_file), "/tmp/code_indexer_text_%d.txt", worker_id);
+    FILE* text_fp = fopen(text_file, "w");
+
+    char meta_file[256];
+    snprintf(meta_file, sizeof(meta_file), "/tmp/code_indexer_meta_%d.jsonl", worker_id);
+    FILE* meta_fp = fopen(meta_file, "w");
+
+    char line[131072];
     int chunk_count = 0;
     char fullpath[2048];
     char content[32768];
+
+    // File cache: for small files (<2MB), load entire content into memory
+    // For large files, use FILE* handle cache
+    FILE* current_fp = NULL;
+    char current_file[512] = {0};
+    char* file_buffer = NULL;
+    size_t file_buffer_size = 0;
+    char** file_lines = NULL;
+    int file_line_count = 0;
     
     while (fgets(line, sizeof(line), ctags_fp)) {
         char name[256] = {0};
@@ -389,20 +436,97 @@ static void worker_process(worker_t* worker, int worker_id) {
         json_extract_str(line, "kind", kind, sizeof(kind));
         json_extract_str(line, "signature", signature, sizeof(signature));
         int line_num = json_extract_int(line, "line");
+        int end_line = json_extract_int(line, "end");
         
         if (!name[0] || !filepath[0] || !line_num) continue;
         
-        snprintf(fullpath, sizeof(fullpath), "%s/%s", worker->repo_path, filepath);
+        if (filepath[0] == '/') {
+            strncpy(fullpath, filepath, sizeof(fullpath) - 1);
+            fullpath[sizeof(fullpath) - 1] = '\0';
+        } else {
+            snprintf(fullpath, sizeof(fullpath), "%s/%s", worker->repo_path, filepath);
+        }
         const char* lang = detect_language(filepath);
         
-        int end_line = line_num;
         content[0] = '\0';
         
         if (needs_range(kind)) {
-            end_line = find_end_line(fullpath, line_num);
-            if (end_line > line_num) {
-                extract_content(fullpath, line_num, end_line, content, sizeof(content));
+            if (end_line <= line_num) {
+                // ctags didn't provide end, fall back to our own parser
+                if (current_fp) { fclose(current_fp); current_fp = NULL; current_file[0] = '\0'; }
+                if (file_buffer) { free(file_buffer); file_buffer = NULL; }
+                if (file_lines) { free(file_lines); file_lines = NULL; }
+                end_line = find_end_line(fullpath, line_num);
+                if (end_line == 0) end_line = line_num;
             }
+            if (end_line > line_num) {
+                // Check if we need to load a new file
+                if (strcmp(filepath, current_file) != 0) {
+                    // Clean up old cache
+                    if (current_fp) { fclose(current_fp); current_fp = NULL; }
+                    if (file_buffer) { free(file_buffer); file_buffer = NULL; }
+                    if (file_lines) { free(file_lines); file_lines = NULL; }
+                    file_line_count = 0;
+                    
+                    strncpy(current_file, filepath, sizeof(current_file) - 1);
+                    current_file[sizeof(current_file) - 1] = '\0';
+                    
+                    // Try to load small file into memory
+                    struct stat st;
+                    if (stat(fullpath, &st) == 0 && st.st_size > 0 && st.st_size < 2*1024*1024) {
+                        FILE* fp = fopen(fullpath, "r");
+                        if (fp) {
+                            file_buffer = malloc(st.st_size + 1);
+                            if (file_buffer) {
+                                size_t n = fread(file_buffer, 1, st.st_size, fp);
+                                file_buffer[n] = '\0';
+                                file_buffer_size = n;
+                                
+                                // Count lines and build line index
+                                int count = 1; // at least 1 line
+                                for (size_t i = 0; i < n; i++) {
+                                    if (file_buffer[i] == '\n') count++;
+                                }
+                                file_lines = malloc(count * sizeof(char*));
+                                if (file_lines) {
+                                    file_lines[0] = file_buffer;
+                                    int idx = 1;
+                                    for (size_t i = 0; i < n && idx < count; i++) {
+                                        if (file_buffer[i] == '\n') {
+                                            file_buffer[i] = '\0';
+                                            file_lines[idx] = file_buffer + i + 1;
+                                            idx++;
+                                        }
+                                    }
+                                    file_line_count = count;
+                                }
+                            }
+                            fclose(fp);
+                        }
+                    } else {
+                        // Large file: use FILE* handle
+                        current_fp = fopen(fullpath, "r");
+                    }
+                }
+                
+                // Extract content from memory buffer or FILE*
+                if (file_lines && line_num <= file_line_count) {
+                    int pos = 0;
+                    for (int l = line_num; l <= end_line && l <= file_line_count; l++) {
+                        int len = strlen(file_lines[l-1]);
+                        if (pos + len < sizeof(content) - 2) {
+                            memcpy(content + pos, file_lines[l-1], len);
+                            pos += len;
+                            content[pos++] = '\n';
+                        }
+                    }
+                    if (pos > 0) content[pos] = '\0';
+                } else if (current_fp) {
+                    extract_content_fp(current_fp, line_num, end_line, content, sizeof(content));
+                }
+            }
+        } else {
+            end_line = line_num;
         }
         
         if (!content[0] && signature[0]) {
@@ -417,19 +541,25 @@ static void worker_process(worker_t* worker, int worker_id) {
         
         if (strcmp(kind, "member") == 0 || strcmp(kind, "field") == 0 ||
             strcmp(kind, "enumerator") == 0 || strcmp(kind, "variable") == 0 ||
-            strcmp(kind, "local") == 0 || strcmp(kind, "parameter") == 0) {
+            strcmp(kind, "local") == 0 || strcmp(kind, "parameter") == 0 ||
+            strcmp(kind, "macro") == 0) {
             continue;
         }
         
-        write_chunk(chunk_fp, name, filepath, kind, line_num, end_line,
+        write_chunk(chunk_fp, text_fp, meta_fp, name, filepath, kind, line_num, end_line,
                     lang, signature, content, "");
         chunk_count++;
     }
-    
+
+    if (current_fp) fclose(current_fp);
+    if (file_buffer) free(file_buffer);
+    if (file_lines) free(file_lines);
     fclose(ctags_fp);
     fclose(chunk_fp);
+    if (text_fp) fclose(text_fp);
+    if (meta_fp) fclose(meta_fp);
     unlink(output_file);
-    
+
     printf("[Worker %d] Done: %d chunks -> %s\n", worker_id, chunk_count, chunk_file);
 }
 
@@ -545,96 +675,74 @@ int main(int argc, char** argv) {
     double elapsed = (end_time.tv_sec - start_time.tv_sec) + 
                      (end_time.tv_nsec - start_time.tv_nsec) / 1e9;
     
-    printf("Phase 4: Importing to cache...\n");
-    
-    cache_t* cache = cache_open(cache_dir, 10ULL * 1024 * 1024 * 1024);
-    if (!cache) {
-        fprintf(stderr, "Failed to open cache: %s\n", cache_dir);
-        free(workers); free(files); free(pids);
-        return 1;
-    }
-    
-    char ns[512];
-    const char* repo_name = strrchr(repo_path, '/');
-    if (repo_name) repo_name++;
-    else repo_name = repo_path;
-    snprintf(ns, sizeof(ns), "/code/local/%s", repo_name);
-    
-    char meta_key[512], meta_value[1024];
-    snprintf(meta_key, sizeof(meta_key), "%s/_meta/info", ns);
-    snprintf(meta_value, sizeof(meta_value),
-             "{\"type\":\"code_repo\",\"repo_path\":\"%s\",\"languages\":[\"c\"]}",
-             repo_path);
-    cache_set(cache, meta_key, meta_value, 0);
-    
+    printf("Phase 4: Merging output files...\n");
+
+    // Merge text files
+    char text_out[512];
+    snprintf(text_out, sizeof(text_out), "%s/chunks_text.txt", cache_dir);
+    FILE* text_out_fp = fopen(text_out, "w");
+
+    // Merge meta files
+    char meta_out[512];
+    snprintf(meta_out, sizeof(meta_out), "%s/chunks_meta.jsonl", cache_dir);
+    FILE* meta_out_fp = fopen(meta_out, "w");
+
     int total_chunks = 0;
-    int total_symbols = 0;
-    
+
     for (int i = 0; i < num_workers; i++) {
+        char text_file[256], meta_file[256];
+        snprintf(text_file, sizeof(text_file), "/tmp/code_indexer_text_%d.txt", i);
+        snprintf(meta_file, sizeof(meta_file), "/tmp/code_indexer_meta_%d.jsonl", i);
+
+        // Copy text file
+        FILE* fp = fopen(text_file, "r");
+        if (fp) {
+            char buf[65536];
+            size_t n;
+            while ((n = fread(buf, 1, sizeof(buf), fp)) > 0) {
+                fwrite(buf, 1, n, text_out_fp);
+            }
+            fclose(fp);
+            unlink(text_file);
+        }
+
+        // Copy meta file
+        fp = fopen(meta_file, "r");
+        if (fp) {
+            char buf[65536];
+            size_t n;
+            while ((n = fread(buf, 1, sizeof(buf), fp)) > 0) {
+                fwrite(buf, 1, n, meta_out_fp);
+            }
+            fclose(fp);
+            unlink(meta_file);
+        }
+
+        // Count chunks from chunk file
         char chunk_file[256];
         snprintf(chunk_file, sizeof(chunk_file), "/tmp/code_indexer_chunks_%d.jsonl", i);
-        
-        FILE* fp = fopen(chunk_file, "r");
-        if (!fp) continue;
-        
-        char line[65536];
-        while (fgets(line, sizeof(line), fp)) {
-            char name[256] = {0}, file[512] = {0}, kind[64] = {0};
-            char lang[32] = {0}, signature[2048] = {0}, content[32768] = {0};
-            
-            json_extract_str(line, "name", name, sizeof(name));
-            json_extract_str(line, "file", file, sizeof(file));
-            json_extract_str(line, "kind", kind, sizeof(kind));
-            json_extract_str(line, "language", lang, sizeof(lang));
-            json_extract_str(line, "signature", signature, sizeof(signature));
-            json_extract_str(line, "content", content, sizeof(content));
-            int line_start = json_extract_int(line, "line_start");
-            int line_end = json_extract_int(line, "line_end");
-            
-            if (!name[0]) continue;
-            
-            char key[1024];
-            snprintf(key, sizeof(key), "%s/chunks/%s/%s", ns, file, name);
-            
-            char value[65536];
-            char esc_sig[4096], esc_content[65536];
-            json_escape_str(signature, esc_sig, sizeof(esc_sig));
-            json_escape_str(content, esc_content, sizeof(esc_content));
-            
-            snprintf(value, sizeof(value),
-                "{\"kind\":\"%s\",\"line_start\":%d,\"line_end\":%d,"
-                "\"language\":\"%s\",\"signature\":\"%s\",\"content\":\"%s\"}",
-                kind, line_start, line_end, lang, esc_sig, esc_content);
-            
-            if (strlen(value) < 1024 * 1024) {
-                cache_set(cache, key, value, 0);
+        fp = fopen(chunk_file, "r");
+        if (fp) {
+            char line[131072];
+            while (fgets(line, sizeof(line), fp)) {
                 total_chunks++;
             }
-            
-            char sym_key[1024], sym_value[2048];
-            snprintf(sym_key, sizeof(sym_key), "%s/symbols/%s", ns, name);
-            snprintf(sym_value, sizeof(sym_value),
-                "[{\"name\":\"%s\",\"kind\":\"%s\",\"file\":\"%s\",\"line\":%d,\"signature\":\"%s\"}]",
-                name, kind, file, line_start, esc_sig);
-            cache_set(cache, sym_key, sym_value, 0);
-            total_symbols++;
+            fclose(fp);
+            // Keep chunk file for now (may be useful for debugging)
         }
-        
-        fclose(fp);
-        unlink(chunk_file);
     }
-    
-    cache_sync(cache);
-    cache_close(cache);
+
+    if (text_out_fp) fclose(text_out_fp);
+    if (meta_out_fp) fclose(meta_out_fp);
     
     printf("\n========================================\n");
     printf("Indexing complete!\n");
     printf("  Files: %d\n", file_count);
     printf("  Chunks: %d\n", total_chunks);
-    printf("  Symbols: %d\n", total_symbols);
     printf("  Workers: %d\n", num_workers);
     printf("  Time: %.1fs\n", elapsed);
     printf("  Throughput: %.0f files/s\n", file_count / elapsed);
+    printf("  Output: %s/chunks_text.txt, %s/chunks_meta.jsonl\n", cache_dir, cache_dir);
     printf("========================================\n");
     
     for (int i = 0; i < file_count; i++) free(files[i].path);

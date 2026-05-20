@@ -60,3 +60,7 @@ tools/cache_snapshot
 models/codebert-base/
 models/all-mpnet-base-v2/
 models/all-MiniLM-L6-v2/
+tools/batch_embedder
+ai_code_memory/chunks_*.jsonl
+ai_code_memory/chunks_*.txt
+linux_cache/
