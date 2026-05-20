@@ -26,6 +26,166 @@
 #   ./ai_code_search_large.sh search-sub kernel "scheduler" 5
 #   ./ai_code_search_large.sh dataflow task_struct
 
+# ============================================
+# Linux 内核探索实战记录（完整工作流程）
+# ============================================
+#
+# 【实战案例：Linux 内核内存管理子系统探索】
+#
+# 项目规模：
+#   - Linux 内核源码：58,373 文件，1,469,782 chunks
+#   - 直接处理会导致：4小时+向量生成，1.1GB内存占用
+#   - 分治后：mm/子系统 188文件，11,405 chunks，2分钟完成
+#
+# 探索流程：
+#
+# Step 1: 初始化（智能拆分）
+#   ./ai_code_search_large.sh init /opt/linux
+#   # 自动检测到大项目，启用智能拆分：
+#   # - kernel/  → kernel_cache (630文件, 29,411 chunks)
+#   # - mm/      → mm_cache (188文件, 11,405 chunks)
+#   # - fs/      → fs_cache (2,160文件, 76,092 chunks)
+#   # - net/     → net_cache (1,729文件, 66,571 chunks)
+#   # - drivers/ → drivers_gpu, drivers_net 等 40+ 子系统
+#   # - arch/    → arch_x86, arch_arm 等 17 子系统
+#   # - 排除：testing/, Documentation/, samples/ 等非核心目录
+#
+# Step 2: 索引核心子系统（按需选择）
+#   ./tools/code_indexer /opt/linux/mm ./linux_subsystems/mm_cache 8
+#   # 结果：188文件，11,405 chunks，0.1秒完成
+#   # 每个子系统独立索引，不相互影响
+#
+# Step 3: 生成语义向量
+#   ./tools/batch_embedder ./linux_subsystems/mm_cache --model jina --name linux-mm
+#   # 结果：11,405 chunks → 向量，116秒，98 items/s
+#   # 子系统小，GPU显存足够，不会OOM
+#
+# Step 4: 构建分析数据
+#   ./tools/call_graph ./linux_subsystems/mm_cache     # 调用关系图
+#   ./tools/dataflow analyze ./linux_subsystems/mm_cache # 变量数据流
+#   ./tools/word_freq ./linux_subsystems/mm_cache       # TF-IDF词频
+#
+# Step 5: 语义搜索探索（自然语言查询）
+#
+#   # 搜索 "slab allocator cache"
+#   → [1] allocate_slab (0.9201)        slub.c:3441
+#   → [2] ___slab_alloc (0.9178)        slub.c:4405
+#   → [3] alloc_from_new_slab (0.9152)  slub.c
+#
+#   # 搜索 "page allocation order zone"
+#   → [1] prepare_alloc_pages (0.8928)   page_alloc.c:4973
+#   → [2] __alloc_pages_may_oom (0.8821) page_alloc.c:4047
+#
+#   # 搜索 "memory compaction migrate"
+#   → [1] migrate_vma_pages (0.8559)     migrate_device.c:1263
+#   → [2] isolate_migratepages (0.8352)  compact.c
+#
+# Step 6: 调用关系分析
+#   ./tools/vector_search ./linux_subsystems/mm_cache "__alloc_pages_slowpath" \
+#       3 --rich --callgraph
+#   # 结果：显示 __alloc_pages_slowpath → prepare_alloc_pages → get_page_from_freelist
+#   #       → __alloc_pages_direct_compact → compact_zone
+#
+# Step 7: 数据流追踪
+#   ./tools/dataflow show ./linux_subsystems/mm_cache page
+#   # 结果：
+#   #   📌 DEFINITIONS: __inc_zone_page_state()
+#   #   ✏️  ASSIGNMENTS: __page_frag_cache_refill(), alloc_zpdesc()
+#   #   👁️  USAGES: page_zone(), page_pgdat(), put_page_testzero()
+#   #   🔍 FIELDS: page->lru, page->buddy_list, page->_mapcount
+#
+# Step 8: 跨函数数据流
+#   # 追踪 page 变量如何传递
+#   # 显示：定义函数 → 被传递到哪些函数 → 哪些函数使用了它
+#
+# 【发现的核心架构】
+#
+# 内存分配三级层次：
+#   kmalloc/vmalloc (用户接口)
+#       ↓
+#   SLUB 分配器 (对象缓存：___slab_alloc → allocate_slab)
+#       ↓
+#   Buddy 系统 (物理页面：__alloc_pages_slowpath)
+#
+# 关键发现：
+#   - Buddy: order参数决定2^order个连续页面
+#   - SLUB: percpu cpu_slab → node partial → allocate_slab 三级缓存
+#   - OOM: __alloc_pages_may_oom → out_of_memory → oom_kill_process
+#   - 压缩: __alloc_pages_direct_compact → compact_zone
+#
+# ============================================
+# AI Agent Linux 内核开发完整工作流
+# ============================================
+#
+# 【完整闭环：理解 → 修改 → 编译 → 调试 → 验证】
+#
+# 场景示例：修改 page allocation 失败时的调试信息
+#
+# 1. 理解代码（语义搜索）
+#    ./tools/vector_search ./linux_subsystems/mm_cache \
+#        "page allocation fail slowpath" 5 --rich
+#    # → 找到 __alloc_pages_slowpath 是核心入口
+#    # → 找到 prepare_alloc_pages 解析 gfp_mask
+#    # → 找到 __alloc_pages_may_oom 触发 OOM
+#
+# 2. 分析影响范围（数据流 + 调用图）
+#    ./tools/dataflow show ./linux_subsystems/mm_cache gfp
+#    # → gfp_mask 传递到 __alloc_pages_may_oom
+#
+#    ./tools/vector_search ./linux_subsystems/mm_cache \
+#        "__alloc_pages_slowpath" 3 --callgraph
+#    # → 被 alloc_pages, __get_free_pages 调用
+#
+# 3. 修改代码（编辑器）
+#    vim /opt/linux/mm/page_alloc.c
+#    # 在 __alloc_pages_slowpath 中添加 printk 或 tracepoint
+#    # 修改后保存
+#
+# 4. 编译内核
+#    cd /opt/linux
+#    make oldconfig          # 确认配置
+#    make -j$(nproc)         # 编译（15-30分钟）
+#    # 或使用 ./tools/bach_compile.sh（如果存在）
+#
+# 5. 运行测试（QEMU）
+#    qemu-system-x86_64 \
+#        -kernel arch/x86/boot/bzImage \
+#        -append "console=ttyS0 debug loglevel=8" \
+#        -serial stdio \
+#        -m 512M \
+#        -initrd rootfs.cpio.gz
+#    # 在 QEMU 中运行，查看 dmesg 输出
+#
+# 6. 验证修改（搜索确认）
+#    ./tools/vector_search ./linux_subsystems/mm_cache \
+#        "your_new_debug_function" 5 --callgraph
+#    # → 确认新函数被正确调用
+#
+# 7. 调试分析（如果有问题）
+#    # 在 QEMU 中用 gdb 调试
+#    gdb ./vmlinux
+#    (gdb) target remote :1234
+#    (gdb) break __alloc_pages_slowpath
+#    (gdb) continue
+#
+# 【系统优势】
+#
+# 相比传统开发：
+#   ✅ 自然语言搜索："how does page allocation work" → 直接找到核心函数
+#   ✅ 调用关系图：一键查看函数依赖链
+#   ✅ 数据流追踪：变量在哪里被修改一目了然
+#   ✅ 子系统隔离：只编译修改的子系统，不处理整个内核
+#   ✅ 快速迭代：子系统小，向量生成快，搜索秒级响应
+#
+# 【注意事项】
+#
+#   - 分治后每个子系统独立，跨子系统调用需要全局搜索
+#   - 大子系统（如 drivers_net）仍可能需要进一步拆分
+#   - 排除的目录（testing/, doc/）如果有需要可手动添加
+#   - QEMU 运行需要 rootfs，可用 busybox 制作
+#
+# ============================================
+
 set -euo pipefail
 
 # ============================================
