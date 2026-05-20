@@ -19,4 +19,5 @@ if [[ ! -f "$PYTHON_SCRIPT" ]]; then
     exit 1
 fi
 
-exec python3 "$PYTHON_SCRIPT" "$@"
+# Run Python script and filter out cache internal log messages
+python3 "$PYTHON_SCRIPT" "$@" 2>/dev/null | grep -v '^\[CACHE\]'

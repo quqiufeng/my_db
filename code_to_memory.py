@@ -190,6 +190,10 @@ class AnalysisImporter:
         
         log(f"  Parsed {line_count} lines, {len(chunks)} valid chunks")
         
+        # Normalize filepaths: remove leading '/' to avoid double slashes in keys
+        for chunk in chunks:
+            chunk['file'] = chunk['file'].lstrip('/')
+        
         # Build symbol groups and file groups
         symbol_groups = {}
         file_groups = {}
@@ -240,8 +244,18 @@ class AnalysisImporter:
                 text += f"{chunk['docstring']}\n"
             text += code_text
             
+            # Build tags for searchability
+            tags = [name, chunk.get('kind', ''), chunk.get('language', '')]
+            # Add keywords from signature and content
+            if chunk.get('signature'):
+                tags.extend(self._extract_tags_from_text(chunk['signature']))
+            if chunk.get('content'):
+                tags.extend(self._extract_tags_from_text(chunk['content'][:500]))
+            
             chunk_data = {
                 "id": f"{namespace}:{filepath}:{name}",
+                "name": name,
+                "file": filepath,
                 "kind": chunk.get('kind', ''),
                 "line_start": chunk.get('line_start', 0),
                 "line_end": chunk.get('line_end', 0),
@@ -249,6 +263,7 @@ class AnalysisImporter:
                 "signature": chunk.get('signature', ''),
                 "docstring": chunk.get('docstring', ''),
                 "content": text[:16000],  # Cap at 16KB
+                "tags": list(set(t for t in tags if t and len(t) > 2))[:20],  # Deduplicate and limit
             }
             
             key = f"{namespace}/chunks/{filepath}/{name}"
@@ -460,6 +475,19 @@ class AnalysisImporter:
             "callees": stats.get('callees', 0),
             "dataflow_vars": stats.get('dataflow_vars', 0),
         })
+    
+    def _extract_tags_from_text(self, text: str) -> list:
+        """Extract searchable tags from text (signature or content)"""
+        import re
+        # Extract snake_case and camelCase identifiers
+        words = re.findall(r'\b[a-zA-Z_][a-zA-Z0-9_]*(?:_[a-zA-Z0-9_]+)*\b', text)
+        # Filter out common C keywords and short words
+        stopwords = {'if', 'for', 'while', 'return', 'void', 'int', 'char', 'static', 
+                     'const', 'struct', 'union', 'enum', 'typedef', 'sizeof', 'NULL',
+                     'else', 'do', 'switch', 'case', 'break', 'continue', 'goto',
+                     'extern', 'inline', 'register', 'volatile', 'signed', 'unsigned',
+                     'short', 'long', 'float', 'double', 'auto'}
+        return [w for w in words if len(w) > 3 and w.lower() not in stopwords][:10]
     
     def _parse_dataflow_relaxed(self, dataflow_file: Path) -> dict:
         """Relaxed parser for dataflow.json with unescaped quotes"""

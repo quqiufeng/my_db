@@ -132,9 +132,15 @@ class AgentQuery:
         
         try:
             data = json.loads(value)
-            data["_key"] = path
-            data["_source"] = "exact"
-            return {"results": [data]}
+            if isinstance(data, list):
+                # Symbol entries are stored as arrays
+                return {"results": [{"_key": path, "_source": "exact", "entries": data}]}
+            elif isinstance(data, dict):
+                data["_key"] = path
+                data["_source"] = "exact"
+                return {"results": [data]}
+            else:
+                return {"results": [{"_key": path, "_source": "exact", "value": data}]}
         except:
             return {"results": [{"_key": path, "value": value}]}
     
@@ -207,6 +213,9 @@ class AgentQuery:
         # Get callees
         callees = self._get_callees(name, repo)
         
+        # Get call sites
+        call_sites = self._get_call_sites(name, repo)
+        
         # Get dataflow
         dataflow = self._get_dataflow(name, repo)
         
@@ -216,11 +225,13 @@ class AgentQuery:
                 "symbol": symbol,
                 "callers": callers,
                 "callees": callees,
+                "call_sites": call_sites,
                 "dataflow": dataflow,
             },
             "stats": {
                 "caller_count": len(callers),
                 "callee_count": len(callees),
+                "call_site_count": len(call_sites),
                 "dataflow_entries": len(dataflow),
             }
         }
@@ -230,7 +241,7 @@ class AgentQuery:
         results = []
         seen = set()
         
-        # Strategy 1: Tag search (keyword matching)
+        # Strategy 1: Tag search (for technical keywords like function names)
         keywords = self._extract_keywords(query)
         for kw in keywords:
             tag_results = self.cache.search_tag(kw, max_results=20)
@@ -238,6 +249,8 @@ class AgentQuery:
                 key = r['key']
                 if repo and not key.startswith(repo):
                     continue
+                if 'chunks/' not in key:  # Only include code chunks
+                    continue
                 if key in seen:
                     continue
                 seen.add(key)
@@ -250,19 +263,19 @@ class AgentQuery:
                             "file": data.get('file', ''),
                             "line": data.get('line_start', 0),
                             "content": data['content'][:500],
-                            "score": r['score'],
+                            "score": r['score'] + 0.1,  # Boost tag matches
                             "_source": "tag",
                             "_key": key,
                         })
                 except:
                     pass
         
-        # Strategy 2: Fuzzy search
-        if len(results) < 5:
-            fuzzy_results = self.cache.search_fuzzy(query, max_results=10)
-            for r in fuzzy_results:
+        # Strategy 2: Prefix search (for namespace queries like cache_*)
+        if not results and any(c in query for c in ['_', '-']):
+            prefix_results = self.cache.search_prefix(f"{repo}/chunks/" if repo else "/code/", max_results=100)
+            for r in prefix_results:
                 key = r['key']
-                if repo and not key.startswith(repo):
+                if not any(kw in key for kw in keywords):
                     continue
                 if key in seen:
                     continue
@@ -276,10 +289,39 @@ class AgentQuery:
                             "file": data.get('file', ''),
                             "line": data.get('line_start', 0),
                             "content": data['content'][:500],
-                            "score": r['score'],
-                            "_source": "fuzzy",
+                            "score": 0.8,
+                            "_source": "prefix",
                             "_key": key,
                         })
+                except:
+                    pass
+        
+        # Strategy 3: Scan all chunks for keyword match (last resort)
+        if not results and repo:
+            # Scan all chunks in repo for content match
+            all_chunks = self.cache.search_prefix(f"{repo}/chunks/", max_results=500)
+            query_lower = query.lower()
+            for r in all_chunks:
+                key = r['key']
+                if key in seen:
+                    continue
+                
+                try:
+                    data = json.loads(r['value'])
+                    content = data.get('content', '').lower()
+                    if any(kw.lower() in content for kw in keywords) or query_lower in content:
+                        results.append({
+                            "name": data.get('name', ''),
+                            "file": data.get('file', ''),
+                            "line": data.get('line_start', 0),
+                            "content": data['content'][:500],
+                            "score": 0.5,
+                            "_source": "content_scan",
+                            "_key": key,
+                        })
+                        seen.add(key)
+                        if len(results) >= 10:
+                            break
                 except:
                     pass
         
@@ -318,6 +360,14 @@ class AgentQuery:
         if not data:
             return []
         return data.get('callees', [])
+    
+    def _get_call_sites(self, name: str, repo: str) -> List[Dict]:
+        """Get call sites of a function"""
+        key = f"{repo}/call_sites/{name}"
+        data = self._get_json(key)
+        if not data:
+            return []
+        return data.get('sites', [])
     
     def _get_dataflow(self, name: str, repo: str) -> List[Dict]:
         """Get dataflow information for a variable/function"""
@@ -403,15 +453,27 @@ Examples:
             query_type=args.type,
         )
         
-        if args.pretty:
-            print(json.dumps(result, indent=2, ensure_ascii=False))
-        else:
-            print(json.dumps(result, ensure_ascii=False))
+        # Build JSON string before closing cache (to avoid log pollution)
+        json_output = json.dumps(result, indent=2 if args.pretty else None, ensure_ascii=False)
         
     except KeyboardInterrupt:
-        pass
-    finally:
         agent.close()
+        sys.exit(130)
+    
+    # Print JSON before closing cache to avoid cache log messages in output
+    print(json_output, flush=True)
+    
+    # Close cache — suppress its stdout log spam
+    import os
+    _fd = os.dup(1)
+    _null = os.open(os.devnull, os.O_WRONLY)
+    os.dup2(_null, 1)
+    try:
+        agent.close()
+    finally:
+        os.dup2(_fd, 1)
+        os.close(_null)
+        os.close(_fd)
 
 
 if __name__ == '__main__':

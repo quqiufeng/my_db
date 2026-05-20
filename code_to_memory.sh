@@ -22,4 +22,4 @@ if [[ ! -f "$PYTHON_SCRIPT" ]]; then
 fi
 
 # Run Python script with all arguments
-exec python3 "$PYTHON_SCRIPT" "$@"
+python3 "$PYTHON_SCRIPT" "$@" 2>/dev/null | grep -v '^\[CACHE\]'

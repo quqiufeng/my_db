@@ -209,12 +209,7 @@ else
     exit 1
 fi
 
-INDEX_CMD="$INDEXER --source-dir $SOURCE_DIR --output-dir $ANALYSIS_DIR --jobs $JOBS"
-if [[ "$SOURCE" =~ ^https?:// ]]; then
-    INDEX_CMD="$INDEX_CMD --github-url $SOURCE"
-fi
-
-if ! $INDEX_CMD 2>&1; then
+if ! "$INDEXER" "$SOURCE_DIR" "$ANALYSIS_DIR" "$JOBS" 2>&1; then
     warn "Indexer returned non-zero, continuing..."
 fi
 
@@ -241,9 +236,9 @@ if [[ "$SKIP_VECTORS" == false ]]; then
     fi
     
     if [[ "$SKIP_VECTORS" == false ]]; then
-        if ! $EMBEDDER --input "$ANALYSIS_DIR/chunks_meta.jsonl" --output "$ANALYSIS_DIR/vectors.bin" --name "$PROJECT_NAME" 2>&1; then
+        if ! "$EMBEDDER" "$ANALYSIS_DIR" --model jina --name "$PROJECT_NAME" 2>&1; then
             warn "Vector generation failed, continuing..."
-            SKIP_VECTERS=true
+            SKIP_VECTORS=true
         else
             success "Vectors generated"
         fi
@@ -266,7 +261,7 @@ if [[ "$SKIP_CALLGRAPH" == false ]]; then
     fi
     
     if [[ "$SKIP_CALLGRAPH" == false ]]; then
-        if ! $CALLGRAPH --source-dir "$SOURCE_DIR" --output "$ANALYSIS_DIR/call_graph.json" 2>&1; then
+        if ! "$CALLGRAPH" "$ANALYSIS_DIR" 2>&1; then
             warn "Call graph analysis failed, continuing..."
         else
             if [[ -f "$ANALYSIS_DIR/call_graph.json" ]]; then
@@ -293,7 +288,7 @@ if [[ "$SKIP_DATAFLOW" == false ]]; then
     fi
     
     if [[ "$SKIP_DATAFLOW" == false ]]; then
-        if ! $DATAFLOW --source-dir "$SOURCE_DIR" --output "$ANALYSIS_DIR/dataflow.json" 2>&1; then
+        if ! "$DATAFLOW" analyze "$ANALYSIS_DIR" 2>&1; then
             warn "Dataflow analysis failed, continuing..."
         else
             success "Dataflow analyzed"
