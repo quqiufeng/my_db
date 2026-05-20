@@ -51,7 +51,7 @@ INCLUDEDIR = $(PREFIX)/include
 
 .PHONY: all clean test test_join test_perf test_edge test_composite test_wal test_cache test_cache_full test_http test_hnsw example install
 
-all: $(LIB) $(ONNX_EMBEDDER_LIB) $(TEST_BASIC) $(TEST_JOIN) $(TEST_PERF) $(TEST_EDGE) $(TEST_COMPOSITE) $(TEST_WAL) $(TEST_CACHE) $(TEST_CACHE_FULL) $(TEST_HTTP_SERVER) $(TEST_HNSW) $(IMPORT_BOOK) $(CACHE_SERVER) $(CACHE_HTTP_SERVER) $(CACHE_SNAPSHOT) $(VECTOR_GENERATOR) $(VECTOR_SEARCH) $(CODE_INDEXER) $(BATCH_EMBEDDER) example
+all: $(LIB) $(ONNX_EMBEDDER_LIB) $(TEST_BASIC) $(TEST_JOIN) $(TEST_PERF) $(TEST_EDGE) $(TEST_COMPOSITE) $(TEST_WAL) $(TEST_CACHE) $(TEST_CACHE_FULL) $(TEST_HTTP_SERVER) $(TEST_HNSW) $(IMPORT_BOOK) $(CACHE_SERVER) $(CACHE_HTTP_SERVER) $(CACHE_SNAPSHOT) $(VECTOR_GENERATOR) $(VECTOR_SEARCH) $(CODE_INDEXER) $(BATCH_EMBEDDER) $(CACHE_IMPORT) $(CACHE_QUERY) example
 
 $(LIB): $(OBJECTS)
 	$(CC) -shared -o $@ $^ -lm
@@ -142,8 +142,16 @@ $(CACHE_HTTP_SERVER): $(TOOLS_DIR)/cache_http_server.c $(LIB)
 $(CACHE_SNAPSHOT): $(TOOLS_DIR)/cache_snapshot.c $(LIB)
 	$(CC) $(CFLAGS) -o $@ $< -L. -lmydb -Wl,-rpath,.
 
+$(CACHE_IMPORT): $(TOOLS_DIR)/cache_import.c $(LIB)
+	$(CC) $(CFLAGS) -o $@ $(TOOLS_DIR)/cache_import.c -L. -lmydb -ljansson -Wl,-rpath,.
+
+$(CACHE_QUERY): $(TOOLS_DIR)/cache_query.c $(LIB)
+	$(CC) $(CFLAGS) -o $@ $(TOOLS_DIR)/cache_query.c -L. -lmydb -ljansson -Wl,-rpath,.
+
 CODE_INDEXER = $(TOOLS_DIR)/code_indexer
 BATCH_EMBEDDER = $(TOOLS_DIR)/batch_embedder
+CACHE_IMPORT = $(TOOLS_DIR)/cache_import
+CACHE_QUERY = $(TOOLS_DIR)/cache_query
 
 $(VECTOR_GENERATOR): $(TOOLS_DIR)/vector_generator.c $(ONNX_EMBEDDER_LIB) $(LIB)
 	$(CC) $(CFLAGS) $(ONNX_CFLAGS) -o $@ $(TOOLS_DIR)/vector_generator.c -L. -lmydb -lonnx_embedder $(ONNX_LDFLAGS) -lm -ldl -Wl,-rpath,'$$ORIGIN/..'
@@ -189,4 +197,4 @@ install: $(LIB)
 	@echo "Header:  $(INCLUDEDIR)/mydb.h"
 
 clean:
-	rm -rf $(OBJ_DIR) $(LIB) $(ONNX_EMBEDDER_LIB) $(TEST_BASIC) $(TEST_JOIN) $(TEST_PERF) $(TEST_EDGE) $(TEST_COMPOSITE) $(TEST_WAL) $(TEST_CACHE) $(TEST_CACHE_FULL) $(TEST_HTTP_SERVER) $(TEST_HNSW) $(IMPORT_BOOK) $(CACHE_HTTP_SERVER) $(CACHE_SNAPSHOT) $(VECTOR_GENERATOR) $(VECTOR_SEARCH) $(EXAMPLE_C) tests/test_codebert_embedder tests/bench_codebert *.bin *.index test_cache_dir test_cache_lru
+	rm -rf $(OBJ_DIR) $(LIB) $(ONNX_EMBEDDER_LIB) $(TEST_BASIC) $(TEST_JOIN) $(TEST_PERF) $(TEST_EDGE) $(TEST_COMPOSITE) $(TEST_WAL) $(TEST_CACHE) $(TEST_CACHE_FULL) $(TEST_HTTP_SERVER) $(TEST_HNSW) $(IMPORT_BOOK) $(CACHE_HTTP_SERVER) $(CACHE_SNAPSHOT) $(VECTOR_GENERATOR) $(VECTOR_SEARCH) $(CACHE_IMPORT) $(CACHE_QUERY) $(EXAMPLE_C) tests/test_codebert_embedder tests/bench_codebert *.bin *.index test_cache_dir test_cache_lru

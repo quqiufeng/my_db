@@ -710,6 +710,39 @@ static void print_dataflow(const char* var_name) {
     }
 }
 
+// JSON 字符串转义：将 src 中的特殊字符转义后写入 dst，最多写入 max_len-1 个字符
+static void json_escape(char* dst, const char* src, size_t max_len) {
+    size_t j = 0;
+    for (size_t i = 0; src[i] && j + 1 < max_len; i++) {
+        unsigned char c = src[i];
+        if (c == '"' || c == '\\') {
+            if (j + 2 < max_len) {
+                dst[j++] = '\\';
+                dst[j++] = c;
+            }
+        } else if (c == '\n') {
+            if (j + 2 < max_len) {
+                dst[j++] = '\\';
+                dst[j++] = 'n';
+            }
+        } else if (c == '\r') {
+            if (j + 2 < max_len) {
+                dst[j++] = '\\';
+                dst[j++] = 'r';
+            }
+        } else if (c == '\t') {
+            if (j + 2 < max_len) {
+                dst[j++] = '\\';
+                dst[j++] = 't';
+            }
+        } else if (c >= 0x20 && c < 0x7F) {
+            dst[j++] = c;
+        }
+        // 跳过不可打印字符
+    }
+    dst[j] = '\0';
+}
+
 static void save_dataflow(const char* output_file) {
     FILE* fp = fopen(output_file, "w");
     if (!fp) return;
@@ -734,8 +767,10 @@ static void save_dataflow(const char* output_file) {
                     occurrence_t* occ = &field->occurs[i];
                     const char* type_str = (occ->is_definition == 1) ? "definition" :
                                            (occ->is_definition == 2) ? "assignment" : "usage";
+                    char escaped_context[512];
+                    json_escape(escaped_context, occ->context, sizeof(escaped_context));
                     fprintf(fp, "        {\"file\":\"%s\",\"func\":\"%s\",\"line\":%d,\"type\":\"%s\",\"context\":\"%s\"}",
-                           occ->file, occ->func, occ->line, type_str, occ->context);
+                           occ->file, occ->func, occ->line, type_str, escaped_context);
                 }
                 fprintf(fp, "\n      ]");
             }
@@ -748,8 +783,10 @@ static void save_dataflow(const char* output_file) {
             occurrence_t* occ = &var->occurs[i];
             const char* type_str = (occ->is_definition == 1) ? "definition" :
                                    (occ->is_definition == 2) ? "assignment" : "usage";
+            char escaped_context[512];
+            json_escape(escaped_context, occ->context, sizeof(escaped_context));
             fprintf(fp, "      {\"file\":\"%s\",\"func\":\"%s\",\"line\":%d,\"type\":\"%s\",\"context\":\"%s\"}",
-                   occ->file, occ->func, occ->line, type_str, occ->context);
+                   occ->file, occ->func, occ->line, type_str, escaped_context);
         }
         fprintf(fp, "\n    ]\n  }");
     }

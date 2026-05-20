@@ -639,25 +639,28 @@ cache_search_vector(cache, query_vector, 384, top_k=5, min_score=0.3, &opts, &re
 | **语义搜索** | `tools/vector_search.c` | 自然语言查询代码 | C + 内存 Hash 表 + 向量 |
 | **调用图** | `tools/call_graph.c` | 函数调用关系分析 | C + ctags |
 | **数据流** | `tools/dataflow.c` | 变量数据流追踪 | C + 字段级 + 跨函数 |
-| **记忆导入** | `code_to_memory.sh` | 分析结果 → KV Cache | Python |
-| **智能查询** | `agent_query.sh` | AI 友好的结构化查询 | Python |
+| **记忆导入** | `tools/cache_import.c` | 分析结果 → KV Cache | C + jansson |
+| **智能查询** | `tools/cache_query.c` | AI 友好的结构化查询 | C + jansson |
 | **一键分析** | `analyze_repo.sh` | 全流水线编排 | Bash |
 
 ### 新工具：记忆导入与智能查询
 
-#### 1. `code_to_memory.sh` — 分析结果导入 KV Cache
+#### 1. `cache_import` — 分析结果导入 KV Cache
 
 将 `ai_code_search.sh` 生成的分析结果导入 KV Cache 记忆系统，使 Agent 能够查询已分析的项目。
 
 ```bash
+# 编译
+make tools/cache_import
+
 # 基本用法：导入分析目录到指定命名空间
-./code_to_memory.sh <analysis_dir> <namespace> [--cache-dir <dir>]
+./tools/cache_import <analysis_dir> <namespace> [--cache-dir <dir>]
 
 # 导入 nginx 分析结果
-./code_to_memory.sh ./nginx_cache /code/nginx
+./tools/cache_import ./nginx_cache /code/nginx
 
 # 导入 Linux 内核 mm 子系统（指定缓存目录）
-./code_to_memory.sh ./linux_subsystems/mm_cache /code/linux/mm --cache-dir ./ai_memory
+./tools/cache_import ./linux_subsystems/mm_cache /code/linux/mm --cache-dir ./ai_memory
 
 # 支持的输入文件（由 ai_code_search.sh 生成）：
 #   - chunks_meta.jsonl  : 代码片段元数据
@@ -673,13 +676,16 @@ cache_search_vector(cache, query_vector, 384, top_k=5, min_score=0.3, &opts, &re
 - `/code/{project}/callees/{name}` — 被调用者列表
 - `/code/{project}/dataflow/vars/{name}` — 变量数据流
 
-#### 2. `agent_query.sh` — AI 友好的结构化查询
+#### 2. `cache_query` — AI 友好的结构化查询
 
 为 AI Agent 提供结构化的 JSON 输出，支持多种查询策略自动切换。
 
 ```bash
+# 编译
+make tools/cache_query
+
 # 基本用法
-./agent_query.sh <query> [--repo <namespace>] [--type <type>]
+./tools/cache_query <query> [--repo <namespace>] [--type <type>]
 
 # 查询类型：
 #   auto    - 自动检测（默认）
@@ -689,13 +695,13 @@ cache_search_vector(cache, query_vector, 384, top_k=5, min_score=0.3, &opts, &re
 #   search  - 关键词搜索
 
 # 获取函数的完整上下文
-./agent_query.sh ngx_palloc --repo /code/nginx --type context --pretty
+./tools/cache_query ngx_palloc --repo /code/nginx --type context --pretty
 
 # 在仓库内搜索
-./agent_query.sh "memory pool allocation" --repo /code/nginx --type search
+./tools/cache_query "memory pool allocation" --repo /code/nginx --type search
 
 # 精确路径查询
-./agent_query.sh /code/nginx/symbols/ngx_array_init --type exact
+./tools/cache_query /code/nginx/symbols/ngx_array_init --type exact
 
 # 查询返回的 JSON 结构：
 # {

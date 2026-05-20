@@ -301,15 +301,19 @@ fi
 # Step 6: Import to KV Cache
 log "Step 6: Importing to KV Cache..."
 
-if [[ -f "$SCRIPT_DIR/code_to_memory.sh" ]]; then
-    IMPORTER="$SCRIPT_DIR/code_to_memory.sh"
+if [[ -f "$SCRIPT_DIR/tools/cache_import" ]]; then
+    IMPORTER="$SCRIPT_DIR/tools/cache_import"
+elif [[ -f "$SCRIPT_DIR/cache_import" ]]; then
+    IMPORTER="$SCRIPT_DIR/cache_import"
 else
-    error "code_to_memory.sh not found"
+    error "cache_import not found. Please build: make tools/cache_import"
     rm -rf "$CLEANUP_DIR"
     exit 1
 fi
 
-if ! $IMPORTER "$ANALYSIS_DIR" "$NAMESPACE" --cache-dir "$CACHE_DIR" 2>&1; then
+export LD_LIBRARY_PATH="$SCRIPT_DIR:${LD_LIBRARY_PATH:-}"
+
+if ! "$IMPORTER" "$ANALYSIS_DIR" "$NAMESPACE" --cache-dir "$CACHE_DIR" 2>&1; then
     error "Failed to import to KV Cache"
     rm -rf "$CLEANUP_DIR"
     exit 1
@@ -335,6 +339,6 @@ log "Call graph: $([ "$SKIP_CALLGRAPH" == true ] && echo "skipped" || echo "anal
 log "Dataflow: $([ "$SKIP_DATAFLOW" == true ] && echo "skipped" || echo "analyzed")"
 log ""
 log "Query examples:"
-log "  ./agent_query.sh <symbol> --repo $NAMESPACE --type context"
-log "  ./agent_query.sh \"search query\" --repo $NAMESPACE --type search"
+log "  ./tools/cache_query <symbol> --repo $NAMESPACE --type context"
+log "  ./tools/cache_query \"search query\" --repo $NAMESPACE --type search"
 log "================================================================"
