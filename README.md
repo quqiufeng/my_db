@@ -637,6 +637,51 @@ cache_search_vector(cache, query_vector, 384, top_k=5, min_score=0.3, &opts, &re
 | **代码索引** | `tools/code_indexer.c` | 多进程源码索引（C） | ctags + C + fork |
 | **向量生成** | `tools/batch_embedder.c` | GPU 批量编码向量 | C + ONNX Runtime + TensorRT |
 | **语义搜索** | `tools/vector_search.c` | 自然语言查询代码 | C + 内存 Hash 表 + 向量 |
+| **调用图** | `tools/call_graph.c` | 函数调用关系分析 | C + ctags |
+| **数据流** | `tools/dataflow.c` | 变量数据流追踪 | C + 字段级 + 跨函数 |
+| **记忆导入** | `code_to_memory.sh` | 分析结果 → KV Cache | Python |
+| **智能查询** | `agent_query.sh` | AI 友好的结构化查询 | Python |
+| **一键分析** | `analyze_repo.sh` | 全流水线编排 | Bash |
+
+### 新工具：记忆导入与智能查询
+
+**将分析结果导入 KV Cache 记忆系统：**
+
+```bash
+# 导入 nginx 分析结果到记忆
+./code_to_memory.sh ./nginx_cache /code/nginx
+
+# 导入 Linux 内核 mm 子系统
+./code_to_memory.sh ./linux_subsystems/mm_cache /code/linux/mm
+```
+
+**AI 友好的结构化查询：**
+
+```bash
+# 获取函数的完整上下文（定义 + 调用者 + 被调用者 + 数据流）
+./agent_query.sh ngx_palloc --repo /code/nginx --type context --pretty
+
+# 在仓库内搜索
+./agent_query.sh "memory pool allocation" --repo /code/nginx --type search
+
+# 精确路径查询
+./agent_query.sh /code/nginx/symbols/ngx_array_init --type exact
+```
+
+**一键全流水线分析：**
+
+```bash
+# 从 GitHub URL 分析到记忆导入
+./analyze_repo.sh https://github.com/redis/redis /code/redis
+
+# 本地项目快速分析（跳过向量生成）
+./analyze_repo.sh /home/user/project /code/myproject --skip-vectors
+
+# 指定项目名称和并行度
+./analyze_repo.sh https://github.com/sqlite/sqlite /code/sqlite --name sqlite --jobs 8
+```
+
+流水线：`克隆 → 索引 → 向量生成 → 调用图 → 数据流 → KV Cache 导入`
 
 ### 完整工作流程（llama.cpp 示例）
 
