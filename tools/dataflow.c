@@ -2,13 +2,19 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
-#include <regex.h>
+#include <jansson.h>
 
 #define MAX_LINE 131072
-#define MAX_VARS 1000
-#define MAX_OCCURS 100
+#define MAX_VARS 2000
+#define MAX_OCCURS 200
+#define MAX_FIELDS 50
+#define MAX_FUNCS 5000
 
-// 变量出现记录
+// ============================================
+// 基础数据结构
+// ============================================
+
+// 变量出现记录（增强版：支持字段）
 typedef struct {
     char file[512];
     char func[256];
@@ -16,20 +22,56 @@ typedef struct {
     int col;
     char context[256];
     int is_definition;  // 1=定义, 2=赋值, 3=使用
+    char field_name[128];  // "" 表示无字段访问，否则为字段名
 } occurrence_t;
 
-// 变量记录
+// 字段访问记录
+typedef struct {
+    char field_name[128];
+    occurrence_t* occurs;
+    int occur_count;
+    int capacity;
+} field_record_t;
+
+// 变量记录（增强版：支持字段）
 typedef struct {
     char name[128];
-    char type[128];     // 变量类型（如果知道）
+    char type[128];
     occurrence_t occurs[MAX_OCCURS];
     int occur_count;
+    field_record_t fields[MAX_FIELDS];  // 字段级访问
+    int field_count;
 } var_record_t;
 
 static var_record_t g_vars[MAX_VARS];
 static int g_var_count = 0;
 
-// 查找或创建变量记录
+// ============================================
+// 跨函数数据流
+// ============================================
+
+// 函数调用记录
+typedef struct {
+    char caller[256];
+    char callee[256];
+    char call_site_file[512];
+    int call_site_line;
+    char args[1024];  // 参数字符串，如 "c, pool, log"
+} call_edge_t;
+
+// 调用图
+typedef struct {
+    call_edge_t* edges;
+    int edge_count;
+    int capacity;
+} call_graph_t;
+
+static call_graph_t g_call_graph = {NULL, 0, 0};
+
+// ============================================
+// 变量管理
+// ============================================
+
 static var_record_t* find_or_create_var(const char* name) {
     for (int i = 0; i < g_var_count; i++) {
         if (strcmp(g_vars[i].name, name) == 0) return &g_vars[i];
@@ -39,12 +81,37 @@ static var_record_t* find_or_create_var(const char* name) {
     g_vars[g_var_count].name[sizeof(g_vars[g_var_count].name) - 1] = '\0';
     g_vars[g_var_count].type[0] = '\0';
     g_vars[g_var_count].occur_count = 0;
+    g_vars[g_var_count].field_count = 0;
     return &g_vars[g_var_count++];
 }
 
-// 添加出现记录
+static field_record_t* find_or_create_field(var_record_t* var, const char* field_name) {
+    for (int i = 0; i < var->field_count; i++) {
+        if (strcmp(var->fields[i].field_name, field_name) == 0) 
+            return &var->fields[i];
+    }
+    if (var->field_count >= MAX_FIELDS) return NULL;
+    field_record_t* field = &var->fields[var->field_count++];
+    strncpy(field->field_name, field_name, sizeof(field->field_name) - 1);
+    field->field_name[sizeof(field->field_name) - 1] = '\0';
+    field->occurs = NULL;
+    field->occur_count = 0;
+    field->capacity = 0;
+    return field;
+}
+
+static void add_field_occurrence(field_record_t* field, occurrence_t* occ) {
+    if (!field) return;
+    if (field->occur_count >= field->capacity) {
+        field->capacity = field->capacity == 0 ? 10 : field->capacity * 2;
+        field->occurs = realloc(field->occurs, field->capacity * sizeof(occurrence_t));
+    }
+    field->occurs[field->occur_count++] = *occ;
+}
+
 static void add_occurrence(var_record_t* var, const char* file, const char* func, 
-                           int line, int col, const char* context, int is_def) {
+                           int line, int col, const char* context, int is_def,
+                           const char* field_name) {
     if (!var || var->occur_count >= MAX_OCCURS) return;
     occurrence_t* occ = &var->occurs[var->occur_count++];
     strncpy(occ->file, file, sizeof(occ->file) - 1);
@@ -53,9 +120,59 @@ static void add_occurrence(var_record_t* var, const char* file, const char* func
     occ->col = col;
     strncpy(occ->context, context, sizeof(occ->context) - 1);
     occ->is_definition = is_def;
+    if (field_name) {
+        strncpy(occ->field_name, field_name, sizeof(occ->field_name) - 1);
+        field_record_t* field = find_or_create_field(var, field_name);
+        if (field) add_field_occurrence(field, occ);
+    } else {
+        occ->field_name[0] = '\0';
+    }
 }
 
-// 检测 C 类型关键字
+// ============================================
+// 字段访问提取
+// ============================================
+
+static const char* extract_field_access(const char* line, const char* var_name) {
+    static char field_name[128];
+    field_name[0] = '\0';
+    
+    int var_len = (int)strlen(var_name);
+    const char* p = line;
+    
+    while ((p = strstr(p, var_name)) != NULL) {
+        if (p > line && (isalnum((unsigned char)*(p-1)) || *(p-1) == '_')) {
+            p += var_len;
+            continue;
+        }
+        
+        const char* after = p + var_len;
+        if (*after == '-' && *(after+1) == '>') {
+            after += 2;
+        } else if (*after == '.') {
+            after += 1;
+        } else {
+            p += var_len;
+            continue;
+        }
+        
+        int i = 0;
+        while (*after && (isalnum((unsigned char)*after) || *after == '_') && i < 127) {
+            field_name[i++] = *after++;
+        }
+        field_name[i] = '\0';
+        
+        if (i > 0) return field_name;
+        p += var_len;
+    }
+    
+    return NULL;
+}
+
+// ============================================
+// 词法分析
+// ============================================
+
 static int is_c_type(const char* word) {
     static const char* types[] = {
         "int", "char", "float", "double", "void", "auto", "static", "const",
@@ -73,19 +190,15 @@ static int is_c_type(const char* word) {
     return 0;
 }
 
-// 简单词法分析：提取 token
 static void tokenize_line(const char* line, char tokens[][128], int* token_count, int max_tokens) {
     *token_count = 0;
     const char* p = line;
     while (*p && *token_count < max_tokens) {
-        // 跳过空白
         while (*p && isspace((unsigned char)*p)) p++;
         if (!*p) break;
         
-        // 跳过注释
         if (*p == '/' && *(p+1) == '/') break;
         
-        // 标识符或关键字
         if (isalpha((unsigned char)*p) || *p == '_') {
             int i = 0;
             while (*p && (isalnum((unsigned char)*p) || *p == '_') && i < 127) {
@@ -94,7 +207,6 @@ static void tokenize_line(const char* line, char tokens[][128], int* token_count
             tokens[*token_count][i] = '\0';
             (*token_count)++;
         }
-        // 数字
         else if (isdigit((unsigned char)*p)) {
             int i = 0;
             while (*p && (isalnum((unsigned char)*p) || *p == '.') && i < 127) {
@@ -103,17 +215,14 @@ static void tokenize_line(const char* line, char tokens[][128], int* token_count
             tokens[*token_count][i] = '\0';
             (*token_count)++;
         }
-        // 字符串
         else if (*p == '"' || *p == '\'') {
             char quote = *p++;
             while (*p && *p != quote) p++;
             if (*p) p++;
         }
-        // 操作符
         else {
             int i = 0;
             tokens[*token_count][i++] = *p++;
-            // 多字符操作符
             if (*p && ((*p == '=' && strchr("=+-*/%<>!|&", *(p-1))) ||
                         (*p == '+' && *(p-1) == '+') ||
                         (*p == '-' && *(p-1) == '-') ||
@@ -128,26 +237,25 @@ static void tokenize_line(const char* line, char tokens[][128], int* token_count
     }
 }
 
-// 分析单行代码中的变量
+// ============================================
+// 代码分析
+// ============================================
+
 typedef struct {
     char file[512];
     char func[256];
-    int abs_line;  // 文件中的绝对行号
+    int abs_line;
 } ctx_info_t;
 
-static void analyze_line(const char* line, int line_no, ctx_info_t* ctx) {
+static void analyze_line_impl(const char* line, ctx_info_t* ctx) {
     char tokens[64][128];
     int token_count = 0;
     tokenize_line(line, tokens, &token_count, 64);
     
-    // 扫描：查找定义、赋值、使用
     for (int i = 0; i < token_count; i++) {
-        // 1. 变量定义：类型 变量名 [ = ... ] ;
-        // 模式：type var_name [= ...];
+        // 1. 变量定义
         if (is_c_type(tokens[i]) && i + 1 < token_count) {
-            // 检查后面跟着的是否是标识符（不是关键字）
             char* next = tokens[i + 1];
-            // 跳过指针星号
             if (strcmp(next, "*") == 0 && i + 2 < token_count) {
                 next = tokens[i + 2];
             }
@@ -155,32 +263,31 @@ static void analyze_line(const char* line, int line_no, ctx_info_t* ctx) {
                 var_record_t* var = find_or_create_var(next);
                 if (var && var->occur_count == 0) {
                     strncpy(var->type, tokens[i], sizeof(var->type) - 1);
-                    add_occurrence(var, ctx->file, ctx->func, ctx->abs_line, 0, line, 1);
+                    add_occurrence(var, ctx->file, ctx->func, ctx->abs_line, 0, line, 1, NULL);
                 }
             }
         }
         
-        // 2. 赋值：var_name = ...
+        // 2. 赋值
         if (strcmp(tokens[i], "=") == 0 && i > 0) {
             char* prev = tokens[i - 1];
-            // 跳过 ++ -- 等
             if (strcmp(prev, "+") != 0 && strcmp(prev, "-") != 0 &&
                 strcmp(prev, "*") != 0 && strcmp(prev, "&") != 0) {
                 var_record_t* var = find_or_create_var(prev);
-                if (var) add_occurrence(var, ctx->file, ctx->func, ctx->abs_line, 0, line, 2);
+                if (var) {
+                    const char* field = extract_field_access(line, prev);
+                    add_occurrence(var, ctx->file, ctx->func, ctx->abs_line, 0, line, 2, field);
+                }
             }
         }
         
-        // 3. 使用：token 出现在右侧（简单启发式）
-        // 如果 token 是标识符，且不是类型，且不在赋值左侧
+        // 3. 使用（含字段访问）
         if ((isalpha((unsigned char)tokens[i][0]) || tokens[i][0] == '_') &&
             !is_c_type(tokens[i])) {
-            // 检查是否是赋值左侧
             int is_lvalue = 0;
             if (i + 1 < token_count && strcmp(tokens[i + 1], "=") == 0) {
                 is_lvalue = 1;
             }
-            // 检查是否是 ++ -- 左侧
             if (i + 1 < token_count && 
                 (strcmp(tokens[i + 1], "++") == 0 || strcmp(tokens[i + 1], "--") == 0)) {
                 is_lvalue = 1;
@@ -188,13 +295,13 @@ static void analyze_line(const char* line, int line_no, ctx_info_t* ctx) {
             if (!is_lvalue) {
                 var_record_t* var = find_or_create_var(tokens[i]);
                 if (var && var->occur_count > 0) {
-                    // 确保不是重复记录同一行
                     int dup = 0;
                     for (int j = 0; j < var->occur_count; j++) {
                         if (var->occurs[j].line == ctx->abs_line) { dup = 1; break; }
                     }
                     if (!dup) {
-                        add_occurrence(var, ctx->file, ctx->func, ctx->abs_line, 0, line, 3);
+                        const char* field = extract_field_access(line, tokens[i]);
+                        add_occurrence(var, ctx->file, ctx->func, ctx->abs_line, 0, line, 3, field);
                     }
                 }
             }
@@ -202,7 +309,6 @@ static void analyze_line(const char* line, int line_no, ctx_info_t* ctx) {
     }
 }
 
-// 处理函数体内容
 static void process_function_content(const char* content, ctx_info_t* ctx_base) {
     char line[1024];
     const char* p = content;
@@ -210,7 +316,7 @@ static void process_function_content(const char* content, ctx_info_t* ctx_base) 
     
     while (*p) {
         int i = 0;
-        while (*p && *p != '\n' && i < sizeof(line) - 1) {
+        while (*p && *p != '\n' && i < (int)(sizeof(line) - 1)) {
             line[i++] = *p++;
         }
         line[i] = '\0';
@@ -219,11 +325,10 @@ static void process_function_content(const char* content, ctx_info_t* ctx_base) 
         
         ctx_info_t ctx = *ctx_base;
         ctx.abs_line = ctx_base->abs_line + rel_line - 1;
-        analyze_line(line, rel_line, &ctx);
+        analyze_line_impl(line, &ctx);
     }
 }
 
-// 从 meta 文件提取信息并分析
 static int analyze_meta(const char* meta_file) {
     FILE* fp = fopen(meta_file, "r");
     if (!fp) {
@@ -236,7 +341,6 @@ static int analyze_meta(const char* meta_file) {
     int func_count = 0;
     
     while (getline(&line, &line_len, fp) != -1) {
-        // 提取 name, file, kind, line_start, content
         char name[256] = {0}, file[512] = {0}, kind[32] = {0};
         char content[32768] = {0};
         int line_start = 0;
@@ -265,13 +369,11 @@ static int analyze_meta(const char* meta_file) {
         while (*kind_p && *kind_p != '"' && i < 31) kind[i++] = *kind_p++;
         line_start = atoi(line_p);
         
-        // 只分析函数和方法
         if (strcmp(kind, "function") != 0 && strcmp(kind, "method") != 0) continue;
         
-        // 提取 content
         i = 0;
         const char* cp = content_p;
-        while (*cp && i < sizeof(content) - 1) {
+        while (*cp && i < (int)(sizeof(content) - 1)) {
             if (*cp == '\\' && *(cp+1)) {
                 content[i++] = *(++cp);
                 cp++;
@@ -298,7 +400,153 @@ static int analyze_meta(const char* meta_file) {
     return 0;
 }
 
-// 输出变量数据流报告
+// ============================================
+// 调用图加载
+// ============================================
+
+static int load_call_graph(const char* cache_dir) {
+    char path[512];
+    snprintf(path, sizeof(path), "%s/call_graph.json", cache_dir);
+    
+    FILE* fp = fopen(path, "r");
+    if (!fp) {
+        fprintf(stderr, "Warning: call_graph.json not found at %s\n", path);
+        return 1;
+    }
+    
+    json_error_t error;
+    json_t* root = json_loadf(fp, 0, &error);
+    fclose(fp);
+    
+    if (!root) {
+        fprintf(stderr, "Error parsing call_graph.json: %s\n", error.text);
+        return 1;
+    }
+    
+    g_call_graph.capacity = 10000;
+    g_call_graph.edges = calloc(g_call_graph.capacity, sizeof(call_edge_t));
+    g_call_graph.edge_count = 0;
+    
+    const char* func_name;
+    json_t* func_info;
+    json_object_foreach(root, func_name, func_info) {
+        json_t* calls = json_object_get(func_info, "calls");
+        if (!calls || !json_is_array(calls)) continue;
+        
+        size_t idx;
+        json_t* call;
+        json_array_foreach(calls, idx, call) {
+            if (!json_is_object(call)) continue;
+            
+            json_t* callee_j = json_object_get(call, "function");
+            json_t* file_j = json_object_get(call, "file");
+            json_t* line_j = json_object_get(call, "line");
+            json_t* args_j = json_object_get(call, "arguments");
+            
+            if (!callee_j || !json_is_string(callee_j)) continue;
+            
+            if (g_call_graph.edge_count >= g_call_graph.capacity) {
+                g_call_graph.capacity *= 2;
+                g_call_graph.edges = realloc(g_call_graph.edges, 
+                                              g_call_graph.capacity * sizeof(call_edge_t));
+            }
+            
+            call_edge_t* edge = &g_call_graph.edges[g_call_graph.edge_count++];
+            strncpy(edge->caller, func_name, sizeof(edge->caller) - 1);
+            strncpy(edge->callee, json_string_value(callee_j), sizeof(edge->callee) - 1);
+            
+            if (file_j && json_is_string(file_j)) {
+                strncpy(edge->call_site_file, json_string_value(file_j), 
+                        sizeof(edge->call_site_file) - 1);
+            } else {
+                edge->call_site_file[0] = '\0';
+            }
+            
+            edge->call_site_line = (line_j && json_is_integer(line_j)) ? (int)json_integer_value(line_j) : 0;
+            
+            edge->args[0] = '\0';
+            if (args_j && json_is_array(args_j)) {
+                size_t arg_idx;
+                json_t* arg;
+                int pos = 0;
+                json_array_foreach(args_j, arg_idx, arg) {
+                    if (json_is_string(arg) && pos < (int)(sizeof(edge->args) - 2)) {
+                        if (pos > 0) {
+                            edge->args[pos++] = ',';
+                            edge->args[pos++] = ' ';
+                        }
+                        const char* arg_str = json_string_value(arg);
+                        int len = (int)strlen(arg_str);
+                        if (pos + len < (int)(sizeof(edge->args) - 1)) {
+                            strcpy(edge->args + pos, arg_str);
+                            pos += len;
+                        }
+                    }
+                }
+                edge->args[pos] = '\0';
+            }
+        }
+    }
+    
+    json_decref(root);
+    printf("Loaded call graph: %d edges\n", g_call_graph.edge_count);
+    return 0;
+}
+
+// ============================================
+// 跨函数分析辅助函数
+// ============================================
+
+static const char* find_var_definition_func(const char* var_name) {
+    var_record_t* var = NULL;
+    for (int i = 0; i < g_var_count; i++) {
+        if (strcmp(g_vars[i].name, var_name) == 0) {
+            var = &g_vars[i];
+            break;
+        }
+    }
+    if (!var) return NULL;
+    
+    for (int i = 0; i < var->occur_count; i++) {
+        if (var->occurs[i].is_definition == 1) {
+            return var->occurs[i].func;
+        }
+    }
+    return NULL;
+}
+
+static void find_next_funcs(const char* var_name, const char* current_func, 
+                            char** next_funcs, int* count, int max_count) {
+    for (int i = 0; i < g_call_graph.edge_count; i++) {
+        if (strcmp(g_call_graph.edges[i].caller, current_func) == 0 &&
+            strstr(g_call_graph.edges[i].args, var_name)) {
+            int dup = 0;
+            for (int j = 0; j < *count; j++) {
+                if (strcmp(next_funcs[j], g_call_graph.edges[i].callee) == 0) {
+                    dup = 1;
+                    break;
+                }
+            }
+            if (!dup && *count < max_count) {
+                next_funcs[*count] = strdup(g_call_graph.edges[i].callee);
+                (*count)++;
+            }
+        }
+    }
+}
+
+static int count_total_fields(void) {
+    int count = 0;
+    for (int i = 0; i < g_var_count; i++) {
+        count += g_vars[i].field_count;
+    }
+    return count;
+}
+
+// ============================================
+// 输出函数
+// ============================================
+
 static void print_dataflow(const char* var_name) {
     var_record_t* var = NULL;
     for (int i = 0; i < g_var_count; i++) {
@@ -321,7 +569,7 @@ static void print_dataflow(const char* var_name) {
     printf("║ Total occurrences: %-46d ║\n", var->occur_count);
     printf("╚══════════════════════════════════════════════════════════════════╝\n\n");
     
-    // 分类显示
+    // 1. 定义
     printf("📌 DEFINITIONS:\n");
     printf("─────────────────────────────────────────────────────────────────\n");
     int found = 0;
@@ -335,34 +583,133 @@ static void print_dataflow(const char* var_name) {
     }
     if (!found) printf("  (no explicit definition found)\n\n");
     
+    // 2. 赋值
     printf("✏️  ASSIGNMENTS (Value Changes):\n");
     printf("─────────────────────────────────────────────────────────────────\n");
     found = 0;
     for (int i = 0; i < var->occur_count; i++) {
         if (var->occurs[i].is_definition == 2) {
-            printf("  %s:%d  in %s()\n", 
+            printf("  %s:%d  in %s()", 
                    var->occurs[i].file, var->occurs[i].line, var->occurs[i].func);
-            printf("  %s\n\n", var->occurs[i].context);
+            if (var->occurs[i].field_name[0]) {
+                printf("  [field: %s]", var->occurs[i].field_name);
+            }
+            printf("\n  %s\n\n", var->occurs[i].context);
             found++;
         }
     }
     if (!found) printf("  (no assignments found)\n\n");
     
+    // 3. 使用
     printf("👁️  USAGES (Value Reads):\n");
     printf("─────────────────────────────────────────────────────────────────\n");
     found = 0;
     for (int i = 0; i < var->occur_count; i++) {
         if (var->occurs[i].is_definition == 3) {
-            printf("  %s:%d  in %s()\n", 
+            printf("  %s:%d  in %s()", 
                    var->occurs[i].file, var->occurs[i].line, var->occurs[i].func);
-            printf("  %s\n\n", var->occurs[i].context);
+            if (var->occurs[i].field_name[0]) {
+                printf("  [field: %s]", var->occurs[i].field_name);
+            }
+            printf("\n  %s\n\n", var->occurs[i].context);
             found++;
         }
     }
     if (!found) printf("  (no usages found)\n\n");
+    
+    // 4. 字段级分析
+    if (var->field_count > 0) {
+        printf("🔍 FIELD-LEVEL BREAKDOWN:\n");
+        printf("─────────────────────────────────────────────────────────────────\n");
+        for (int f = 0; f < var->field_count; f++) {
+            field_record_t* field = &var->fields[f];
+            printf("\n  → %s->%s (%d occurrences)\n", var_name, field->field_name, 
+                   field->occur_count);
+            
+            for (int i = 0; i < field->occur_count && i < 5; i++) {
+                occurrence_t* occ = &field->occurs[i];
+                const char* type_str = (occ->is_definition == 1) ? "DEF" :
+                                       (occ->is_definition == 2) ? "SET" : "USE";
+                printf("    [%s] %s:%d %s()\n", type_str, occ->file, occ->line, occ->func);
+            }
+            if (field->occur_count > 5) {
+                printf("    ... and %d more\n", field->occur_count - 5);
+            }
+        }
+        printf("\n");
+    }
+    
+    // 5. 跨函数数据流
+    if (g_call_graph.edge_count > 0) {
+        printf("🌐 CROSS-FUNCTION FLOW:\n");
+        printf("─────────────────────────────────────────────────────────────────\n");
+        
+        const char* def_func = find_var_definition_func(var_name);
+        if (!def_func) {
+            if (var->occur_count > 0) def_func = var->occurs[0].func;
+        }
+        
+        if (def_func) {
+            printf("  Origin: %s() defines '%s'\n\n", def_func, var_name);
+            
+            char* visited[MAX_FUNCS];
+            int visited_count = 0;
+            char* queue[MAX_FUNCS];
+            int queue_head = 0, queue_tail = 0;
+            
+            queue[queue_tail++] = strdup(def_func);
+            visited[visited_count++] = strdup(def_func);
+            
+            int depth = 0;
+            while (queue_head < queue_tail && depth < 5) {
+                int level_size = queue_tail - queue_head;
+                for (int l = 0; l < level_size && queue_head < queue_tail; l++) {
+                    char* current = queue[queue_head++];
+                    
+                    char* next_funcs[100];
+                    int next_count = 0;
+                    find_next_funcs(var_name, current, next_funcs, &next_count, 100);
+                    
+                    for (int i = 0; i < next_count; i++) {
+                        int used = 0;
+                        for (int j = 0; j < var->occur_count; j++) {
+                            if (strcmp(var->occurs[j].func, next_funcs[i]) == 0) {
+                                used = 1;
+                                break;
+                            }
+                        }
+                        
+                        for (int s = 0; s <= depth; s++) printf("  ");
+                        printf("→ %s()", next_funcs[i]);
+                        if (used) printf(" [uses '%s']", var_name);
+                        printf("\n");
+                        
+                        int already_visited = 0;
+                        for (int v = 0; v < visited_count; v++) {
+                            if (strcmp(visited[v], next_funcs[i]) == 0) {
+                                already_visited = 1;
+                                break;
+                            }
+                        }
+                        
+                        if (!already_visited && queue_tail < MAX_FUNCS) {
+                            queue[queue_tail++] = strdup(next_funcs[i]);
+                            visited[visited_count++] = strdup(next_funcs[i]);
+                        } else {
+                            free(next_funcs[i]);
+                        }
+                    }
+                }
+                depth++;
+            }
+            
+            for (int i = 0; i < queue_tail; i++) free(queue[i]);
+            for (int i = 0; i < visited_count; i++) free(visited[i]);
+        }
+        printf("\n");
+    }
 }
 
-// 保存数据流到 JSON 文件
 static void save_dataflow(const char* output_file) {
     FILE* fp = fopen(output_file, "w");
     if (!fp) return;
@@ -375,6 +722,26 @@ static void save_dataflow(const char* output_file) {
         if (var->type[0]) {
             fprintf(fp, "    \"type\": \"%s\",\n", var->type);
         }
+        
+        if (var->field_count > 0) {
+            fprintf(fp, "    \"fields\": {\n");
+            for (int f = 0; f < var->field_count; f++) {
+                if (f > 0) fprintf(fp, ",\n");
+                field_record_t* field = &var->fields[f];
+                fprintf(fp, "      \"%s\": [\n", field->field_name);
+                for (int i = 0; i < field->occur_count; i++) {
+                    if (i > 0) fprintf(fp, ",\n");
+                    occurrence_t* occ = &field->occurs[i];
+                    const char* type_str = (occ->is_definition == 1) ? "definition" :
+                                           (occ->is_definition == 2) ? "assignment" : "usage";
+                    fprintf(fp, "        {\"file\":\"%s\",\"func\":\"%s\",\"line\":%d,\"type\":\"%s\",\"context\":\"%s\"}",
+                           occ->file, occ->func, occ->line, type_str, occ->context);
+                }
+                fprintf(fp, "\n      ]");
+            }
+            fprintf(fp, "\n    },\n");
+        }
+        
         fprintf(fp, "    \"occurrences\": [\n");
         for (int i = 0; i < var->occur_count; i++) {
             if (i > 0) fprintf(fp, ",\n");
@@ -390,15 +757,21 @@ static void save_dataflow(const char* output_file) {
     fclose(fp);
 }
 
+// ============================================
+// 主函数
+// ============================================
+
 int main(int argc, char** argv) {
     if (argc < 2) {
-        printf("Variable Data Flow Analyzer\n");
+        printf("Variable Data Flow Analyzer (Enhanced)\n");
+        printf("Features: Struct field tracking + Cross-function data flow\n");
         printf("Usage:\n");
         printf("  %s analyze <cache_dir>              # Analyze all variables\n", argv[0]);
         printf("  %s show <cache_dir> <var_name>     # Show data flow for variable\n", argv[0]);
         printf("\nExamples:\n");
         printf("  %s analyze ./nginx_cache\n", argv[0]);
-        printf("  %s show ./nginx_cache ngx_connection\n", argv[0]);
+        printf("  %s show ./nginx_cache c            # Shows c->fd, c->data, etc.\n", argv[0]);
+        printf("  %s show ./nginx_cache ngx_connection  # Cross-function flow\n", argv[0]);
         return 1;
     }
     
@@ -418,9 +791,11 @@ int main(int argc, char** argv) {
         printf("Analyzing data flow from %s...\n", meta_file);
         if (analyze_meta(meta_file) != 0) return 1;
         
+        load_call_graph(cache_dir);
+        
         save_dataflow(out_file);
         printf("Saved data flow to %s\n", out_file);
-        printf("Found %d variables\n", g_var_count);
+        printf("Found %d variables, %d fields tracked\n", g_var_count, count_total_fields());
         
     } else if (strcmp(cmd, "show") == 0) {
         if (argc < 4) {
@@ -434,6 +809,8 @@ int main(int argc, char** argv) {
         
         printf("Loading data flow from %s...\n", meta_file);
         if (analyze_meta(meta_file) != 0) return 1;
+        
+        load_call_graph(cache_dir);
         
         print_dataflow(var_name);
         

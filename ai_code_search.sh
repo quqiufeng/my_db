@@ -21,6 +21,85 @@
 #   ./ai_code_search.sh search ./sd_cache "upscale image" 10
 #
 
+# ============================================
+# 代码库探索方法论（以 nginx 为例）
+# ============================================
+#
+# 本系统用于对陌生代码库进行深度语义分析。以下是以 nginx 为例的完整探索流程：
+#
+# 【Phase 1: 索引与向量化】
+#   ./ai_code_search.sh index /opt/nginx ./nginx_cache 4
+#   ./ai_code_search.sh vector ./nginx_cache nginx
+#   # 说明：先索引源码生成 chunks，再用 TensorRT GPU 生成语义向量
+#
+# 【Phase 2: 架构概览 - 用自然语言搜索核心概念】
+#   ./ai_code_search.sh search ./nginx_cache "event loop epoll kqueue" 10
+#   ./ai_code_search.sh search ./nginx_cache "HTTP request phase handler" 10
+#   ./ai_code_search.sh search ./nginx_cache "master process worker process fork" 10
+#   ./ai_code_search.sh search ./nginx_cache "memory pool palloc" 10
+#   # 原理：用架构关键词搜索，找到核心实现文件和函数
+#   # 验证：查看返回的函数名、文件名、调用关系，确认是否为核心实现
+#
+# 【Phase 3: 调用关系分析 - 理解架构依赖】
+#   ./ai_code_search.sh search ./nginx_cache "upstream load balancing" 10
+#   # 关键发现：ngx_http_upstream_init_round_robin_peer 被多个算法调用
+#   # 洞察：Round-robin 是所有负载均衡算法的基础
+#
+#   ./ai_code_search.sh callgraph ./nginx_cache
+#   # 然后查看 call_graph.json，搜索某个函数的调用者列表
+#   # 例如：ngx_spawn_process 被用于启动 worker、cache manager、回收死亡 worker
+#
+# 【Phase 4: 子系统深入 - 逐步细化】
+#   # 内存管理
+#   ./ai_code_search.sh search ./nginx_cache "shared memory zone slab" 10
+#   ./ai_code_search.sh dataflow ./nginx_cache c
+#   # 配置解析
+#   ./ai_code_search.sh search ./nginx_cache "configuration parser lexer" 10
+#   # SSL/TLS
+#   ./ai_code_search.sh search ./nginx_cache "SSL certificate handshake" 10
+#   # 缓存系统
+#   ./ai_code_search.sh search ./nginx_cache "file cache open read" 10
+#
+# 【Phase 5: 代码片段搜索 - 找到相似实现】
+#   ./ai_code_search.sh snippet ./nginx_cache ./my_epoll_code.cpp 5
+#   # 原理：将你的代码片段向量化，搜索代码库中最相似的实现
+#   # 用途：学习最佳实践、找到参考实现
+#
+# 【Phase 6: 变量数据流 - 追踪生命周期】
+#   ./ai_code_search.sh dataflow ./nginx_cache c
+#   # 追踪 connection 指针的定义、赋值、使用位置
+#   # 理解变量在代码库中的流转路径
+#
+# 【搜索技巧】
+# 1. 用英文自然语言描述你想找的功能（如 "event loop" 而非 "事件循环"）
+# 2. 组合关键词提高精度（如 "memory allocation buffer pool"）
+# 3. 查看调用关系（--callgraph）理解函数在架构中的角色
+# 4. 用 --rich 查看完整代码上下文
+# 5. 用 --kind function 只搜索函数，过滤变量和宏
+#
+# 【分析框架】
+# 对每个代码库，建议按以下框架分析：
+# 1. 核心架构（事件循环、进程模型、请求管线）
+# 2. 内存管理（分配器、内存池、垃圾回收）
+# 3. 配置系统（解析器、热加载、配置继承）
+# 4. 模块系统（初始化、加载、钩子机制）
+# 5. 网络处理（连接管理、协议实现、负载均衡）
+# 6. 安全机制（认证、加密、访问控制）
+# 7. 缓存策略（文件缓存、元数据缓存、缓存失效）
+# 8. 日志系统（分级日志、格式化、输出目标）
+# 9. 高级特性（重写引擎、正则表达式、新协议）
+# 10. 源码质量评价（架构清晰度、可扩展性、性能优化）
+#
+# 【nginx 验证结果】
+# 使用本系统分析 nginx 400 文件、9174 符号：
+# - ✅ 事件循环：找到 epoll(Linux) + kqueue(BSD) 双平台实现
+# - ✅ Phase Handler：发现 11 阶段 HTTP 请求处理管线
+# - ✅ 内存池：请求级别分配（create → palloc → destroy）
+# - ✅ Slab Allocator：共享内存用于 upstream 状态、rate limiting、SSL session
+# - ✅ 负载均衡：Round-robin 是所有算法（least_conn/ip_hash/hash）的基础
+# - ✅ 配置解析：词法分析 + 语法分析，支持 include 递归
+# - ✅ 多进程：Master-Worker + Cache Manager，prefork 模型
+#
 set -euo pipefail
 
 # ============================================
