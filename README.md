@@ -645,20 +645,50 @@ cache_search_vector(cache, query_vector, 384, top_k=5, min_score=0.3, &opts, &re
 
 ### 新工具：记忆导入与智能查询
 
-**将分析结果导入 KV Cache 记忆系统：**
+#### 1. `code_to_memory.sh` — 分析结果导入 KV Cache
+
+将 `ai_code_search.sh` 生成的分析结果导入 KV Cache 记忆系统，使 Agent 能够查询已分析的项目。
 
 ```bash
-# 导入 nginx 分析结果到记忆
+# 基本用法：导入分析目录到指定命名空间
+./code_to_memory.sh <analysis_dir> <namespace> [--cache-dir <dir>]
+
+# 导入 nginx 分析结果
 ./code_to_memory.sh ./nginx_cache /code/nginx
 
-# 导入 Linux 内核 mm 子系统
-./code_to_memory.sh ./linux_subsystems/mm_cache /code/linux/mm
+# 导入 Linux 内核 mm 子系统（指定缓存目录）
+./code_to_memory.sh ./linux_subsystems/mm_cache /code/linux/mm --cache-dir ./ai_memory
+
+# 支持的输入文件（由 ai_code_search.sh 生成）：
+#   - chunks_meta.jsonl  : 代码片段元数据
+#   - call_graph.json    : 调用关系图
+#   - dataflow.json      : 变量数据流
+#   - vectors.bin        : 语义向量（存储引用，不存内容）
 ```
 
-**AI 友好的结构化查询：**
+导入后可通过以下 Key 模式查询：
+- `/code/{project}/chunks/{file}/{name}` — 代码片段内容
+- `/code/{project}/symbols/{name}` — 符号索引
+- `/code/{project}/callers/{name}` — 调用者列表
+- `/code/{project}/callees/{name}` — 被调用者列表
+- `/code/{project}/dataflow/vars/{name}` — 变量数据流
+
+#### 2. `agent_query.sh` — AI 友好的结构化查询
+
+为 AI Agent 提供结构化的 JSON 输出，支持多种查询策略自动切换。
 
 ```bash
-# 获取函数的完整上下文（定义 + 调用者 + 被调用者 + 数据流）
+# 基本用法
+./agent_query.sh <query> [--repo <namespace>] [--type <type>]
+
+# 查询类型：
+#   auto    - 自动检测（默认）
+#   exact   - 精确路径查询
+#   symbol  - 符号名查询
+#   context - 完整上下文（定义 + 调用者 + 被调用者 + 数据流）
+#   search  - 关键词搜索
+
+# 获取函数的完整上下文
 ./agent_query.sh ngx_palloc --repo /code/nginx --type context --pretty
 
 # 在仓库内搜索
@@ -666,22 +696,97 @@ cache_search_vector(cache, query_vector, 384, top_k=5, min_score=0.3, &opts, &re
 
 # 精确路径查询
 ./agent_query.sh /code/nginx/symbols/ngx_array_init --type exact
+
+# 查询返回的 JSON 结构：
+# {
+#   "query": "ngx_palloc",
+#   "type": "context",
+#   "repo": "/code/nginx",
+#   "results": [...],
+#   "context": {
+#     "symbol": {...},
+#     "callers": [...],
+#     "callees": [...],
+#     "call_sites": [...],
+#     "dataflow": [...]
+#   },
+#   "stats": {
+#     "caller_count": 2,
+#     "callee_count": 50,
+#     "call_site_count": 2,
+#     "dataflow_entries": 1
+#   },
+#   "timing_ms": 45
+# }
 ```
 
-**一键全流水线分析：**
+#### 3. `analyze_repo.sh` — 主控编排脚本（一键全流水线）
+
+从源码到记忆的一站式分析，自动完成克隆、索引、向量生成、调用图、数据流分析和记忆导入。
 
 ```bash
-# 从 GitHub URL 分析到记忆导入
+# 基本用法
+./analyze_repo.sh <source> [namespace] [options]
+
+# 从 GitHub URL 分析（自动克隆）
 ./analyze_repo.sh https://github.com/redis/redis /code/redis
 
-# 本地项目快速分析（跳过向量生成）
+# 分析本地项目
+./analyze_repo.sh /home/user/project /code/myproject
+
+# 快速分析（跳过向量生成，适合快速查看结构）
 ./analyze_repo.sh /home/user/project /code/myproject --skip-vectors
+
+# 跳过调用图和数据流分析（仅索引+向量）
+./analyze_repo.sh https://github.com/sqlite/sqlite /code/sqlite --skip-callgraph --skip-dataflow
 
 # 指定项目名称和并行度
 ./analyze_repo.sh https://github.com/sqlite/sqlite /code/sqlite --name sqlite --jobs 8
 ```
 
-流水线：`克隆 → 索引 → 向量生成 → 调用图 → 数据流 → KV Cache 导入`
+**选项说明：**
+
+| 选项 | 说明 | 默认值 |
+|------|------|--------|
+| `--skip-vectors` | 跳过 TensorRT GPU 向量生成 | 不跳过 |
+| `--skip-callgraph` | 跳过调用图分析 | 不跳过 |
+| `--skip-dataflow` | 跳过数据流分析 | 不跳过 |
+| `--cache-dir <dir>` | KV Cache 存储目录 | `./ai_code_memory` |
+| `--jobs <n>` | 并行工作进程数 | CPU 核心数 |
+| `--name <name>` | 项目名称（用于缓存目录命名） | 自动检测 |
+
+**完整流水线：**
+
+```
+源码(GitHub/本地)
+    ↓
+[1] 克隆/使用本地目录
+    ↓
+[2] 代码索引 (tools/code_indexer)
+    ↓
+[3] 向量生成 (tools/batch_embedder) — GPU 加速
+    ↓
+[4] 调用图分析 (tools/call_graph)
+    ↓
+[5] 数据流分析 (tools/dataflow)
+    ↓
+[6] 导入 KV Cache (code_to_memory.sh)
+    ↓
+✅ 可直接用 agent_query.sh 查询
+```
+
+**典型使用场景：**
+
+```bash
+# 场景 1：快速了解新项目结构（不生成向量）
+./analyze_repo.sh https://github.com/torvalds/linux /code/linux --skip-vectors
+
+# 场景 2：完整分析用于语义搜索
+./analyze_repo.sh https://github.com/nginx/nginx /code/nginx
+
+# 场景 3：本地项目迭代分析
+./analyze_repo.sh ./my_project /code/my_project --skip-vectors --name my_project
+```
 
 ### 完整工作流程（llama.cpp 示例）
 
