@@ -1,3 +1,4 @@
+#define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -5,6 +6,9 @@
 #include <ctype.h>
 #include <dirent.h>
 #include <sys/stat.h>
+#include <sys/mman.h>
+#include <fcntl.h>
+#include <unistd.h>
 #include "cache.h"
 #include "onnx_embedder.h"
 #include "cache_hnsw.h"
@@ -75,6 +79,12 @@ typedef struct {
     char hnsw_file[512];
     char model[32];
     uint32_t count;
+    // Zero-copy mmap fields
+    void* vec_mmap;           // mmap base address
+    size_t vec_mmap_size;     // mmap size
+    float* vec_data;          // pointer to vector data (after header)
+    char** names;             // name array (loaded from idx)
+    size_t* offsets;          // offset array (loaded from idx)
 } vector_source_t;
 
 typedef struct {
@@ -410,6 +420,94 @@ static int discover_sources(const char* cache_dir, vector_source_t* sources, int
     return count;
 }
 
+// Forward declaration
+static int parse_index(const char* idx_file, char** names, size_t* offsets, int max_entries);
+
+// Zero-copy mmap vector file loader
+static int mmap_vector_file(vector_source_t* source) {
+    if (source->vec_mmap) return 0; // Already loaded
+    
+    int fd = open(source->vec_file, O_RDONLY);
+    if (fd < 0) return -1;
+    
+    struct stat st;
+    if (fstat(fd, &st) < 0) {
+        close(fd);
+        return -1;
+    }
+    
+    if (st.st_size < 8) {
+        close(fd);
+        return -1;
+    }
+    
+    void* map = mmap(NULL, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+    close(fd); // fd can be closed after mmap
+    
+    if (map == MAP_FAILED) return -1;
+    
+    uint32_t count = *(uint32_t*)map;
+    uint32_t dim = *(uint32_t*)((char*)map + 4);
+    
+    if (dim != DIM) {
+        munmap(map, st.st_size);
+        return -1;
+    }
+    
+    source->vec_mmap = map;
+    source->vec_mmap_size = st.st_size;
+    source->count = count;
+    source->vec_data = (float*)((char*)map + 8); // Skip header
+    
+    // Load names and offsets from idx file
+    source->names = malloc(count * sizeof(char*));
+    source->offsets = malloc(count * sizeof(size_t));
+    if (!source->names || !source->offsets) {
+        munmap(map, st.st_size);
+        return -1;
+    }
+    
+    for (uint32_t i = 0; i < count; i++) {
+        source->names[i] = malloc(256);
+        if (!source->names[i]) {
+            for (uint32_t j = 0; j < i; j++) free(source->names[j]);
+            free(source->names); free(source->offsets);
+            munmap(map, st.st_size);
+            return -1;
+        }
+    }
+    
+    int parsed = parse_index(source->idx_file, source->names, source->offsets, count);
+    if (parsed < 0) {
+        for (uint32_t i = 0; i < count; i++) free(source->names[i]);
+        free(source->names); free(source->offsets);
+        munmap(map, st.st_size);
+        return -1;
+    }
+    
+    printf("Mmapped %s: %u vectors, %zu bytes\n", source->vec_file, count, st.st_size);
+    return 0;
+}
+
+static void munmap_vector_file(vector_source_t* source) {
+    if (source->vec_mmap) {
+        munmap(source->vec_mmap, source->vec_mmap_size);
+        source->vec_mmap = NULL;
+        source->vec_data = NULL;
+    }
+    if (source->names) {
+        for (uint32_t i = 0; i < source->count; i++) {
+            if (source->names[i]) free(source->names[i]);
+        }
+        free(source->names);
+        source->names = NULL;
+    }
+    if (source->offsets) {
+        free(source->offsets);
+        source->offsets = NULL;
+    }
+}
+
 // Parse JSON index file
 static int parse_index(const char* idx_file, char** names, size_t* offsets, int max_entries) {
     FILE* fp = fopen(idx_file, "r");
@@ -625,7 +723,7 @@ static float keyword_boost(const char* query, const char* name) {
     return boost > 0.3f ? 0.3f : boost;  // Cap at 0.3
 }
 
-static int search_source(const vector_source_t* source, const float* query_vec, 
+static int search_source(vector_source_t* source, const float* query_vec, 
                          float query_norm, int max_results, cache_t* cache,
                          const search_filter_t* filter, const char* query,
                          search_result_t** out_results, int* out_count) {
@@ -726,62 +824,24 @@ static int search_source(const vector_source_t* source, const float* query_vec,
         }
     }
     
-    // Fallback to brute force search
-    FILE* fp = fopen(source->vec_file, "rb");
-    if (!fp) return -1;
-    
-    uint32_t count, dim;
-    if (fread(&count, 4, 1, fp) != 1 || fread(&dim, 4, 1, fp) != 1) {
-        fclose(fp);
+    // Fallback to brute force search with zero-copy mmap
+    // Load vector file via mmap
+    if (mmap_vector_file(source) < 0) {
         return -1;
     }
     
-    if (dim != DIM) {
-        fprintf(stderr, "Dimension mismatch in %s: expected %d, got %u\n", 
-                source->vec_file, DIM, dim);
-        fclose(fp);
-        return -1;
-    }
+    uint32_t count = source->count;
+    char** names = source->names;
+    size_t* offsets = source->offsets;
     
-    char** names = malloc(count * sizeof(char*));
-    size_t* offsets = malloc(count * sizeof(size_t));
-    if (!names || !offsets) {
-        free(names); free(offsets);
-        fclose(fp);
-        return -1;
-    }
+    if (!names || !offsets) return -1;
+    
+    search_result_t* results = malloc(count * sizeof(search_result_t));
+    if (!results) return -1;
     
     for (uint32_t i = 0; i < count; i++) {
-        names[i] = malloc(256);
-        if (!names[i]) {
-            for (uint32_t j = 0; j < i; j++) free(names[j]);
-            free(names); free(offsets);
-            fclose(fp);
-            return -1;
-        }
-    }
-    
-    int parsed = parse_index(source->idx_file, names, offsets, count);
-    if (parsed < 0) {
-        for (uint32_t i = 0; i < count; i++) free(names[i]);
-        free(names); free(offsets);
-        fclose(fp);
-        return -1;
-    }
-    
-    search_result_t* results = malloc(parsed * sizeof(search_result_t));
-    float* vec = malloc(DIM * sizeof(float));
-    if (!results || !vec) {
-        free(results); free(vec);
-        for (uint32_t i = 0; i < count; i++) free(names[i]);
-        free(names); free(offsets);
-        fclose(fp);
-        return -1;
-    }
-    
-    for (int i = 0; i < parsed; i++) {
-        if (fseek(fp, offsets[i], SEEK_SET) != 0) continue;
-        if (fread(vec, sizeof(float), DIM, fp) != DIM) continue;
+        // Direct pointer access to mmap'd vector data
+        float* vec = (float*)((char*)source->vec_mmap + offsets[i]);
         
         float dot = 0.0f;
         float norm_v = 0.0f;
@@ -815,19 +875,13 @@ static int search_source(const vector_source_t* source, const float* query_vec,
         results[i].score = sim;
     }
     
-    free(vec);
-    fclose(fp);
-    for (uint32_t i = 0; i < count; i++) free(names[i]);
-    free(names);
-    free(offsets);
-    
-    qsort(results, parsed, sizeof(search_result_t), compare_results);
+    qsort(results, count, sizeof(search_result_t), compare_results);
     
     // Apply filters
     int filtered_count = 0;
-    search_result_t* filtered = malloc(parsed * sizeof(search_result_t));
+    search_result_t* filtered = malloc(count * sizeof(search_result_t));
     
-    for (int i = 0; i < parsed && filtered_count < max_results; i++) {
+    for (int i = 0; i < count && filtered_count < max_results; i++) {
         int pass = 1;
         
         // Skip anonymous symbols (ctags-generated __anon*)
