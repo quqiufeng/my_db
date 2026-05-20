@@ -23,6 +23,39 @@
 #
 
 # ============================================
+# 系统架构说明
+# ============================================
+#
+# 本系统的核心代码 100% 使用 C 语言实现，符合 C toolchain preferred for production 的原则。
+#
+# 【自研工具（C 语言）】
+#   tools/code_indexer.c     - C 多进程代码索引器（ctags + AST 提取）
+#   tools/batch_embedder.c   - C 批量向量生成器（调用 ONNX C API）
+#   tools/vector_search.c    - C 语义搜索引擎（HNSW + TF-IDF + PageRank）
+#   tools/call_graph.c       - C 调用关系分析器（扫描函数体找调用）
+#   tools/dataflow.c         - C 变量数据流追踪器（字段级 + 跨函数）
+#   tools/word_freq.c        - C 词频统计器（TF-IDF 权重计算）
+#   ai_code_search.sh        - Shell 统一入口脚本
+#
+# 【第三方依赖（C++ 库，通过 C API 调用）】
+#   ONNX Runtime            - 微软 C++ 库，提供 ONNX 模型推理 C API
+#   TensorRT                - NVIDIA C++ 库，GPU 推理加速（CUDA 内核）
+#   tokenizers-cpp          - HuggingFace C++ 库，BPE 分词器
+#   jansson                 - C 语言 JSON 解析库（dataflow 用）
+#
+# 【模型层】
+#   Jina v2 代码嵌入模型    - 用 Python/PyTorch 训练，导出为 .onnx 格式
+#   运行时不依赖 Python，纯 C + ONNX Runtime + TensorRT 推理
+#
+# 【架构特点】
+#   - 用户代码层：100% C（索引、搜索、分析、调用图、数据流）
+#   - 推理引擎层：C++ 库（ONNX Runtime + TensorRT 提供 GPU 加速）
+#   - 脚本包装层：Shell（一键命令封装）
+#   - 模型训练层：Python（一次性导出 ONNX，运行时不需 Python）
+#
+# 因此可称为：C 语言实现的 AI 代码语义搜索系统（基于 TensorRT GPU 加速）
+
+# ============================================
 # 代码库探索方法论（以 nginx 为例）
 # ============================================
 #
