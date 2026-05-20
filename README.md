@@ -565,9 +565,9 @@ cache_search_vector(cache, query_vector, 384, top_k=5, min_score=0.3, &opts, &re
 
 | 工具 | 文件 | 功能 | 技术 |
 |------|------|------|------|
-| **代码索引** | `tools/ai_code_memory.py` | 解析源码，生成符号索引 | ctags + Python |
-| **向量生成** | `tools/vector_generator.c` | GPU 编码语义向量 | C + TensorRT |
-| **语义搜索** | `tools/vector_search.c` | 自然语言查询代码 | C + 二进制向量 |
+| **代码索引** | `tools/code_indexer.c` | 多进程源码索引（C） | ctags + C + fork |
+| **向量生成** | `tools/batch_embedder.c` | GPU 批量编码向量 | C + ONNX Runtime + TensorRT |
+| **语义搜索** | `tools/vector_search.c` | 自然语言查询代码 | C + 内存 Hash 表 + 向量 |
 
 ### 完整工作流程（llama.cpp 示例）
 
@@ -614,9 +614,18 @@ ai_code_memory/
 ├── chunks_text.txt        # 代码内容（一行一个 chunk，用于向量生成）
 ├── chunks_meta.jsonl      # 元数据（名称/文件/行号/签名，用于搜索展示）
 └── vectors/               # 语义向量（由 Step 2 自动生成）
-    └── code_local_llama.cpp.jina.bin    # Jina 二进制向量
-    └── code_local_llama.cpp.jina.idx    # 名称→偏移索引
+    ├── code_local_llama.cpp.jina.bin    # Jina 二进制向量（768维 float32）
+    └── code_local_llama.cpp.jina.idx    # 名称→偏移索引（文本格式）
 ```
+
+**目录结构说明**：
+
+| 文件 | 大小（llama.cpp） | 用途 | 生成工具 |
+|------|-------------------|------|---------|
+| `chunks_text.txt` | ~10MB | 代码内容文本，一行一个 chunk | `code_indexer` |
+| `chunks_meta.jsonl` | ~4MB | 元数据（名称/文件/行号/签名/语言） | `code_indexer` |
+| `vectors/*.bin` | ~40MB | 语义向量（768维 float32） | `batch_embedder` |
+| `vectors/*.idx` | ~3MB | 名称→字节偏移索引 | `batch_embedder` |
 
 **Step 2: 生成向量索引（C + TensorRT GPU）**
 
@@ -640,62 +649,72 @@ make tools/batch_embedder
 # Saved index to ./ai_code_memory/vectors/code_local_llama.cpp.jina.idx
 ```
 
-**模型选择（MPNet vs Jina v2）**：
+**模型文件（`models/` 目录）**：
+
+| 模型 | 大小 | 维度 | 适用场景 | 状态 |
+|------|------|------|---------|------|
+| **jina-embeddings-v2-base-code** | 617MB | 768 | **代码检索（推荐）** | ✅ 当前使用 |
+| **all-mpnet-base-v2** | 419MB | 768 | 通用文本 | ✅ 可用 |
+| **all-MiniLM-L6-v2** | 88MB | 384 | 通用文本 | ✅ 可用 |
+
+```bash
+models/
+├── jina-embeddings-v2-base-code/     # 代码专用（推荐）
+│   ├── model.onnx                    # ONNX 模型（612MB）
+│   ├── vocab.json                    # BPE 词表
+│   ├── merges.txt                    # BPE 合并规则
+│   └── tokenizer.json                # Tokenizer 配置
+│
+├── all-mpnet-base-v2/                # 通用文本
+│   ├── model.onnx                    # ONNX 模型（418MB）
+│   └── vocab.txt                     # WordPiece 词表
+│
+└── all-MiniLM-L6-v2/                 # 轻量通用文本
+    ├── model.onnx                    # ONNX 模型（87MB）
+    └── vocab.txt                     # WordPiece 词表
+```
+
+**模型选择**：
 
 | 模型 | 适用场景 | 速度 | 特点 |
 |------|---------|------|------|
-| **MPNet** (默认) | 电子书、文档、通用文本 | ⭐⭐⭐⭐⭐ | 通用文本理解，C 原生 tokenizer |
-| **Jina v2** | 代码仓库（推荐） | ⭐⭐⭐⭐ | 代码专用嵌入，理解代码语义，对比学习训练 |
+| **Jina v2** | 代码仓库（**推荐**） | ⭐⭐⭐⭐ | 代码专用嵌入，对比学习训练，语义区分度强 |
+| **MPNet** | 电子书、文档、通用文本 | ⭐⭐⭐⭐⭐ | 通用文本理解，C 原生 tokenizer |
 
 ```bash
-# 使用 MPNet（默认，适合通用文本）
-./tools/vector_generator ./ai_code_memory /code/local/project
-# 生成: vectors/code_local_project.mpnet.bin + .mpnet.idx
-
 # 使用 Jina v2（代码专用，推荐）
-# 先下载模型: https://huggingface.co/jinaai/jina-embeddings-v2-base-code
-python3 tools/export_jina_onnx.py
-./tools/vector_generator --model jina ./ai_code_memory /code/local/project
+./tools/batch_embedder ./ai_code_memory --model jina
 # 生成: vectors/code_local_project.jina.bin + .jina.idx
+
+# 使用 MPNet（通用文本）
+./tools/batch_embedder ./ai_code_memory --model mpnet
+# 生成: vectors/code_local_project.mpnet.bin + .mpnet.idx
 ```
 
-> **注意**：向量文件名自动包含模型标识（`.mpnet` / `.jina`），不同模型向量不会互相覆盖。
+> **注意**：向量文件名自动包含模型标识（`.jina` / `.mpnet`），不同模型向量不会互相覆盖。
 
-**Jina v2 模型准备（推荐）**：
+**Jina v2 模型准备**：
 ```bash
-# 1. 下载模型到 /opt/jina-embeddings-v2-base-code
+# 1. 下载模型
 # 从 https://huggingface.co/jinaai/jina-embeddings-v2-base-code 下载全部文件
+# 放置到 models/jina-embeddings-v2-base-code/
 
 # 2. 导出 ONNX（只需执行一次）
 python3 tools/export_jina_onnx.py
-# 输出: models/jina-embeddings-v2-base-code/model.onnx + vocab.json + merges.txt + tokenizer.json
+# 输出: models/jina-embeddings-v2-base-code/model.onnx
 ```
-
-**为什么推荐 Jina v2 而非 CodeBERT？**
-
-| 指标 | CodeBERT | Jina v2 base code |
-|------|----------|-------------------|
-| 架构 | 自编码器（BERT-like） | 自回归（GPT-like）+ 任务适配 |
-| 训练目标 | MLM（掩码预测） | 对比学习（检索优化） |
-| 检索质量 | off-diag similarity 0.95+ | 语义区分度强 |
-| 相似度范围 | 0.94-0.97（压缩严重） | 0.40-0.80（分布合理） |
-| 适用任务 | 代码分类/补全 | **代码检索**（本场景） |
-
-CodeBERT 的自编码器架构使其向量高度集中在同一区域，导致余弦相似度无法区分不同函数。Jina v2 专为检索设计，相似度分布合理，搜索效果更好。
 
 **性能对比**：
 
-| 方案 | 速度 | 41K 向量耗时 | 显存 |
+| 方案 | 速度 | 19K 向量耗时 | 显存 |
 |------|------|-------------|------|
-| Python CPU | 43 items/s | ~14 分钟 | 0 GB |
-| C + CUDA | 213 items/s | ~3 分钟 | ~2 GB |
-| C + TensorRT 10 (FP16) | 2324 items/s | ~18 秒 | ~4 GB |
-| **Python + CUDA (Jina)** | **97 items/s** | **~1.9 分钟** | **~2 GB** |
+| **C + TensorRT (Jina)** | **91 items/s** | **~207 秒** | **~2 GB** |
 
-**向量生成方案选择**：
-- **MPNet**: 使用 C + TensorRT（最快，C tokenizer 正确）
-- **Jina v2**: 使用 Python + CUDA（C TensorRT FP16 会破坏 Jina embedding 质量，必须使用 FP32 或 Python）
-- **CodeBERT**: 使用 C + TensorRT（但检索质量差，不推荐）
+**说明**：
+- `batch_embedder` 使用 C tokenizer + ONNX Runtime C API + TensorRT GPU
+- 自动保存到 `vectors/code_local_<repo>.<model>.bin`
+- 自动生成索引 `vectors/code_local_<repo>.<model>.idx`
+- 无需手动移动文件
 
 **Step 3: AI Agent 使用 C 应用探索源码**
 
@@ -770,18 +789,18 @@ make tools/vector_search
 
 **向量存储格式**（文件名包含模型标识）：
 ```
-vectors/code_local_stable-diffusion.cpp.mpnet.bin
-├─ Header: [count:4][dim:4]           # 14308, 768
-└─ Vectors: [float768] × 14308        # 原始 float32 数组
+vectors/code_local_llama.cpp.jina.bin
+├─ Header: [count:4][dim:4]           # 13238, 768
+└─ Vectors: [name_len:4][name][float768] × 13238   # 归一化 float32 数组
 
-vectors/code_local_stable-diffusion.cpp.mpnet.idx
-└─ JSON: {"func_name": offset, ...}   # 名称到字节偏移的映射
+vectors/code_local_llama.cpp.jina.idx
+└─ Text: "name":offset\n               # 名称到字节偏移的映射
 
 # 同一项目可共存多个模型的向量
-vectors/code_local_stable-diffusion.cpp.jina.bin        # Jina v2 (推荐)
-vectors/code_local_stable-diffusion.cpp.jina.idx
-vectors/code_local_stable-diffusion.cpp.codebert.bin    # CodeBERT (不推荐)
-vectors/code_local_stable-diffusion.cpp.codebert.idx
+vectors/code_local_llama.cpp.jina.bin        # Jina v2 (推荐，代码专用)
+vectors/code_local_llama.cpp.jina.idx
+vectors/code_local_llama.cpp.mpnet.bin       # MPNet (通用文本)
+vectors/code_local_llama.cpp.mpnet.idx
 ```
 
 **搜索流程**：
@@ -1436,13 +1455,21 @@ my_db/
 ├── mydb/
 │   ├── cache.py             # Python Cache FFI（dict-like 接口）
 │   └── cache_cli.py         # CLI 工具（cache 命令）
+├── models/                   # 预训练模型（ONNX 格式）
+│   ├── jina-embeddings-v2-base-code/   # 代码专用（推荐，617MB）
+│   ├── all-mpnet-base-v2/              # 通用文本（419MB）
+│   └── all-MiniLM-L6-v2/               # 轻量通用文本（88MB）
 ├── tools/
 │   ├── cache_server.c       # 独立服务器可执行文件
 │   ├── import_book.c        # 电子书导入（MOBI/AZW3/PDF）
 │   ├── import_github.py     # GitHub 源码导入
-│   ├── ai_code_memory.py    # AI 代码记忆系统（源码索引 + 语义搜索）
-│   ├── coding_assistant.py  # AI Agent 编码助手（实时第三方库查询）
-│   └── vector_helper.py     # 向量搜索 Python helper
+│   ├── code_indexer.c       # 源码索引（C 多进程）
+│   ├── batch_embedder.c     # 向量生成（C + TensorRT GPU）
+│   ├── vector_search.c      # 语义搜索（C）
+│   ├── embedding_daemon.c   # 查询加速守护进程
+│   ├── build_hnsw_index.c   # HNSW 近似索引构建
+│   ├── export_jina_onnx.py  # Jina 模型导出 ONNX
+│   └── jina_search.py       # Jina 搜索 helper
 └── tests/
     ├── test_cache.c         # Cache 基础测试
     ├── test_cache_full.c    # Cache 完整测试（7 项）
