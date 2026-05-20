@@ -3,22 +3,23 @@
 # AI Agent 代码语义搜索系统 - 统一脚本
 # ======================================
 #
-# 功能：对代码库进行索引、生成向量、构建调用图、语义搜索
+# 功能：对代码库进行索引、生成向量、构建调用图、语义搜索、变量数据流追踪
 # 技术栈：C 多进程索引 + Jina v2 语义向量 + TensorRT GPU 推理
 #
 # 使用方式:
 #   ./ai_code_search.sh index <repo_path> [cache_dir] [workers]  # 索引代码
-#   ./ai_code_search.sh vector <cache_dir> [project_name]        # 生成向量
+#   ./ai_code_search.sh vector <cache_dir> [project_name]        # 生成向量+调用图+数据流
 #   ./ai_code_search.sh callgraph <cache_dir>                    # 构建调用图
 #   ./ai_code_search.sh search <cache_dir> <query> [max_results] # 语义搜索
 #   ./ai_code_search.sh snippet <cache_dir> <code_file>          # 代码片段搜索
-#   ./ai_code_search.sh dataflow <cache_dir> <var_name>          # 变量数据流追踪
+#   ./ai_code_search.sh dataflow <cache_dir> <var_name>          # 变量数据流追踪（字段级+跨函数）
 #   ./ai_code_search.sh analyze <repo_path> [cache_dir]          # 一键分析
 #
 # 示例:
 #   ./ai_code_search.sh index /opt/stable-diffusion.cpp ./sd_cache 4
 #   ./ai_code_search.sh vector ./sd_cache stable-diffusion.cpp
 #   ./ai_code_search.sh search ./sd_cache "upscale image" 10
+#   ./ai_code_search.sh dataflow ./nginx_cache c                 # 追踪 connection 指针的字段级数据流
 #
 
 # ============================================
@@ -228,28 +229,28 @@ cmd_vector() {
     echo ""
 
     # Step 1: 生成词频统计（用于 TF-IDF 排序优化）
-    info "Step 1/3: 统计词频..."
+    info "Step 1/4: 统计词频..."
     "$WORD_FREQ" "$cache_dir" || warn "词频统计失败（非致命）"
 
     # Step 2: 生成语义向量
     info "Step 2/4: 生成语义向量（TensorRT GPU）..."
     "$BATCH_EMBEDDER" "$cache_dir" --model jina --name "$project_name"
 
-    # Step 3: 构建调用关系图
-    info "Step 3/4: 构建调用关系图..."
+    # Step 3: 构建调用关系图（含参数信息）
+    info "Step 3/4: 构建调用关系图（含参数）..."
     "$CALL_GRAPH" "$cache_dir" || warn "调用图构建失败（非致命）"
 
-    # Step 4: 生成变量数据流分析
-    info "Step 4/4: 生成变量数据流分析..."
+    # Step 4: 生成变量数据流分析（含字段级+跨函数）
+    info "Step 4/4: 生成变量数据流分析（字段级+跨函数）..."
     "$DATAFLOW" analyze "$cache_dir" || warn "数据流分析失败（非致命）"
 
-    ok "向量生成完成!"
+    ok "分析完成!"
     info "输出文件:"
-    info "  ${cache_dir}/vectors/code_local_${project_name}.jina.bin - 向量数据"
-    info "  ${cache_dir}/vectors/code_local_${project_name}.jina.idx - 索引文件"
-    info "  ${cache_dir}/call_graph.json - 调用关系图"
-    info "  ${cache_dir}/dataflow.json - 变量数据流"
-    info "  ${cache_dir}/word_freq.json - 词频统计"
+    info "  ${cache_dir}/vectors/code_local_${project_name}.jina.bin - 语义向量"
+    info "  ${cache_dir}/vectors/code_local_${project_name}.jina.idx - 向量索引"
+    info "  ${cache_dir}/call_graph.json - 调用关系图（含参数列表）"
+    info "  ${cache_dir}/dataflow.json - 变量数据流（字段级+跨函数）"
+    info "  ${cache_dir}/word_freq.json - 词频统计（TF-IDF）"
 }
 
 # ============================================
@@ -371,14 +372,16 @@ cmd_analyze() {
     cmd_vector "$cache_dir" "$project_name"
     echo ""
 
-    ok "分析完成! 现在可以搜索了:"
+    ok "分析完成! 现在可以使用以下功能:"
     echo ""
-    echo "  $0 search ${cache_dir} \"<你的查询>\""
+    echo "  语义搜索:   $0 search ${cache_dir} \"<查询>\""
+    echo "  变量追踪:   $0 dataflow ${cache_dir} <变量名>"
     echo ""
-    echo "示例查询:"
-    echo "  $0 search ${cache_dir} \"pipeline architecture\" 5"
-    echo "  $0 search ${cache_dir} \"memory allocation\" 10"
-    echo "  $0 search ${cache_dir} \"VAE encoder decoder\" 5"
+    echo "示例:"
+    echo "  $0 search ${cache_dir} \"event loop epoll\" 10"
+    echo "  $0 search ${cache_dir} \"memory pool allocation\" 5"
+    echo "  $0 dataflow ${cache_dir} c       # 追踪 connection 变量"
+    echo "  $0 dataflow ${cache_dir} pool    # 追踪内存池"
 }
 
 # ============================================
@@ -430,9 +433,17 @@ cmd_dataflow() {
         echo "  cache_dir: 缓存目录路径"
         echo "  var_name:  要追踪的变量名"
         echo ""
+        echo "功能:"
+        echo "  - 字段级追踪: 自动区分 var->field (如 c->fd, c->data)"
+        echo "  - 跨函数流:   追踪变量在调用链中的传递路径"
+        echo "  - 分类显示:   定义(DEF) / 赋值(SET) / 使用(USE)"
+        echo ""
         echo "示例:"
         echo "  $0 dataflow ./nginx_cache c          # 追踪 connection 指针"
-        echo "  $0 dataflow ./nginx_cache rc         # 追踪返回值"
+        echo "    输出: c->fd, c->data, c->ssl, c->sockaddr 等字段级分析"
+        echo "    输出: 跨函数传递链 (哪些函数接收并使用了 c)"
+        echo ""
+        echo "  $0 dataflow ./nginx_cache pool       # 追踪内存池"
         echo "  $0 dataflow ./sd_cache ctx           # 追踪上下文指针"
         exit 1
     fi
@@ -490,7 +501,7 @@ main() {
             echo "  callgraph <cache>               - 构建调用关系图"
             echo "  search <cache> <query> [n]      - 语义搜索"
             echo "  snippet <cache> <file> [n]      - 代码片段搜索"
-            echo "  dataflow <cache> <var>          - 变量数据流追踪"
+            echo "  dataflow <cache> <var>          - 变量数据流追踪 (字段级+跨函数)"
             echo "  analyze <repo> [cache]          - 一键完整分析"
             echo "  demo [cache]                    - 演示系统能力"
             echo ""
@@ -499,7 +510,7 @@ main() {
             echo "  $0 vector ./sd_cache stable-diffusion.cpp"
             echo "  $0 search ./sd_cache \"upscale image\" 5"
             echo "  $0 snippet ./sd_cache ./my_code.cpp 5"
-            echo "  $0 dataflow ./nginx_cache c     # 追踪 connection 变量"
+            echo "  $0 dataflow ./nginx_cache c     # 追踪 connection (含字段级和跨函数流)"
             echo "  $0 analyze /opt/stable-diffusion.cpp ./sd_cache"
             echo ""
             echo "高级搜索选项（直接用 vector_search 工具）:"
