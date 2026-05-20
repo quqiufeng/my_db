@@ -34,12 +34,14 @@ static int load_items(const char* text_file, const char* meta_file, item_t** ite
         return -1;
     }
 
-    char text_line[MAX_TEXT_LEN];
-    char meta_line[4096];
+    char* text_line = NULL;
+    char* meta_line = NULL;
+    size_t text_len = 0, meta_len = 0;
+    ssize_t text_read, meta_read;
     int n = 0;
 
-    while (fgets(text_line, sizeof(text_line), text_fp) &&
-           fgets(meta_line, sizeof(meta_line), meta_fp)) {
+    while ((text_read = getline(&text_line, &text_len, text_fp)) != -1 &&
+           (meta_read = getline(&meta_line, &meta_len, meta_fp)) != -1) {
         if (n >= capacity) {
             capacity *= 2;
             item_t* new_items = realloc(*items, capacity * sizeof(item_t));
@@ -57,9 +59,9 @@ static int load_items(const char* text_file, const char* meta_file, item_t** ite
             }
             (*items)[n].name[i] = '\0';
 
-            // Copy text (strip newline)
-            int len = strlen(text_line);
-            if (len > 0 && text_line[len-1] == '\n') text_line[len-1] = '\0';
+            // Copy text (strip newline, truncate to MAX_TEXT_LEN-1)
+            if (text_read > 0 && text_line[text_read-1] == '\n') text_line[text_read-1] = '\0';
+            if (text_read > 0 && text_line[text_read-1] == '\r') text_line[text_read-1] = '\0';
             strncpy((*items)[n].text, text_line, MAX_TEXT_LEN - 1);
             (*items)[n].text[MAX_TEXT_LEN - 1] = '\0';
 
@@ -67,6 +69,8 @@ static int load_items(const char* text_file, const char* meta_file, item_t** ite
         }
     }
 
+    free(text_line);
+    free(meta_line);
     fclose(text_fp); fclose(meta_fp);
     *count = n;
     return 0;
@@ -90,13 +94,13 @@ static void save_vectors(const char* bin_file, const char* idx_file,
 
     size_t offset = 8;
     for (int i = 0; i < count; i++) {
-        // Write index entry: "name":offset
-        fprintf(idx_fp, "\"%s\":%zu\n", items[i].name, offset);
-
         // Write vector: name_len(4) + name + dim floats
         uint32_t name_len = strlen(items[i].name);
         fwrite(&name_len, 4, 1, bin_fp);
         fwrite(items[i].name, 1, name_len, bin_fp);
+
+        // Write index entry: "name":offset (pointing to vec data, not name_len)
+        fprintf(idx_fp, "\"%s\":%zu\n", items[i].name, offset + 4 + name_len);
 
         // Normalize vector before saving
         float vec[DIM];
@@ -118,16 +122,19 @@ static void save_vectors(const char* bin_file, const char* idx_file,
 int main(int argc, char** argv) {
     if (argc < 2) {
         printf("C Batch Vector Generator (Jina/MPNet)\n");
-        printf("Usage: %s <cache_dir> [--model mpnet|jina]\n", argv[0]);
+        printf("Usage: %s <cache_dir> [--model mpnet|jina] [--name project_name]\n", argv[0]);
         return 1;
     }
 
     const char* cache_dir = argv[1];
     const char* model_type = "jina";
+    const char* custom_name = NULL;
 
     for (int i = 2; i < argc; i++) {
         if (strcmp(argv[i], "--model") == 0 && i + 1 < argc) {
             model_type = argv[++i];
+        } else if (strcmp(argv[i], "--name") == 0 && i + 1 < argc) {
+            custom_name = argv[++i];
         }
     }
 
@@ -199,18 +206,22 @@ int main(int argc, char** argv) {
     printf("Done in %.1fs (%.0f items/s)\n", elapsed, count / elapsed);
 
     // Auto-detect repo name from cache_dir path
-    // e.g., "./linux_cache" -> "linux", "./ai_code_memory" -> "llama.cpp"
+    // e.g., "./linux_cache" -> "linux", "./ai_code_memory" -> "ai_code_memory"
     const char* repo_name = strrchr(cache_dir, '/');
     if (repo_name) repo_name++;
     else repo_name = cache_dir;
     
-    // Remove "_cache" suffix if present
     char safe_name[256];
-    strncpy(safe_name, repo_name, sizeof(safe_name) - 1);
-    safe_name[sizeof(safe_name) - 1] = '\0';
-    char* suffix = strstr(safe_name, "_cache");
-    if (suffix) *suffix = '\0';
-    if (strlen(safe_name) == 0) strcpy(safe_name, "unknown");
+    if (custom_name) {
+        strncpy(safe_name, custom_name, sizeof(safe_name) - 1);
+        safe_name[sizeof(safe_name) - 1] = '\0';
+    } else {
+        strncpy(safe_name, repo_name, sizeof(safe_name) - 1);
+        safe_name[sizeof(safe_name) - 1] = '\0';
+        char* suffix = strstr(safe_name, "_cache");
+        if (suffix) *suffix = '\0';
+        if (strlen(safe_name) == 0) strcpy(safe_name, "unknown");
+    }
     
     // Create vectors/ directory
     char vec_dir[512];

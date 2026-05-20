@@ -6,6 +6,21 @@
 
 **🚀 KV Cache 系统（Agent 记忆存储）**: [kvCache.md](kvCache.md) - 专为 AI Agent 设计的层级化记忆存储，支持前缀/范围/正则搜索
 
+**🎯 AI Agent 代码语义搜索**: `./ai_code_search.sh` - 一键对任意代码库进行语义索引和智能搜索
+
+```bash
+# 一键分析代码库（索引 + 向量生成 + 调用图构建）
+./ai_code_search.sh analyze /opt/stable-diffusion.cpp ./sd_cache
+
+# 自然语言搜索代码
+./ai_code_search.sh search ./sd_cache "VAE encoder decoder" 10
+
+# 用代码片段搜索相似实现
+./ai_code_search.sh snippet ./sd_cache ./my_kernel.cpp 5
+```
+
+技术栈：C 多进程索引 + Jina v2 代码语义模型 + TensorRT GPU 向量生成 + 调用关系图分析
+
 ## 项目定位
 
 **不是数据库，是带关联查询能力的零拷贝嵌入式存储**
@@ -560,6 +575,27 @@ cache_search_vector(cache, query_vector, 384, top_k=5, min_score=0.3, &opts, &re
 ## AI Agent 源码探索（C 工具链）
 
 基于 C 语言实现的 AI Agent 代码记忆系统，提供极速的源码索引、向量生成和自然语言语义搜索。
+
+### 🎯 推荐使用一键脚本（新手友好）
+
+```bash
+# 查看所有命令
+./ai_code_search.sh --help
+
+# 一键完整分析代码库（索引 + 向量 + 调用图）
+./ai_code_search.sh analyze /opt/stable-diffusion.cpp ./sd_cache
+
+# 自然语言搜索
+./ai_code_search.sh search ./sd_cache "upscale image" 10
+
+# 代码片段相似搜索
+./ai_code_search.sh snippet ./sd_cache ./my_code.cpp 5
+
+# 演示系统能力
+./ai_code_search.sh demo ./sd_cache
+```
+
+脚本自动处理环境变量、GPU 检测和错误提示。详细用法见脚本头部注释。
 
 ### 核心工具
 

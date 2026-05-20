@@ -33,6 +33,26 @@ typedef struct meta_entry {
 static meta_entry_t** g_meta_hash = NULL;
 static int g_meta_loaded = 0;
 
+// Word frequency table for TF-IDF
+#define WORD_HASH_SIZE 65536
+typedef struct idf_entry {
+    char word[64];
+    float idf;
+    struct idf_entry* next;
+} idf_entry_t;
+static idf_entry_t** g_idf_table = NULL;
+static int g_idf_loaded = 0;
+
+// Caller count table for PageRank-like weighting
+#define CALLER_HASH_SIZE 65536
+typedef struct caller_count_entry {
+    char name[256];
+    int count;
+    struct caller_count_entry* next;
+} caller_count_entry_t;
+static caller_count_entry_t** g_caller_table = NULL;
+static int g_caller_count_loaded = 0;
+
 // FNV-1a hash for name lookup
 static uint64_t hash_name(const char* name) {
     uint64_t h = 0xcbf29ce484222325;
@@ -77,6 +97,204 @@ typedef struct {
 
 static int output_json = 0;
 static int output_rich = 0;
+static int show_callgraph = 0;
+
+// Call graph support
+typedef struct caller_node {
+    char name[256];
+    struct caller_node* next;
+} caller_node_t;
+
+typedef struct callgraph_entry {
+    char func_name[256];
+    caller_node_t* callers;
+    int caller_count;
+    struct callgraph_entry* next;
+} callgraph_entry_t;
+
+static callgraph_entry_t** g_call_graph = NULL;
+static int g_callgraph_loaded = 0;
+#define CALLGRAPH_HASH_SIZE 65536
+
+static uint64_t hash_callgraph(const char* name) {
+    uint64_t h = 0xcbf29ce484222325;
+    for (const char* p = name; *p; p++) {
+        h ^= (unsigned char)*p;
+        h *= 0x100000001b3;
+    }
+    return h % CALLGRAPH_HASH_SIZE;
+}
+
+static void load_call_graph(const char* cache_dir) {
+    char path[512];
+    snprintf(path, sizeof(path), "%s/call_graph.json", cache_dir);
+    FILE* fp = fopen(path, "r");
+    if (!fp) return;
+    
+    g_call_graph = calloc(CALLGRAPH_HASH_SIZE, sizeof(callgraph_entry_t*));
+    if (!g_call_graph) { fclose(fp); return; }
+    
+    char line[131072];
+    while (fgets(line, sizeof(line), fp)) {
+        // Parse "function_name": ["caller1", "caller2"]
+        char* key_start = strchr(line, '"');
+        if (!key_start) continue;
+        key_start++;
+        char* key_end = strchr(key_start, '"');
+        if (!key_end) continue;
+        *key_end = '\0';
+        
+        char func_name[256];
+        strncpy(func_name, key_start, sizeof(func_name) - 1);
+        func_name[sizeof(func_name) - 1] = '\0';
+        
+        // Find array start
+        char* array_start = strchr(key_end + 1, '[');
+        if (!array_start) continue;
+        array_start++;
+        
+        uint64_t h = hash_callgraph(func_name);
+        callgraph_entry_t* entry = g_call_graph[h];
+        while (entry) {
+            if (strcmp(entry->func_name, func_name) == 0) break;
+            entry = entry->next;
+        }
+        
+        if (!entry) {
+            entry = calloc(1, sizeof(callgraph_entry_t));
+            if (entry) {
+                strncpy(entry->func_name, func_name, sizeof(entry->func_name) - 1);
+                entry->func_name[sizeof(entry->func_name) - 1] = '\0';
+                // Store in hash table (simplified - no chaining shown but using open addressing)
+                g_call_graph[h] = entry;
+            }
+        }
+        
+        // Parse callers from array
+        char* p = array_start;
+        while (*p && *p != ']') {
+            if (*p == '"') {
+                p++;
+                char caller_name[256];
+                int i = 0;
+                while (*p && *p != '"' && i < 255) {
+                    caller_name[i++] = *p++;
+                }
+                caller_name[i] = '\0';
+                if (*p == '"') p++;
+                
+                if (entry && caller_name[0]) {
+                    caller_node_t* node = malloc(sizeof(caller_node_t));
+                    if (node) {
+                        strncpy(node->name, caller_name, sizeof(node->name) - 1);
+                        node->name[sizeof(node->name) - 1] = '\0';
+                        node->next = entry->callers;
+                        entry->callers = node;
+                        entry->caller_count++;
+                    }
+                }
+            } else {
+                p++;
+            }
+        }
+    }
+    
+    fclose(fp);
+    g_callgraph_loaded = 1;
+}
+
+static int get_caller_count(const char* func_name) {
+    if (!g_callgraph_loaded || !g_call_graph) return 0;
+    uint64_t h = hash_callgraph(func_name);
+    callgraph_entry_t* entry = g_call_graph[h];
+    while (entry) {
+        if (strcmp(entry->func_name, func_name) == 0) return entry->caller_count;
+        entry = entry->next;
+    }
+    return 0;
+}
+
+static void print_callers(const char* func_name) {
+    if (!g_callgraph_loaded || !g_call_graph) return;
+    
+    uint64_t h = hash_callgraph(func_name);
+    callgraph_entry_t* entry = g_call_graph[h];
+    while (entry) {
+        if (strcmp(entry->func_name, func_name) == 0) {
+            if (entry->caller_count > 0) {
+                printf("    Called by (%d):", entry->caller_count);
+                int printed = 0;
+                caller_node_t* node = entry->callers;
+                while (node && printed < 5) {
+                    printf(" %s", node->name);
+                    node = node->next;
+                    printed++;
+                }
+                if (entry->caller_count > 5) printf(" ...");
+                printf("\n");
+            }
+            return;
+        }
+        entry = entry->next;
+    }
+}
+
+// Load word frequencies for TF-IDF
+static unsigned int hash_word_simple(const char* word) {
+    unsigned int h = 5381;
+    while (*word) h = ((h << 5) + h) + *word++;
+    return h % WORD_HASH_SIZE;
+}
+
+static void load_word_freq(const char* cache_dir) {
+    char path[512];
+    snprintf(path, sizeof(path), "%s/word_freq.json", cache_dir);
+    FILE* fp = fopen(path, "r");
+    if (!fp) return;
+    
+    g_idf_table = calloc(WORD_HASH_SIZE, sizeof(idf_entry_t*));
+    if (!g_idf_table) { fclose(fp); return; }
+    
+    char line[4096];
+    while (fgets(line, sizeof(line), fp)) {
+        char* key_start = strchr(line, '"');
+        if (!key_start) continue;
+        key_start++;
+        char* key_end = strchr(key_start, '"');
+        if (!key_end) continue;
+        *key_end = '\0';
+        
+        if (key_start[0] == '_') continue; // Skip metadata
+        
+        char* idf_p = strstr(key_end + 1, "\"idf\":");
+        if (!idf_p) continue;
+        float idf = atof(idf_p + 6);
+        
+        unsigned int h = hash_word_simple(key_start);
+        idf_entry_t* entry = malloc(sizeof(idf_entry_t));
+        if (entry) {
+            strncpy(entry->word, key_start, sizeof(entry->word) - 1);
+            entry->word[sizeof(entry->word) - 1] = '\0';
+            entry->idf = idf;
+            entry->next = g_idf_table[h];
+            g_idf_table[h] = entry;
+        }
+    }
+    
+    fclose(fp);
+    g_idf_loaded = 1;
+}
+
+static float get_idf(const char* word) {
+    if (!g_idf_loaded || !g_idf_table) return 1.0f;
+    unsigned int h = hash_word_simple(word);
+    idf_entry_t* entry = g_idf_table[h];
+    while (entry) {
+        if (strcmp(entry->word, word) == 0) return entry->idf;
+        entry = entry->next;
+    }
+    return 1.0f; // Default IDF for unknown words
+}
 
 // Convert namespace to safe filename (replace / with _)
 static void namespace_to_filename(const char* ns, char* out, size_t out_len) {
@@ -391,7 +609,11 @@ static float keyword_boost(const char* query, const char* name) {
             size_t tlen = strlen(token);
             while (*p) {
                 if (strncasecmp(p, token, tlen) == 0) {
-                    boost += 0.08f;
+                    // TF-IDF weighting: rare words get higher boost
+                    float idf = get_idf(token);
+                    // Normalize IDF to ~0.01-0.08 range (max IDF ~9 for rare words)
+                    float weight = 0.01f + (idf / 9.0f) * 0.07f;
+                    boost += weight;
                     break;
                 }
                 p++;
@@ -457,7 +679,10 @@ static int search_source(const vector_source_t* source, const float* query_vec,
                         }
                         
                         int pass = 1;
-                        if (filter && (filter->kind_filter[0] || filter->lang_filter[0] || filter->file_filter[0])) {
+                        // Skip anonymous symbols
+                        if (strncmp(names[ids[i]], "__anon", 6) == 0) pass = 0;
+                        
+                        if (pass && filter && (filter->kind_filter[0] || filter->lang_filter[0] || filter->file_filter[0])) {
                             result_detail_t detail;
                             if (get_result_details(cache, source->namespace, names[ids[i]], &detail)) {
                                 if (filter->kind_filter[0] && strcasecmp(detail.kind, filter->kind_filter) != 0) pass = 0;
@@ -571,9 +796,17 @@ static int search_source(const vector_source_t* source, const float* query_vec,
             sim = dot / (query_norm * norm_v);
         }
         
-        // Hybrid keyword boost
+        // Hybrid keyword boost with TF-IDF
         if (query && query[0]) {
             sim += keyword_boost(query, names[i]);
+            if (sim > 1.0f) sim = 1.0f;
+        }
+        
+        // PageRank-like weighting: functions called by many others get boost
+        int caller_count = get_caller_count(names[i]);
+        if (caller_count > 0) {
+            float pagerank_boost = logf(caller_count + 1) * 0.02f; // Max ~0.1 for 100+ callers
+            sim += pagerank_boost;
             if (sim > 1.0f) sim = 1.0f;
         }
         
@@ -596,6 +829,11 @@ static int search_source(const vector_source_t* source, const float* query_vec,
     
     for (int i = 0; i < parsed && filtered_count < max_results; i++) {
         int pass = 1;
+        
+        // Skip anonymous symbols (ctags-generated __anon*)
+        if (strncmp(results[i].name, "__anon", 6) == 0) {
+            pass = 0;
+        }
         
         if (filter && (filter->kind_filter[0] || filter->lang_filter[0] || filter->file_filter[0])) {
             result_detail_t detail;
@@ -674,6 +912,23 @@ int main(int argc, char** argv) {
             } else if (strcmp(argv[arg_idx], "--rich") == 0) {
                 output_rich = 1;
                 arg_idx++;
+            } else if (strcmp(argv[arg_idx], "--callgraph") == 0) {
+                show_callgraph = 1;
+                arg_idx++;
+            } else if (strcmp(argv[arg_idx], "--snippet") == 0 && arg_idx + 1 < argc) {
+                // Read code snippet from file
+                FILE* fp = fopen(argv[arg_idx + 1], "r");
+                if (fp) {
+                    static char snippet_buf[32768];
+                    size_t n = fread(snippet_buf, 1, sizeof(snippet_buf) - 1, fp);
+                    snippet_buf[n] = '\0';
+                    fclose(fp);
+                    query = snippet_buf;
+                } else {
+                    fprintf(stderr, "Failed to read snippet file: %s\n", argv[arg_idx + 1]);
+                    return 1;
+                }
+                arg_idx += 2;
             } else if (strcmp(argv[arg_idx], "--model") == 0 && arg_idx + 1 < argc) {
                 model_type = argv[arg_idx + 1];
                 arg_idx += 2;
@@ -695,6 +950,8 @@ int main(int argc, char** argv) {
                 printf("\nOptions:\n");
                 printf("  --json       Output results as JSON\n");
                 printf("  --rich       Include full code context (file, line, signature, content)\n");
+                printf("  --callgraph  Show function call relationships\n");
+                printf("  --snippet    Search by code snippet file instead of text query\n");
                 printf("  --model      Model type: mpnet (default) or jina\n");
                 printf("  --kind       Filter by symbol kind: function, struct, class, macro, typedef\n");
                 printf("  --lang       Filter by language: cpp, c, python, javascript, go, rust, java\n");
@@ -786,6 +1043,14 @@ int main(int argc, char** argv) {
         output_rich = 0;
         use_filter = 0;
     }
+    
+    // Load call graph if available
+    if (show_callgraph || output_rich) {
+        load_call_graph(cache_dir);
+    }
+    
+    // Load word frequencies for TF-IDF
+    load_word_freq(cache_dir);
     
     // Open cache only as fallback (optional)
     cache_t* cache = NULL;
@@ -972,6 +1237,9 @@ int main(int argc, char** argv) {
                                 line_no++;
                             }
                             if (*p) printf("      ...\n");
+                        }
+                        if (show_callgraph || output_rich) {
+                            print_callers(all_results[i].name);
                         }
                     }
                 }

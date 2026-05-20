@@ -151,15 +151,15 @@ $(VECTOR_GENERATOR): $(TOOLS_DIR)/vector_generator.c $(ONNX_EMBEDDER_LIB) $(LIB)
 $(VECTOR_SEARCH): $(TOOLS_DIR)/vector_search.c $(ONNX_EMBEDDER_LIB) $(LIB)
 	$(CC) $(CFLAGS) $(ONNX_CFLAGS) -o $@ $(TOOLS_DIR)/vector_search.c -L. -lmydb -lonnx_embedder $(ONNX_LDFLAGS) -lm -ldl -Wl,-rpath,'$$ORIGIN/..'
 
+# ONNX Embedder shared library (for Python FFI)
+ONNX_EMBEDDER_OBJ = $(OBJ_DIR)/embedding/onnx_embedder.o
+ONNX_EMBEDDER_LIB = libonnx_embedder.so
+
 $(CODE_INDEXER): $(TOOLS_DIR)/code_indexer.c
 	$(CC) $(CFLAGS) -o $@ $< -lm
 
 $(BATCH_EMBEDDER): $(TOOLS_DIR)/batch_embedder.c $(ONNX_EMBEDDER_LIB)
 	$(CC) $(CFLAGS) $(ONNX_CFLAGS) -o $@ $(TOOLS_DIR)/batch_embedder.c -L. -lonnx_embedder $(ONNX_LDFLAGS) -lm -ldl -Wl,-rpath,'$$ORIGIN/..'
-
-# ONNX Embedder shared library (for Python FFI)
-ONNX_EMBEDDER_OBJ = $(OBJ_DIR)/embedding/onnx_embedder.o
-ONNX_EMBEDDER_LIB = libonnx_embedder.so
 
 # tokenizers-cpp libraries
 TOKENIZERS_CPP_DIR = lib/tokenizers-cpp

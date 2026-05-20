@@ -201,7 +201,6 @@ static int find_end_line(const char* filepath, int start_line) {
     int in_string = 0;
     int string_char = 0;
     int found_open = 0;
-    int is_declaration = 0;
     char line[4096];
     
     // Phase 1: read lines from start_line, looking for '{'
@@ -346,8 +345,8 @@ static void write_chunk(FILE* fp, FILE* text_fp, FILE* meta_fp,
     if (meta_fp) {
         fprintf(meta_fp, "{\"name\":\"%s\",\"file\":\"%s\",\"kind\":\"%s\","
                 "\"line_start\":%d,\"line_end\":%d,\"language\":\"%s\","
-                "\"signature\":\"%s\"}\n",
-                esc_name, esc_file, esc_kind, line_start, line_end, lang, esc_sig);
+                "\"signature\":\"%s\",\"content\":\"%s\",\"docstring\":\"%s\"}\n",
+                esc_name, esc_file, esc_kind, line_start, line_end, lang, esc_sig, esc_content, esc_doc);
     }
 }
 
@@ -432,6 +431,17 @@ static void worker_process(worker_t* worker, int worker_id) {
         if (strcmp(type_check, "tag") != 0) continue;
         
         json_extract_str(line, "name", name, sizeof(name));
+        
+        // For scoped symbols (class/struct members), prefix with scope
+        char scope[256] = {0};
+        json_extract_str(line, "scope", scope, sizeof(scope));
+        if (scope[0]) {
+            char scoped_name[512];
+            snprintf(scoped_name, sizeof(scoped_name), "%s::%s", scope, name);
+            strncpy(name, scoped_name, sizeof(name) - 1);
+            name[sizeof(name) - 1] = '\0';
+        }
+        
         json_extract_str(line, "path", filepath, sizeof(filepath));
         json_extract_str(line, "kind", kind, sizeof(kind));
         json_extract_str(line, "signature", signature, sizeof(signature));
@@ -546,9 +556,58 @@ static void worker_process(worker_t* worker, int worker_id) {
             continue;
         }
         
-        write_chunk(chunk_fp, text_fp, meta_fp, name, filepath, kind, line_num, end_line,
-                    lang, signature, content, "");
-        chunk_count++;
+        // Sliding window chunking for long functions
+        int content_len = strlen(content);
+        if (content_len > 2000) {
+            int window_size = 1500;
+            int overlap = 500;
+            int offset = 0;
+            int part = 0;
+            
+            while (offset < content_len) {
+                char chunk_content[4096];
+                int remaining = content_len - offset;
+                int take = (remaining > window_size) ? window_size : remaining;
+                
+                // Build chunk: signature + " // Part N" + content slice
+                if (signature[0]) {
+                    snprintf(chunk_content, sizeof(chunk_content), "%s // Part %d\n", 
+                             signature, part + 1);
+                } else {
+                    snprintf(chunk_content, sizeof(chunk_content), "%s // Part %d\n", 
+                             name, part + 1);
+                }
+                
+                int prefix_len = strlen(chunk_content);
+                int max_content = sizeof(chunk_content) - prefix_len - 1;
+                if (take > max_content) take = max_content;
+                
+                memcpy(chunk_content + prefix_len, content + offset, take);
+                chunk_content[prefix_len + take] = '\0';
+                
+                // Find last newline to avoid cutting mid-line
+                if (offset + take < content_len) {
+                    char* last_nl = strrchr(chunk_content, '\n');
+                    if (last_nl) {
+                        *(last_nl + 1) = '\0';
+                        take = (last_nl - chunk_content) - prefix_len + 1;
+                    }
+                }
+                
+                write_chunk(chunk_fp, text_fp, meta_fp, name, filepath, kind, 
+                           line_num, end_line, lang, signature, chunk_content, "");
+                chunk_count++;
+                
+                offset += (take > overlap) ? (take - overlap) : take;
+                part++;
+                
+                if (part >= 5) break; // Max 5 parts per function
+            }
+        } else {
+            write_chunk(chunk_fp, text_fp, meta_fp, name, filepath, kind, line_num, end_line,
+                        lang, signature, content, "");
+            chunk_count++;
+        }
     }
 
     if (current_fp) fclose(current_fp);
@@ -582,11 +641,19 @@ int main(int argc, char** argv) {
     printf("Repo: %s\n", repo_path);
     printf("Cache: %s\n", cache_dir);
     printf("Workers: %d\n\n", num_workers);
-    
+
     struct stat st;
     if (stat(repo_path, &st) != 0 || !S_ISDIR(st.st_mode)) {
         fprintf(stderr, "Error: %s is not a directory\n", repo_path);
         return 1;
+    }
+
+    // Create cache directory if it doesn't exist
+    if (stat(cache_dir, &st) != 0) {
+        if (mkdir(cache_dir, 0755) != 0) {
+            fprintf(stderr, "Error: Failed to create cache directory %s\n", cache_dir);
+            return 1;
+        }
     }
     
     printf("Phase 1: Scanning source files...\n");
