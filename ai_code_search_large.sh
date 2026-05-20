@@ -150,11 +150,15 @@ generate_smart_config() {
     local max_chunks=100000
     local min_files=100
     
+    # 排除的目录（测试、文档、示例、脚本等非核心源码）
+    local exclude_list=("testing" "test" "tests" "Documentation" "docs" "doc" "samples" "examples" "demo" "LICENSES" "licenses" "scripts")
+    
     cat > "$config_file" << EOF
 # AI Agent 超大项目配置 - 智能拆分
 # 项目: $project_name
 # 生成时间: $(date)
 # 拆分策略: 大目录按二级目录拆分，小目录合并到misc
+# 排除目录: testing, test, tests, Documentation, docs, samples, examples, LICENSES
 
 REPO_PATH="$repo_path"
 PROJECT_NAME="$project_name"
@@ -170,6 +174,17 @@ EOF
     for dir in "$repo_path"/*/; do
         [[ ! -d "$dir" ]] && continue
         local local_name=$(basename "$dir")
+        
+        # 检查是否在排除列表中
+        local is_excluded=0
+        for excluded in "${exclude_list[@]}"; do
+            if [[ "$local_name" == "$excluded" ]]; then
+                is_excluded=1
+                break
+            fi
+        done
+        [[ $is_excluded -eq 1 ]] && continue
+        
         local file_count=$(find "$dir" -type f \( -name "*.c" -o -name "*.h" -o -name "*.cpp" -o -name "*.hpp" \) 2>/dev/null | wc -l)
         local est_chunks=$((file_count * 25))
         
@@ -178,6 +193,17 @@ EOF
             for subdir in "$dir"/*/; do
                 [[ ! -d "$subdir" ]] && continue
                 local sub_name=$(basename "$subdir")
+                
+                # 检查子目录是否在排除列表中
+                local sub_excluded=0
+                for excluded in "${exclude_list[@]}"; do
+                    if [[ "$sub_name" == "$excluded" ]]; then
+                        sub_excluded=1
+                        break
+                    fi
+                done
+                [[ $sub_excluded -eq 1 ]] && continue
+                
                 local sub_files=$(find "$subdir" -type f \( -name "*.c" -o -name "*.h" -o -name "*.cpp" -o -name "*.hpp" \) 2>/dev/null | wc -l)
                 
                 if [[ $sub_files -ge $min_files ]]; then

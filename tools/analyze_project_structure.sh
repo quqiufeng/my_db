@@ -19,6 +19,30 @@ REPO_PATH="${1:-}"
 MAX_CHUNKS="${2:-100000}"
 MIN_FILES="${3:-100}"
 
+# 排除的目录（测试、文档、示例、许可证等非核心代码）
+EXCLUDE_DIRS=(
+    "testing"
+    "test"
+    "tests"
+    "Documentation"
+    "docs"
+    "doc"
+    "samples"
+    "examples"
+    "demo"
+    "LICENSES"
+    "licenses"
+    ".git"
+    ".github"
+    ".gitignore"
+)
+
+# 生成 find 的排除参数
+EXCLUDE_ARGS=""
+for d in "${EXCLUDE_DIRS[@]}"; do
+    EXCLUDE_ARGS="$EXCLUDE_ARGS -not -path \"*/$d/*\""
+done
+
 if [[ -z "$REPO_PATH" ]]; then
     echo "用法: $0 <repo_path> [max_chunks_per_sub] [min_files]"
     echo "  repo_path:          源码目录"
@@ -63,7 +87,7 @@ for dir in "$REPO_PATH"/*/; do
     if [[ ! -d "$dir" ]]; then continue; fi
     
     local_name=$(basename "$dir")
-    file_count=$(find "$dir" -type f \( -name "*.c" -o -name "*.h" -o -name "*.cpp" -o -name "*.hpp" \) 2>/dev/null | wc -l)
+    file_count=$(find "$dir" -type f \( -name "*.c" -o -name "*.h" -o -name "*.cpp" -o -name "*.hpp" \) $(echo $EXCLUDE_ARGS) 2>/dev/null | wc -l)
     
     # 预估 chunk 数（每个文件平均 25 个 chunk）
     est_chunks=$((file_count * 25))
@@ -98,7 +122,7 @@ for large_dir in "${large_dirs[@]}"; do
     for subdir in "$REPO_PATH/$large_dir"/*/; do
         if [[ ! -d "$subdir" ]]; then continue; fi
         sub_name=$(basename "$subdir")
-        sub_files=$(find "$subdir" -type f \( -name "*.c" -o -name "*.h" -o -name "*.cpp" -o -name "*.hpp" \) 2>/dev/null | wc -l)
+        sub_files=$(find "$subdir" -type f \( -name "*.c" -o -name "*.h" -o -name "*.cpp" -o -name "*.hpp" \) $(echo $EXCLUDE_ARGS) 2>/dev/null | wc -l)
         sub_chunks=$((sub_files * 25))
         
         if [[ $sub_files -ge $MIN_FILES ]]; then
@@ -130,7 +154,7 @@ for large_dir in "${large_dirs[@]}"; do
     for subdir in "$REPO_PATH/$large_dir"/*/; do
         if [[ ! -d "$subdir" ]]; then continue; fi
         sub_name=$(basename "$subdir")
-        sub_files=$(find "$subdir" -type f \( -name "*.c" -o -name "*.h" -o -name "*.cpp" -o -name "*.hpp" \) 2>/dev/null | wc -l)
+        sub_files=$(find "$subdir" -type f \( -name "*.c" -o -name "*.h" -o -name "*.cpp" -o -name "*.hpp" \) $(echo $EXCLUDE_ARGS) 2>/dev/null | wc -l)
         
         if [[ $sub_files -ge $MIN_FILES ]]; then
             suggested_subs+=("${large_dir}_${sub_name}")
