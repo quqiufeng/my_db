@@ -131,7 +131,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CACHE_QUERY="${SCRIPT_DIR}/tools/cache_query"
 
 # GPU 环境
-export LD_LIBRARY_PATH="/home/dministrator/anaconda3/envs/dl/lib:/home/dministrator/anaconda3/envs/dl/lib/python3.10/site-packages/tensorrt_libs:/home/dministrator/anaconda3/envs/dl/lib/python3.10/site-packages/nvidia/cudnn/lib:${LD_LIBRARY_PATH:-}"
+export LD_LIBRARY_PATH="${SCRIPT_DIR}:/opt/TensorRT-10/lib:/home/dministrator/anaconda3/envs/dl/lib:/home/dministrator/anaconda3/envs/dl/lib/python3.10/site-packages/tensorrt_libs:/home/dministrator/anaconda3/envs/dl/lib/python3.10/site-packages/nvidia/cudnn/lib:${LD_LIBRARY_PATH:-}"
 
 # 颜色
 RED='\033[0;31m'
@@ -272,16 +272,25 @@ if not results:
     print('  3. GPU 环境未配置（检查 LD_LIBRARY_PATH）')
     sys.exit(0)
 
-print(f'找到 {len(results)} 个相关页面：\n')
+print('找到 ' + str(len(results)) + ' 个相关页面：\n')
 
 for i, r in enumerate(results, 1):
     name = r.get('name', 'N/A')
     score = r.get('score', 0)
-    file = r.get('file', '')
     
-    # 尝试解析 KV value 获取 md_file 和 preview
-    print(f'{i}. [{score:.3f}] {name}')
-    print(f'   File: {file}')
+    # 从完整 key 中提取 page_key (去掉 namespace 前缀)
+    page_key = name
+    ns_prefix = '/books/'
+    if name.startswith(ns_prefix):
+        parts = name.split('/', 3)
+        if len(parts) >= 4:
+            page_key = parts[3] if parts[3].startswith('chapters/') else 'chapters/' + parts[3]
+    
+    parts = name.split('/')
+    book_ns = '/books/' + parts[2] if len(parts) > 2 else '/books/unknown'
+    
+    print(str(i) + '. [' + str(round(score, 3)) + '] ' + name)
+    print('   Read: ./explore_book.sh ' + book_ns + ' read ' + page_key)
     print()
 "
     
@@ -321,7 +330,7 @@ cmd_read() {
     result=$("$CACHE_QUERY" "$full_key" --type exact --pretty 2>&1 | extract_json)
     
     local md_file
-    md_file=$(echo "$result" | python3 -c 'import sys,json; d=json.load(sys.stdin); r=d.get("results",[]); print(r[0].get("md_file","")) if r else ""' 2>/dev/null)
+    md_file=$(echo "$result" | python3 -c 'import sys,json; d=json.load(sys.stdin); r=d.get("results",[]); print(r[0].get("content",{}).get("md_file","")) if r else ""' 2>/dev/null)
     
     # 如果上面的方法失败，直接用 grep
     if [[ -z "$md_file" ]]; then

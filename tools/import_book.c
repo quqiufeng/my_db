@@ -32,6 +32,7 @@
 #include <sys/types.h>
 #include <unistd.h>
 #include <errno.h>
+#include <math.h>
 
 // =============================================================================
 // 配置
@@ -87,7 +88,24 @@ static int mkdir_p(const char* path) {
 static void sanitize_filename(char* dst, size_t dst_size, const char* src) {
     size_t i, j;
     for (i = 0, j = 0; src[i] && j < dst_size - 1; i++) {
-        char c = src[i];
+        unsigned char c = (unsigned char)src[i];
+        // 处理 UTF-8 多字节字符中的常见 Unicode 标点
+        if (c == 0xe2 && (unsigned char)src[i+1] == 0x80) {
+            unsigned char c3 = (unsigned char)src[i+2];
+            if (c3 == 0x98 || c3 == 0x99) {  // U+2018, U+2019 单引号
+                dst[j++] = '\'';
+                i += 2;
+                continue;
+            } else if (c3 == 0x9c || c3 == 0x9d) {  // U+201C, U+201D 双引号
+                dst[j++] = '"';
+                i += 2;
+                continue;
+            } else if (c3 == 0x93 || c3 == 0x94) {  // U+2013, U+2014 短横线
+                dst[j++] = '-';
+                i += 2;
+                continue;
+            }
+        }
         if (c == '/' || c == '\\' || c == ':' || c == '*' || 
             c == '?' || c == '"' || c == '<' || c == '>' || c == '|') {
             dst[j++] = '_';
@@ -151,7 +169,7 @@ static int is_noise(const char* text) {
     for (size_t i = 0; i < len; i++) {
         if ((text[i] >= 'a' && text[i] <= 'z') || 
             (text[i] >= 'A' && text[i] <= 'Z') ||
-            (text[i] >= 0x80)) {  // 包含中文
+            ((unsigned char)text[i] >= 0x80)) {  // 包含中文（强制 unsigned char）
             alpha_count++;
         }
     }
@@ -251,7 +269,7 @@ static int save_page_as_md(const char* md_dir, const char* chapter_dir,
                            int page_idx, const char* content,
                            char* out_md_path, size_t out_path_size) {
     char md_file[1024];
-    snprintf(md_file, sizeof(md_file), "%s/%s/page_%04d.md", 
+    snprintf(md_file, sizeof(md_file), "%s/chapters/%s/page_%04d.md", 
              md_dir, chapter_dir, page_idx);
     
     FILE* fp = fopen(md_file, "w");
@@ -271,7 +289,7 @@ static int save_page_as_md(const char* md_dir, const char* chapter_dir,
     fclose(fp);
     
     // 返回相对路径
-    snprintf(out_md_path, out_path_size, "%s/%s/page_%04d.md",
+    snprintf(out_md_path, out_path_size, "%s/chapters/%s/page_%04d.md",
              md_dir, chapter_dir, page_idx);
     
     return 0;
@@ -296,7 +314,7 @@ static int import_chapter(cache_t* cache, const char* namespace,
     
     // 创建章节目录
     char chapter_md_dir[1024];
-    snprintf(chapter_md_dir, sizeof(chapter_md_dir), "%s/%s", md_dir, chapter_dirname);
+    snprintf(chapter_md_dir, sizeof(chapter_md_dir), "%s/chapters/%s", md_dir, chapter_dirname);
     mkdir_p(chapter_md_dir);
     
     // 保存章节元数据到 KV Cache
@@ -563,7 +581,7 @@ static int export_vectors(cache_t* cache, const char* cache_dir,
     
     const char* key;
     const char* value;
-    while (cache_iter_next(iter, &key, &value) == 0) {
+    while (cache_iter_next(iter, &key, &value) == 1) {
         // 只收集属于本书的 key
         if (strncmp(key, namespace, ns_len) != 0) continue;
         // 跳过 _meta 等非页面 key
@@ -647,6 +665,17 @@ static int export_vectors(cache_t* cache, const char* cache_dir,
     printf("  Binary: %s (%d vectors)\n", bin_file, count);
     printf("  Index:  %s\n", idx_file);
     
+    // 构建 HNSW 索引（语义搜索必需）
+    char hnsw_cmd[2048];
+    snprintf(hnsw_cmd, sizeof(hnsw_cmd),
+             "./tools/build_hnsw_index %s >/dev/null 2>&1", bin_file);
+    int hnsw_ret = system(hnsw_cmd);
+    if (hnsw_ret == 0) {
+        printf("  HNSW index built successfully\n");
+    } else {
+        printf("  Warning: HNSW build failed (search may not work)\n");
+    }
+    
     for (int i = 0; i < count; i++) {
         free(entries[i].name);
         free(entries[i].vector);
@@ -679,7 +708,7 @@ static void* load_pdf_lib(void) {
 }
 
 static void* load_epub_lib(void) {
-    void* lib = dlopen("src/importer/libs/libepubparse.so", RTLD_LAZY);
+    void* lib = dlopen("src/importer/libs/libepubparse.so", RTLD_LAZY | RTLD_DEEPBIND);
     if (!lib) {
         fprintf(stderr, "Failed to load libepubparse.so: %s\n", dlerror());
         return NULL;
