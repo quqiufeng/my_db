@@ -279,10 +279,11 @@ cache_t* cache_open(const char* db_dir, size_t max_memory) {
 
     if (!is_new) {
         // 已有文件：尝试加载持久化索引（零拷贝）
-        if (cache_index_load(cache) == 0) {
-            // 索引加载成功，验证 entry_count 一致性
-            // 注意：mmap 的索引直接使用，不需要重建
+        int index_loaded = (cache_index_load(cache) == 0);
+        if (index_loaded) {
             printf("[CACHE] Loaded persisted indexes, skipping rebuild\n");
+            // 即使加载了持久化索引，向量索引仍需从 value 中重建
+            cache_vector_index_rebuild(cache);
         } else {
             // 加载失败，回退到扫描重建
             printf("[CACHE] No persisted index found, rebuilding...\n");

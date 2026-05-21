@@ -526,6 +526,137 @@ static int import_book(cache_t* cache, const char* namespace,
 }
 
 // =============================================================================
+// 向量导出（供 vector_engine 语义搜索使用）
+// =============================================================================
+
+typedef struct {
+    char* name;
+    float* vector;
+} VectorEntry;
+
+static int export_vectors(cache_t* cache, const char* cache_dir,
+                          const char* namespace, const char* book_name) {
+    // 创建 vectors 目录
+    char vec_dir[1024];
+    snprintf(vec_dir, sizeof(vec_dir), "%s/vectors", cache_dir);
+    mkdir_p(vec_dir);
+    
+    // 构建文件名
+    char bin_file[1024], idx_file[1024];
+    snprintf(bin_file, sizeof(bin_file), "%s/books_%s.jina.bin", vec_dir, book_name);
+    snprintf(idx_file, sizeof(idx_file), "%s/books_%s.jina.idx", vec_dir, book_name);
+    
+    // 收集所有带向量的 entry
+    VectorEntry* entries = NULL;
+    int count = 0;
+    int capacity = 1000;
+    entries = malloc(sizeof(VectorEntry) * capacity);
+    if (!entries) return -1;
+    
+    size_t ns_len = strlen(namespace);
+    
+    cache_iter_t* iter = cache_iter_create(cache);
+    if (!iter) {
+        free(entries);
+        return -1;
+    }
+    
+    const char* key;
+    const char* value;
+    while (cache_iter_next(iter, &key, &value) == 0) {
+        // 只收集属于本书的 key
+        if (strncmp(key, namespace, ns_len) != 0) continue;
+        // 跳过 _meta 等非页面 key
+        if (strstr(key, "/_meta")) continue;
+        if (!strstr(key, "/page_")) continue;
+        
+        size_t dim = 0;
+        const float* vec = cache_get_vector(cache, key, &dim);
+        if (!vec || dim == 0) continue;
+        
+        if (count >= capacity) {
+            capacity *= 2;
+            VectorEntry* new_entries = realloc(entries, sizeof(VectorEntry) * capacity);
+            if (!new_entries) break;
+            entries = new_entries;
+        }
+        
+        entries[count].name = strdup(key);
+        entries[count].vector = malloc(sizeof(float) * dim);
+        if (entries[count].vector) {
+            memcpy(entries[count].vector, vec, sizeof(float) * dim);
+        }
+        count++;
+    }
+    cache_iter_destroy(iter);
+    
+    if (count == 0) {
+        free(entries);
+        return 0;
+    }
+    
+    // 写入 bin 文件
+    FILE* bin_fp = fopen(bin_file, "wb");
+    FILE* idx_fp = fopen(idx_file, "w");
+    if (!bin_fp || !idx_fp) {
+        if (bin_fp) fclose(bin_fp);
+        if (idx_fp) fclose(idx_fp);
+        for (int i = 0; i < count; i++) {
+            free(entries[i].name);
+            free(entries[i].vector);
+        }
+        free(entries);
+        return -1;
+    }
+    
+    uint32_t h_count = count;
+    uint32_t h_dim = EMBEDDING_DIM;
+    fwrite(&h_count, 4, 1, bin_fp);
+    fwrite(&h_dim, 4, 1, bin_fp);
+    
+    size_t offset = 8;
+    for (int i = 0; i < count; i++) {
+        uint32_t name_len = strlen(entries[i].name);
+        fwrite(&name_len, 4, 1, bin_fp);
+        fwrite(entries[i].name, 1, name_len, bin_fp);
+        
+        // 归一化
+        float norm = 0;
+        for (int j = 0; j < EMBEDDING_DIM; j++) {
+            norm += entries[i].vector[j] * entries[i].vector[j];
+        }
+        norm = sqrtf(norm);
+        if (norm > 1e-12f) {
+            for (int j = 0; j < EMBEDDING_DIM; j++) {
+                entries[i].vector[j] /= norm;
+            }
+        }
+        
+        fwrite(entries[i].vector, sizeof(float), EMBEDDING_DIM, bin_fp);
+        
+        // idx 偏移指向 vec_data
+        fprintf(idx_fp, "\"%s\":%zu\n", entries[i].name, offset + 4 + name_len);
+        
+        offset += 4 + name_len + EMBEDDING_DIM * sizeof(float);
+    }
+    
+    fclose(bin_fp);
+    fclose(idx_fp);
+    
+    printf("\nVectors exported:\n");
+    printf("  Binary: %s (%d vectors)\n", bin_file, count);
+    printf("  Index:  %s\n", idx_file);
+    
+    for (int i = 0; i < count; i++) {
+        free(entries[i].name);
+        free(entries[i].vector);
+    }
+    free(entries);
+    
+    return count;
+}
+
+// =============================================================================
 // 动态库加载
 // =============================================================================
 
@@ -876,6 +1007,12 @@ int main(int argc, char* argv[]) {
     
     // 最终同步和统计
     cache_sync(cache);
+    
+    // 导出向量供 vector_engine 使用
+    int exported = export_vectors(cache, cache_dir, namespace, book_name);
+    if (exported > 0) {
+        printf("  Exported %d vectors for semantic search\n", exported);
+    }
     
     printf("\n========================================\n");
     printf("Import complete!\n");

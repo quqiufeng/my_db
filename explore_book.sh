@@ -247,17 +247,17 @@ cmd_search() {
     
     # 从命名空间提取书籍名
     local book_name=$(basename "$NAMESPACE")
-    local cache_dir="/opt/books/${book_name}"
+    local md_dir="/opt/books/${book_name}"
     
-    if [[ ! -d "$cache_dir" ]]; then
-        warn "Book directory not found: $cache_dir"
+    if [[ ! -d "$md_dir" ]]; then
+        warn "Book directory not found: $md_dir"
         warn "The book may not have been imported correctly."
         exit 1
     fi
     
-    # 执行语义搜索
+    # 执行语义搜索（向量索引在 ai_code_memory/vectors/ 中）
     local search_result
-    search_result=$("$CACHE_QUERY" "$query" --repo "$NAMESPACE" --type search --analysis-dir "$cache_dir" --max-results "$max_results" --pretty 2>&1 | extract_json)
+    search_result=$("$CACHE_QUERY" "$query" --repo "$NAMESPACE" --type search --analysis-dir ./ai_code_memory --max-results "$max_results" --pretty 2>&1 | extract_json)
     
     echo "$search_result" | python3 -c "
 import sys, json

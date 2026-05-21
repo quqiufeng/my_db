@@ -95,6 +95,8 @@ static int discover_sources(const char* cache_dir, ve_source_t* sources, int max
             snprintf(s->namespace, sizeof(s->namespace), "/code/local/%s", ns + 11);
         } else if (strncmp(ns, "code_", 5) == 0) {
             snprintf(s->namespace, sizeof(s->namespace), "/code/%s", ns + 5);
+        } else if (strncmp(ns, "books_", 6) == 0) {
+            snprintf(s->namespace, sizeof(s->namespace), "/books/%s", ns + 6);
         } else {
             snprintf(s->namespace, sizeof(s->namespace), "/code/local/%s", ns);
         }
