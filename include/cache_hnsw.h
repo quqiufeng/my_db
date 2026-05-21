@@ -38,6 +38,12 @@ void hnsw_set_ef_search(hnsw_index_t* index, int ef);
 // vector: float 数组，长度 = dim
 int hnsw_insert(hnsw_index_t* index, size_t id, const float* vector);
 
+// 线程安全并行插入（用于批量构建）
+int hnsw_insert_parallel(hnsw_index_t* index, size_t id, const float* vector);
+
+// 预分配节点容量（用于并行构建前）
+int hnsw_reserve(hnsw_index_t* index, size_t n);
+
 // 删除向量（软删除，标记为无效）
 void hnsw_remove(hnsw_index_t* index, size_t id);
 

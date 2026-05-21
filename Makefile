@@ -51,14 +51,18 @@ INCLUDEDIR = $(PREFIX)/include
 
 .PHONY: all clean test test_join test_perf test_edge test_composite test_wal test_cache test_cache_full test_http test_hnsw example install
 
-all: $(LIB) $(ONNX_EMBEDDER_LIB) $(TEST_BASIC) $(TEST_JOIN) $(TEST_PERF) $(TEST_EDGE) $(TEST_COMPOSITE) $(TEST_WAL) $(TEST_CACHE) $(TEST_CACHE_FULL) $(TEST_HTTP_SERVER) $(TEST_HNSW) $(IMPORT_BOOK) $(CACHE_SERVER) $(CACHE_HTTP_SERVER) $(CACHE_SNAPSHOT) $(VECTOR_GENERATOR) $(VECTOR_SEARCH) $(CODE_INDEXER) $(BATCH_EMBEDDER) $(CACHE_IMPORT) $(CACHE_QUERY) example
+all: $(LIB) $(ONNX_EMBEDDER_LIB) $(VECTOR_ENGINE_LIB) $(TEST_BASIC) $(TEST_JOIN) $(TEST_PERF) $(TEST_EDGE) $(TEST_COMPOSITE) $(TEST_WAL) $(TEST_CACHE) $(TEST_CACHE_FULL) $(TEST_HTTP_SERVER) $(TEST_HNSW) $(IMPORT_BOOK) $(CACHE_SERVER) $(CACHE_HTTP_SERVER) $(CACHE_SNAPSHOT) $(VECTOR_GENERATOR) $(VECTOR_SEARCH) $(BUILD_HNSW_INDEX) $(CODE_INDEXER) $(BATCH_EMBEDDER) $(CACHE_IMPORT) $(CACHE_QUERY) example
 
 $(LIB): $(OBJECTS)
-	$(CC) -shared -o $@ $^ -lm
+	$(CC) -shared -fopenmp -o $@ $^ -lm
 
 $(OBJ_DIR)/%.o: $(SRC_DIR)/%.c
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -c -o $@ $^
+	$(CC) $(CFLAGS) -fopenmp -c -o $@ $^
+
+$(OBJ_DIR)/cache/hnsw.o: $(SRC_DIR)/cache/hnsw.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -fopenmp -c -o $@ $^
 
 $(TEST_BASIC): $(TEST_DIR)/test_basic.c $(LIB)
 	$(CC) $(CFLAGS) -o $@ $< -L. -lmydb -Wl,-rpath,.
@@ -142,22 +146,38 @@ $(CACHE_HTTP_SERVER): $(TOOLS_DIR)/cache_http_server.c $(LIB)
 $(CACHE_SNAPSHOT): $(TOOLS_DIR)/cache_snapshot.c $(LIB)
 	$(CC) $(CFLAGS) -o $@ $< -L. -lmydb -Wl,-rpath,.
 
-$(CACHE_IMPORT): $(TOOLS_DIR)/cache_import.c $(LIB)
-	$(CC) $(CFLAGS) -o $@ $(TOOLS_DIR)/cache_import.c -L. -lmydb -ljansson -Wl,-rpath,.
-
-$(CACHE_QUERY): $(TOOLS_DIR)/cache_query.c $(LIB)
-	$(CC) $(CFLAGS) -o $@ $(TOOLS_DIR)/cache_query.c -L. -lmydb -ljansson -Wl,-rpath,.
-
 CODE_INDEXER = $(TOOLS_DIR)/code_indexer
 BATCH_EMBEDDER = $(TOOLS_DIR)/batch_embedder
 CACHE_IMPORT = $(TOOLS_DIR)/cache_import
 CACHE_QUERY = $(TOOLS_DIR)/cache_query
 
+# Vector engine library
+VECTOR_ENGINE_OBJ = $(OBJ_DIR)/vector_engine.o
+VECTOR_ENGINE_LIB = libvector_engine.so
+
+$(VECTOR_ENGINE_OBJ): $(SRC_DIR)/vector_engine.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(ONNX_CFLAGS) -c -o $@ $(SRC_DIR)/vector_engine.c
+
+$(VECTOR_ENGINE_LIB): $(VECTOR_ENGINE_OBJ) $(ONNX_EMBEDDER_LIB) $(LIB)
+	$(CC) -shared -o $@ $< -L. -lmydb -lonnx_embedder $(ONNX_LDFLAGS) -lm -ldl -ljansson -Wl,-rpath,'$$ORIGIN/..'
+
+$(CACHE_IMPORT): $(TOOLS_DIR)/cache_import.c $(LIB)
+	$(CC) $(CFLAGS) -o $@ $(TOOLS_DIR)/cache_import.c -L. -lmydb -ljansson -Wl,-rpath,.
+
+$(CACHE_QUERY): $(TOOLS_DIR)/cache_query.c $(LIB) $(VECTOR_ENGINE_LIB)
+	$(CC) $(CFLAGS) $(ONNX_CFLAGS) -fopenmp -o $@ $(TOOLS_DIR)/cache_query.c -L. -lmydb -lvector_engine -lonnx_embedder $(ONNX_LDFLAGS) -lm -ldl -ljansson -Wl,-rpath,'$$ORIGIN/..'
+
+BUILD_HNSW_INDEX = $(TOOLS_DIR)/build_hnsw_index
+
+$(BUILD_HNSW_INDEX): $(TOOLS_DIR)/build_hnsw_index.c $(LIB)
+	$(CC) $(CFLAGS) -fopenmp -o $@ $< -L. -lmydb -lm -Wl,-rpath,.
+
 $(VECTOR_GENERATOR): $(TOOLS_DIR)/vector_generator.c $(ONNX_EMBEDDER_LIB) $(LIB)
 	$(CC) $(CFLAGS) $(ONNX_CFLAGS) -o $@ $(TOOLS_DIR)/vector_generator.c -L. -lmydb -lonnx_embedder $(ONNX_LDFLAGS) -lm -ldl -Wl,-rpath,'$$ORIGIN/..'
 
-$(VECTOR_SEARCH): $(TOOLS_DIR)/vector_search.c $(ONNX_EMBEDDER_LIB) $(LIB)
-	$(CC) $(CFLAGS) $(ONNX_CFLAGS) -o $@ $(TOOLS_DIR)/vector_search.c -L. -lmydb -lonnx_embedder $(ONNX_LDFLAGS) -lm -ldl -Wl,-rpath,'$$ORIGIN/..'
+$(VECTOR_SEARCH): $(TOOLS_DIR)/vector_search.c $(VECTOR_ENGINE_LIB)
+	$(CC) $(CFLAGS) $(ONNX_CFLAGS) -o $@ $(TOOLS_DIR)/vector_search.c -L. -lvector_engine -lmydb -lonnx_embedder $(ONNX_LDFLAGS) -lm -ldl -ljansson -Wl,-rpath,'$$ORIGIN/..'
 
 # ONNX Embedder shared library (for Python FFI)
 ONNX_EMBEDDER_OBJ = $(OBJ_DIR)/embedding/onnx_embedder.o
@@ -197,4 +217,4 @@ install: $(LIB)
 	@echo "Header:  $(INCLUDEDIR)/mydb.h"
 
 clean:
-	rm -rf $(OBJ_DIR) $(LIB) $(ONNX_EMBEDDER_LIB) $(TEST_BASIC) $(TEST_JOIN) $(TEST_PERF) $(TEST_EDGE) $(TEST_COMPOSITE) $(TEST_WAL) $(TEST_CACHE) $(TEST_CACHE_FULL) $(TEST_HTTP_SERVER) $(TEST_HNSW) $(IMPORT_BOOK) $(CACHE_HTTP_SERVER) $(CACHE_SNAPSHOT) $(VECTOR_GENERATOR) $(VECTOR_SEARCH) $(CACHE_IMPORT) $(CACHE_QUERY) $(EXAMPLE_C) tests/test_codebert_embedder tests/bench_codebert *.bin *.index test_cache_dir test_cache_lru
+	rm -rf $(OBJ_DIR) $(LIB) $(ONNX_EMBEDDER_LIB) $(VECTOR_ENGINE_LIB) $(TEST_BASIC) $(TEST_JOIN) $(TEST_PERF) $(TEST_EDGE) $(TEST_COMPOSITE) $(TEST_WAL) $(TEST_CACHE) $(TEST_CACHE_FULL) $(TEST_HTTP_SERVER) $(TEST_HNSW) $(IMPORT_BOOK) $(CACHE_HTTP_SERVER) $(CACHE_SNAPSHOT) $(VECTOR_GENERATOR) $(VECTOR_SEARCH) $(BUILD_HNSW_INDEX) $(CODE_INDEXER) $(BATCH_EMBEDDER) $(CACHE_IMPORT) $(CACHE_QUERY) $(EXAMPLE_C) tests/test_codebert_embedder tests/bench_codebert *.bin *.index test_cache_dir test_cache_lru

@@ -6,41 +6,67 @@
 
 **🚀 KV Cache 系统（Agent 记忆存储）**: [kvCache.md](kvCache.md) - 专为 AI Agent 设计的层级化记忆存储，支持前缀/范围/正则搜索
 
-**🎯 AI Agent 代码语义搜索**: `./ai_code_search.sh` - 一键对任意代码库进行语义索引和智能搜索
+## 四大入口脚本（根据场景选择）
 
+| 脚本 | 定位 | 数据存储 | 适用场景 | 核心能力 |
+|------|------|---------|---------|---------|
+| **`ai_code_search.sh`** | **磁盘版**通用分析 | 磁盘文件 (`./cache/`) | 中小项目（<1万文件），人工交互探索 | 索引、向量、搜索、调用图、数据流 |
+| **`ai_code_search_large.sh`** | **磁盘版**超大项目分治 | 磁盘文件 (`./subsys_cache/`) | 大项目（5万+文件），如 Linux 内核 | 自动拆分子系统、分治索引、跨子系统搜索 |
+| **`analyze_repo.sh`** | **记忆系统版**一键导入 | **KV Cache** (`ai_code_memory/`) | 需要 AI Agent 自动集成、跨项目关联 | 6步流水线全自动：源码→索引→向量→调用图→数据流→记忆存储 |
+| **`explore_repo.sh`** | **记忆系统版**AI 探索 | **KV Cache** (`ai_code_memory/`) | AI Agent 程序化查询、深度架构分析 | 符号查询、语义搜索、子系统探索、跨项目对比 |
+
+### 如何选择？
+
+- **只想人工探索代码** → `ai_code_search.sh`（磁盘版，简单直接）
+- **分析 Linux 内核等超大项目** → `ai_code_search_large.sh`（分治策略）
+- **想让 AI Agent 记住并查询** → `analyze_repo.sh`（导入记忆系统）+ `explore_repo.sh`（AI 查询接口）
+
+### 磁盘版 vs 记忆系统版对比
+
+| 维度 | 磁盘版 (`ai_code_search.sh`) | 记忆系统版 (`analyze_repo.sh` + `explore_repo.sh`) |
+|------|---------------------------|--------------------------------------------------|
+| **数据存储** | 磁盘文件（chunks_text.txt, call_graph.json） | **mmap 零拷贝**（`ai_code_memory/cache.bin`） |
+| **查询方式** | 命令行人工交互 | **AI Agent 程序化 API**（JSON 输出） |
+| **持久化** | 分析目录可删除 | **msync 实时落盘，断电不丢** |
+| **跨项目关联** | ❌ 项目隔离 | ✅ **统一命名空间，跨项目对比** |
+| **调用链展开** | 文本展示 | **递归 caller/callee/call_paths** |
+| **语义搜索** | ✅ 可用 | ✅ 可用（HNSW 索引加速） |
+| **使用难度** | 多命令手动执行 | **单命令全自动** |
+
+### 使用示例
+
+**磁盘版 — 人工探索：**
 ```bash
 # 一键分析代码库（索引 + 向量生成 + 调用图构建）
 ./ai_code_search.sh analyze /opt/stable-diffusion.cpp ./sd_cache
 
 # 自然语言搜索代码
 ./ai_code_search.sh search ./sd_cache "VAE encoder decoder" 10
-
-# 用代码片段搜索相似实现
-./ai_code_search.sh snippet ./sd_cache ./my_kernel.cpp 5
 ```
 
-**🐧 AI Agent Linux 内核开发（大项目分治）**: `./ai_code_search_large.sh` - 针对 Linux 内核等超大项目（5万+文件）的智能分治分析
-
+**超大项目分治 — Linux 内核：**
 ```bash
-# 1. 初始化（自动按子系统拆分，排除测试/文档目录）
-./ai_code_search_large.sh init /opt/linux
-
-# 2. 索引核心子系统
-./ai_code_search_large.sh index 8
-
-# 3. 生成语义向量
-./ai_code_search_large.sh vector 2
-
-# 4. 搜索内存分配机制
+./ai_code_search_large.sh init /opt/linux      # 自动拆分子系统
+./ai_code_search_large.sh index 8               # 并行索引
+./ai_code_search_large.sh vector 2              # 生成向量
 ./ai_code_search_large.sh search-sub mm "page allocation" 10
-
-# 5. 追踪 task_struct 数据流
-./ai_code_search_large.sh dataflow task_struct
 ```
 
-**大项目分治策略**:
-- **自动拆分**: `drivers/` → 40+ 子系统，`arch/` → 17 个架构，`kernel/`/`mm/` → 直接保留
-- **智能排除**: 自动跳过 `testing/`, `Documentation/`, `samples/` 等非核心目录
+**记忆系统版 — AI Agent 全闭环：**
+```bash
+# 一键导入（6步全自动：源码→记忆）
+./analyze_repo.sh /opt/redis
+
+# AI 探索（程序化查询，JSON 输出）
+./explore_repo.sh /code/local/redis overview                    # 项目概览
+./explore_repo.sh /code/local/redis symbol zmalloc --depth 2   # 深度调用链分析
+./explore_repo.sh /code/local/redis explore "memory allocation" # 子系统探索
+./explore_repo.sh /code/local/redis compare /code/nginx "memory pool"  # 跨项目对比
+```
+
+**大项目分治策略（Linux 内核实测）**:
+- **自动拆分**: `drivers/` → 40+ 子系统，`arch/` → 17 个架构
+- **智能排除**: 跳过 `testing/`, `Documentation/`, `samples/` 等非核心目录
 - **子系统隔离**: 每个子系统独立索引/向量，避免 4 小时+的向量生成
 - **开发闭环**: 理解代码 → 修改 → 编译 → QEMU 运行 → 验证
 
@@ -800,9 +826,11 @@ make tools/cache_query
 
 ```bash
 # 设置 GPU 库路径（TensorRT + cuDNN + CUDA）
+# 注意：根据实际安装路径调整，以下路径适用于 conda 环境
 export LD_LIBRARY_PATH=/home/dministrator/my_db:\
-    /opt/TensorRT-10/lib:\
     /home/dministrator/anaconda3/envs/dl/lib:\
+    /home/dministrator/anaconda3/envs/dl/lib/python3.10/site-packages/tensorrt_libs:\
+    /home/dministrator/anaconda3/envs/dl/lib/python3.10/site-packages/nvidia/cudnn/lib:\
     $LD_LIBRARY_PATH
 
 # 验证 GPU 可用
@@ -1756,9 +1784,13 @@ make test  # 运行所有测试
 ### 环境变量
 
 ```bash
-# 必须：让程序找到 GPU 库
+# 必须：让程序找到 GPU 库（TensorRT + cuDNN + ONNX Runtime）
+# 注意：根据实际安装路径调整
 export LD_LIBRARY_PATH=/path/to/my_db:\
-    /path/to/anaconda3/envs/dl/lib:$LD_LIBRARY_PATH
+    /path/to/anaconda3/envs/dl/lib:\
+    /path/to/anaconda3/envs/dl/lib/python3.10/site-packages/tensorrt_libs:\
+    /path/to/anaconda3/envs/dl/lib/python3.10/site-packages/nvidia/cudnn/lib:\
+    $LD_LIBRARY_PATH
 
 # 可选：TensorRT 缓存路径
 export TRT_ENGINE_CACHE=./trt_cache
@@ -1767,7 +1799,13 @@ export TRT_ENGINE_CACHE=./trt_cache
 ### 常见问题
 
 **Q: `libnvinfer.so.10: cannot open shared object file`**
-A: TensorRT 10 库未找到。确保 `/opt/TensorRT-10/lib` 在 `LD_LIBRARY_PATH` 中。
+A: TensorRT 10 库未找到。如果使用 conda 安装：
+```bash
+# 查找实际路径
+find ~/anaconda3/envs/dl -name "libnvinfer.so*"
+# 通常位于：~/anaconda3/envs/dl/lib/python3.10/site-packages/tensorrt_libs/
+```
+确保上述路径在 `LD_LIBRARY_PATH` 中。
 
 **Q: `Provider_GetHost: undefined symbol`**
 A: ONNX Runtime 版本不匹配。项目使用 1.23.2，需与 TensorRT 10 配套。

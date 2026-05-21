@@ -4,11 +4,14 @@
  * AI-friendly structured query interface for KV Cache.
  * 
  * Usage:
- *   ./cache_query <query> [--repo <namespace>] [--type <type>]
+ *   ./cache_query <query> [--repo <namespace>] [--type <type>] [--analysis-dir <dir>]
+ *                           [--kind <kind>] [--lang <lang>] [--file <pattern>]
+ *                           [--no-boost] [--max-results <n>]
  * 
  * Example:
  *   ./cache_query ngx_palloc --repo /code/nginx --type context
- *   ./cache_query "memory pool" --repo /code/nginx --type search
+ *   ./cache_query "memory pool" --repo /code/nginx --type search --analysis-dir ./nginx_cache
+ *   ./cache_query "event loop" --repo /code/nginx --type search --analysis-dir ./nginx_cache --kind function --lang c
  */
 
 #include <stdio.h>
@@ -18,6 +21,7 @@
 #include <time.h>
 #include <getopt.h>
 #include <jansson.h>
+#include "vector_engine.h"
 
 // Cache API from libmydb.so
 extern void* cache_open(const char* dir, size_t max_size);
@@ -25,6 +29,7 @@ extern void cache_close(void* cache);
 extern const char* cache_get(void* cache, const char* key);
 
 static void* g_cache = NULL;
+static vector_engine_t* g_ve = NULL;
 
 static int is_identifier(const char* s) {
     if (!s || !*s) return 0;
@@ -114,9 +119,71 @@ static json_t* do_symbol(const char* name, const char* repo) {
     return arr;
 }
 
-// Context query: symbol + callers + callees + call_sites + dataflow
-static json_t* do_context(const char* name, const char* repo) {
-    json_t* results = json_array();
+// Helper: expand call paths upward (who calls X)
+static void expand_call_paths(const char* name, const char* repo, int depth,
+                               json_t* current_path, json_t* all_paths,
+                               json_t* visited, int max_paths) {
+    if (json_array_size(all_paths) >= (size_t)max_paths) return;
+    
+    json_array_append(current_path, json_string(name));
+    
+    if (depth <= 0) {
+        json_array_append_new(all_paths, json_deep_copy(current_path));
+        json_array_remove(current_path, json_array_size(current_path) - 1);
+        return;
+    }
+    
+    // Check cycle
+    if (json_object_get(visited, name)) {
+        json_array_append_new(all_paths, json_deep_copy(current_path));
+        json_array_remove(current_path, json_array_size(current_path) - 1);
+        return;
+    }
+    json_object_set_new(visited, name, json_true());
+    
+    char key[512];
+    snprintf(key, sizeof(key), "%s/callers/%s", repo, name);
+    const char* cvalue = cache_get(g_cache, key);
+    int has_callers = 0;
+    
+    if (cvalue) {
+        json_error_t error;
+        json_t* data = json_loads(cvalue, 0, &error);
+        if (data) {
+            json_t* arr = json_object_get(data, "callers");
+            if (arr && json_array_size(arr) > 0) {
+                has_callers = 1;
+                size_t idx;
+                json_t* caller;
+                json_array_foreach(arr, idx, caller) {
+                    const char* caller_name = NULL;
+                    if (json_is_string(caller)) {
+                        caller_name = json_string_value(caller);
+                    } else if (json_is_object(caller)) {
+                        caller_name = json_string_value(json_object_get(caller, "name"));
+                    }
+                    if (caller_name) {
+                        expand_call_paths(caller_name, repo, depth - 1,
+                                          current_path, all_paths, visited, max_paths);
+                        if (json_array_size(all_paths) >= (size_t)max_paths) break;
+                    }
+                }
+            }
+            json_decref(data);
+        }
+    }
+    
+    if (!has_callers) {
+        // Leaf node (no callers, e.g., main())
+        json_array_append_new(all_paths, json_deep_copy(current_path));
+    }
+    
+    json_object_del(visited, name);
+    json_array_remove(current_path, json_array_size(current_path) - 1);
+}
+
+// Context query: symbol + callers + callees + call_sites + dataflow + call_paths
+static json_t* do_context(const char* name, const char* repo, int depth) {
     json_t* context = json_object();
     
     // Get symbol
@@ -178,18 +245,28 @@ static json_t* do_context(const char* name, const char* repo) {
         }
     }
     
+    // Expand call paths upward
+    json_t* call_paths = json_array();
+    if (depth > 0) {
+        json_t* current_path = json_array();
+        json_t* visited = json_object();
+        expand_call_paths(name, repo, depth, current_path, call_paths, visited, 50);
+        json_decref(current_path);
+        json_decref(visited);
+    }
+    
     // Build context
     if (symbol) json_object_set_new(context, "symbol", symbol);
     json_object_set_new(context, "callers", callers);
     json_object_set_new(context, "callees", callees);
-    json_object_set_new(context, "call_sites", json_array());  // TODO: implement
+    json_object_set_new(context, "call_paths", call_paths);
     json_object_set_new(context, "dataflow", dataflow);
     
     // Build stats
     json_t* stats = json_object();
     json_object_set_new(stats, "caller_count", json_integer(json_array_size(callers)));
     json_object_set_new(stats, "callee_count", json_integer(json_array_size(callees)));
-    json_object_set_new(stats, "call_site_count", json_integer(0));
+    json_object_set_new(stats, "call_path_count", json_integer(json_array_size(call_paths)));
     json_object_set_new(stats, "dataflow_entries", json_integer(json_array_size(dataflow)));
     
     // Build result
@@ -205,22 +282,70 @@ static json_t* do_context(const char* name, const char* repo) {
     return result;
 }
 
-// Search query (simplified: keyword scan)
-static json_t* do_search(const char* query, const char* repo) {
+// Search query using vector engine (semantic search) with advanced options
+static json_t* do_search(const char* query, const char* repo, 
+                         const vector_search_opts_t* opts, int max_results) {
     json_t* arr = json_array();
-    // TODO: Implement tag/prefix/fuzzy search
-    // For now, return empty array
+    
+    if (!g_ve) {
+        // Vector engine not available - return empty results with a message
+        json_t* obj = json_object();
+        json_object_set_new(obj, "_note", json_string("Vector engine not initialized. Use --analysis-dir to enable semantic search."));
+        json_array_append_new(arr, obj);
+        return arr;
+    }
+    
+    vector_result_t* results = malloc(max_results * sizeof(vector_result_t));
+    if (!results) return arr;
+    
+    int n = vector_engine_search_ex(g_ve, query, max_results, repo, opts, results);
+    
+    for (int i = 0; i < n; i++) {
+        json_t* obj = json_object();
+        json_object_set_new(obj, "name", json_string(results[i].name));
+        json_object_set_new(obj, "file", json_string(results[i].file));
+        json_object_set_new(obj, "line_start", json_integer(results[i].line_start));
+        json_object_set_new(obj, "line_end", json_integer(results[i].line_end));
+        json_object_set_new(obj, "kind", json_string(results[i].kind));
+        json_object_set_new(obj, "language", json_string(results[i].language));
+        json_object_set_new(obj, "signature", json_string(results[i].signature));
+        json_object_set_new(obj, "content", json_string(results[i].content));
+        json_object_set_new(obj, "score", json_real(results[i].score));
+        json_object_set_new(obj, "_source", json_string("vector"));
+        json_array_append_new(arr, obj);
+    }
+    
+    free(results);
     return arr;
+}
+
+static void print_usage(const char* prog) {
+    printf("Usage: %s <query> [OPTIONS]\n", prog);
+    printf("\nQuery types: auto, exact, symbol, context, search\n");
+    printf("\nOptions:\n");
+    printf("  --repo <namespace>       Repository namespace (e.g., /code/nginx)\n");
+    printf("  --type <type>            Query type: exact, symbol, context, search, auto\n");
+    printf("  --cache-dir <dir>        KV Cache directory (default: ./ai_code_memory)\n");
+    printf("  --analysis-dir <dir>     Analysis directory for semantic search (required for search type)\n");
+    printf("  --kind <kind>            Filter by symbol kind: function, struct, macro, typedef\n");
+    printf("  --lang <lang>            Filter by language: c, cpp, python, javascript, go, rust\n");
+    printf("  --file <pattern>        Filter by filename pattern (substring match)\n");
+    printf("  --no-boost              Disable TF-IDF keyword boost and caller count boost\n");
+    printf("  --max-results <n>       Maximum number of results (default: 10)\n");
+    printf("  --model <model>         Model type: jina (default) or mpnet\n");
+    printf("  --depth <n>             Call chain expansion depth for context queries (default: 0)\n");
+    printf("  --pretty, -p            Pretty-print JSON output\n");
+    printf("\nExamples:\n");
+    printf("  %s ngx_palloc --repo /code/nginx --type context\n", prog);
+    printf("  %s ngx_palloc --repo /code/nginx --type context --depth 3\n", prog);
+    printf("  %s \"memory pool\" --repo /code/nginx --type search --analysis-dir ./nginx_cache\n", prog);
+    printf("  %s \"event loop\" --repo /code/nginx --type search --analysis-dir ./nginx_cache --kind function --lang c\n", prog);
+    printf("  %s \"GPU kernel\" --repo /code/project --type search --analysis-dir ./project_cache --file cuda\n", prog);
 }
 
 int main(int argc, char** argv) {
     if (argc < 2) {
-        printf("Usage: %s <query> [--repo <namespace>] [--type <type>] [--cache-dir <dir>]\n", argv[0]);
-        printf("\nQuery types: auto, exact, symbol, context, search\n");
-        printf("\nExamples:\n");
-        printf("  %s ngx_palloc --repo /code/nginx --type context\n", argv[0]);
-        printf("  %s \"memory pool\" --repo /code/nginx --type search\n", argv[0]);
-        printf("  %s /code/nginx/symbols/ngx_palloc --type exact\n", argv[0]);
+        print_usage(argv[0]);
         return 1;
     }
     
@@ -228,7 +353,17 @@ int main(int argc, char** argv) {
     const char* repo = NULL;
     const char* type = "auto";
     const char* cache_dir = "./ai_code_memory";
+    const char* analysis_dir = NULL;
+    const char* model_type = "jina";
     int pretty = 0;
+    int no_boost = 0;
+    int max_results = 10;
+    int call_depth = 0;
+    
+    // Search options
+    vector_search_opts_t opts = {0};
+    opts.use_keyword_boost = 1;
+    opts.use_caller_boost = 1;
     
     // Parse arguments
     for (int i = 2; i < argc; i++) {
@@ -238,9 +373,40 @@ int main(int argc, char** argv) {
             type = argv[++i];
         } else if (strcmp(argv[i], "--cache-dir") == 0 && i + 1 < argc) {
             cache_dir = argv[++i];
+        } else if (strcmp(argv[i], "--analysis-dir") == 0 && i + 1 < argc) {
+            analysis_dir = argv[++i];
+        } else if (strcmp(argv[i], "--kind") == 0 && i + 1 < argc) {
+            opts.kind_filter = argv[++i];
+        } else if (strcmp(argv[i], "--lang") == 0 && i + 1 < argc) {
+            opts.lang_filter = argv[++i];
+        } else if (strcmp(argv[i], "--file") == 0 && i + 1 < argc) {
+            opts.file_filter = argv[++i];
+        } else if (strcmp(argv[i], "--model") == 0 && i + 1 < argc) {
+            model_type = argv[++i];
+        } else if (strcmp(argv[i], "--max-results") == 0 && i + 1 < argc) {
+            max_results = atoi(argv[++i]);
+            if (max_results <= 0) max_results = 10;
+            if (max_results > 100) max_results = 100;
+        } else if (strcmp(argv[i], "--depth") == 0 && i + 1 < argc) {
+            call_depth = atoi(argv[++i]);
+            if (call_depth < 0) call_depth = 0;
+            if (call_depth > 5) call_depth = 5;
+        } else if (strcmp(argv[i], "--no-boost") == 0) {
+            no_boost = 1;
         } else if (strcmp(argv[i], "--pretty") == 0 || strcmp(argv[i], "-p") == 0) {
             pretty = 1;
+        } else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
+            print_usage(argv[0]);
+            return 0;
+        } else {
+            fprintf(stderr, "[WARN] Unknown option: %s\n", argv[i]);
         }
+    }
+    
+    // Disable boosts if requested
+    if (no_boost) {
+        opts.use_keyword_boost = 0;
+        opts.use_caller_boost = 0;
     }
     
     // Auto-detect type
@@ -253,6 +419,14 @@ int main(int argc, char** argv) {
     if (!g_cache) {
         fprintf(stderr, "[ERROR] Failed to open cache: %s\n", cache_dir);
         return 1;
+    }
+    
+    // Initialize vector engine for semantic search
+    if (analysis_dir) {
+        g_ve = vector_engine_open(analysis_dir, model_type);
+        if (!g_ve) {
+            fprintf(stderr, "[WARN] Failed to open vector engine: %s\n", vector_engine_error());
+        }
     }
     
     // Build response
@@ -275,7 +449,7 @@ int main(int argc, char** argv) {
         json_object_set_new(response, "context", json_object());
         json_object_set_new(response, "stats", json_object());
     } else if (strcmp(type, "context") == 0) {
-        json_t* result = do_context(query, repo);
+        json_t* result = do_context(query, repo, call_depth);
         json_t* results = json_object_get(result, "results");
         json_t* ctx = json_object_get(result, "context");
         json_t* stats = json_object_get(result, "stats");
@@ -284,7 +458,8 @@ int main(int argc, char** argv) {
         if (stats) json_object_set(response, "stats", stats);
         json_decref(result);
     } else {
-        json_t* results = do_search(query, repo);
+        // Search type: use vector engine with advanced options
+        json_t* results = do_search(query, repo, &opts, max_results);
         json_object_set_new(response, "results", results);
         json_object_set_new(response, "context", json_object());
         json_object_set_new(response, "stats", json_object());
@@ -305,6 +480,7 @@ int main(int argc, char** argv) {
     }
     
     json_decref(response);
+    if (g_ve) vector_engine_close(g_ve);
     cache_close(g_cache);
     return 0;
 }

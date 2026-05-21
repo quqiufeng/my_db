@@ -6,6 +6,8 @@
 #include <stdint.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <unistd.h>
+#include <sys/wait.h>
 #include "onnx_embedder.h"
 
 #define DIM 768
@@ -236,6 +238,23 @@ int main(int argc, char** argv) {
     save_vectors(bin_file, idx_file, items, vectors, count);
     printf("Saved vectors to %s\n", bin_file);
     printf("Saved index to %s\n", idx_file);
+
+    // Fork background process to build HNSW index
+    printf("Starting HNSW index build in background...\n");
+    pid_t pid = fork();
+    if (pid == 0) {
+        // Child process: build HNSW index
+        // Try relative path from current directory
+        execl("./tools/build_hnsw_index", "build_hnsw_index", bin_file, (char*)NULL);
+        // Fallback: try absolute path (if running from repo root)
+        execlp("tools/build_hnsw_index", "build_hnsw_index", bin_file, (char*)NULL);
+        fprintf(stderr, "[HNSW] Failed to start index builder\n");
+        _exit(1);
+    } else if (pid > 0) {
+        printf("HNSW index build started in background (PID: %d)\n", (int)pid);
+    } else {
+        fprintf(stderr, "Warning: Failed to fork HNSW builder\n");
+    }
 
     // Cleanup
     onnx_embedder_free(embedder);

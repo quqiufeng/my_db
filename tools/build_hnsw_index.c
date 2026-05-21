@@ -1,20 +1,34 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
+#include <unistd.h>
+#include <sys/wait.h>
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 #include "cache_hnsw.h"
 
 int main(int argc, char** argv) {
     if (argc < 2) {
         printf("Build HNSW index from vector binary file\n");
-        printf("Usage: %s <vec_file>\n", argv[0]);
+        printf("Usage: %s <vec_file> [--threads N]\n", argv[0]);
         printf("\nExample:\n");
         printf("  %s ./ai_code_memory/vectors/code_local_llama.cpp.jina.bin\n", argv[0]);
+        printf("  %s ./ai_code_memory/vectors/code_local_llama.cpp.jina.bin --threads 4\n", argv[0]);
         return 1;
     }
     
     const char* vec_file = argv[1];
+    int num_threads = 0;  // 0 = use OpenMP default
     
-    // Read vectors
+    for (int i = 2; i < argc; i++) {
+        if (strcmp(argv[i], "--threads") == 0 && i + 1 < argc) {
+            num_threads = atoi(argv[++i]);
+        }
+    }
+    
+    // Read vectors into memory
     FILE* fp = fopen(vec_file, "rb");
     if (!fp) {
         fprintf(stderr, "Failed to open %s\n", vec_file);
@@ -28,46 +42,77 @@ int main(int argc, char** argv) {
         return 1;
     }
     
-    printf("Building HNSW index: %u vectors, %u dims\n", count, dim);
+    printf("Loading %u vectors of dim %u into memory...\n", count, dim);
+    
+    float** vectors = malloc(count * sizeof(float*));
+    if (!vectors) {
+        fprintf(stderr, "Failed to allocate vector pointers\n");
+        fclose(fp);
+        return 1;
+    }
+    
+    for (uint32_t i = 0; i < count; i++) {
+        vectors[i] = malloc(dim * sizeof(float));
+        if (!vectors[i]) {
+            fprintf(stderr, "Failed to allocate vector %u\n", i);
+            for (uint32_t j = 0; j < i; j++) free(vectors[j]);
+            free(vectors);
+            fclose(fp);
+            return 1;
+        }
+        if (fread(vectors[i], sizeof(float), dim, fp) != dim) {
+            fprintf(stderr, "Failed to read vector %u\n", i);
+            for (uint32_t j = 0; j <= i; j++) free(vectors[j]);
+            free(vectors);
+            fclose(fp);
+            return 1;
+        }
+    }
+    fclose(fp);
+    
+    printf("Building HNSW index: %u vectors, %u dims", count, dim);
+    if (num_threads > 0) {
+        printf(" (%d threads)\n", num_threads);
+    } else {
+        printf(" (auto threads)\n");
+    }
     
     hnsw_index_t* hnsw = hnsw_create(dim);
     if (!hnsw) {
         fprintf(stderr, "Failed to create HNSW index\n");
-        fclose(fp);
+        for (uint32_t i = 0; i < count; i++) free(vectors[i]);
+        free(vectors);
         return 1;
     }
     
-    // Configure for code search (smaller M for faster build, larger ef for accuracy)
+    // Configure for code search
     hnsw_set_m(hnsw, 16);
     hnsw_set_ef_construction(hnsw, 200);
     hnsw_set_ef_search(hnsw, 64);
     
-    float* vec = malloc(dim * sizeof(float));
-    if (!vec) {
-        fprintf(stderr, "Failed to allocate vector buffer\n");
+    // Pre-allocate capacity for all nodes
+    if (hnsw_reserve(hnsw, count + 64) != 0) {
+        fprintf(stderr, "Failed to reserve capacity\n");
         hnsw_destroy(hnsw);
-        fclose(fp);
+        for (uint32_t i = 0; i < count; i++) free(vectors[i]);
+        free(vectors);
         return 1;
     }
     
     printf("Inserting vectors...\n");
+    
+    #ifdef _OPENMP
+    if (num_threads > 0) {
+        omp_set_num_threads(num_threads);
+    }
+    #pragma omp parallel for schedule(dynamic, 128)
+    #endif
     for (uint32_t i = 0; i < count; i++) {
-        if (fread(vec, sizeof(float), dim, fp) != dim) {
-            fprintf(stderr, "Failed to read vector %u\n", i);
-            break;
-        }
-        
-        if (hnsw_insert(hnsw, i, vec) != 0) {
+        if (hnsw_insert_parallel(hnsw, i, vectors[i]) != 0) {
             fprintf(stderr, "Failed to insert vector %u\n", i);
         }
-        
-        if ((i + 1) % 1000 == 0 || i == count - 1) {
-            printf("  Inserted %u/%u\n", i + 1, count);
-        }
     }
-    
-    free(vec);
-    fclose(fp);
+    printf("  Inserted %u/%u\n", count, count);
     
     printf("Index built: %zu vectors\n", hnsw_count(hnsw));
     printf("Memory usage: %.2f MB\n", hnsw_memory_usage(hnsw) / (1024.0 * 1024.0));
@@ -81,6 +126,8 @@ int main(int argc, char** argv) {
     if (!buf) {
         fprintf(stderr, "Failed to allocate serialize buffer\n");
         hnsw_destroy(hnsw);
+        for (uint32_t i = 0; i < count; i++) free(vectors[i]);
+        free(vectors);
         return 1;
     }
     
@@ -89,6 +136,8 @@ int main(int argc, char** argv) {
         fprintf(stderr, "Failed to serialize index\n");
         free(buf);
         hnsw_destroy(hnsw);
+        for (uint32_t i = 0; i < count; i++) free(vectors[i]);
+        free(vectors);
         return 1;
     }
     
@@ -97,6 +146,8 @@ int main(int argc, char** argv) {
         fprintf(stderr, "Failed to create %s\n", hnsw_file);
         free(buf);
         hnsw_destroy(hnsw);
+        for (uint32_t i = 0; i < count; i++) free(vectors[i]);
+        free(vectors);
         return 1;
     }
     
@@ -107,6 +158,8 @@ int main(int argc, char** argv) {
     
     free(buf);
     hnsw_destroy(hnsw);
+    for (uint32_t i = 0; i < count; i++) free(vectors[i]);
+    free(vectors);
     
     return 0;
 }

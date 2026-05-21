@@ -157,6 +157,21 @@ static int hnsw_random_level(hnsw_index_t* idx) {
     return level;
 }
 
+// Thread-safe random level generation
+static float hnsw_random_ts(unsigned int* state) {
+    *state = *state * 1103515245 + 12345;
+    return (float)(*state & 0x7fffffff) / (float)0x7fffffff;
+}
+
+static int hnsw_random_level_ts(hnsw_index_t* idx, unsigned int* state) {
+    float r = hnsw_random_ts(state);
+    if (r <= 0.0f) r = 1e-10f;
+    int level = (int)(-logf(r) * idx->mL);
+    if (level < 0) level = 0;
+    if (level > HNSW_MAX_LEVEL) level = HNSW_MAX_LEVEL;
+    return level;
+}
+
 // ====== 邻居列表操作 ======
 
 static int neighbor_list_init(neighbor_list_t* list, size_t capacity) {
@@ -355,6 +370,27 @@ void hnsw_set_ef_search(hnsw_index_t* idx, int ef) {
     idx->ef_search = ef;
 }
 
+// ====== 预分配容量（用于并行构建）======
+
+int hnsw_reserve(hnsw_index_t* idx, size_t n) {
+    if (!idx) return CACHE_ERR_INVAL;
+    if (n <= idx->node_capacity) return CACHE_OK;
+    
+    hnsw_node_impl_t* new_nodes = realloc(idx->nodes, sizeof(hnsw_node_impl_t) * n);
+    if (!new_nodes) return CACHE_ERR_NOMEM;
+    memset(&new_nodes[idx->node_capacity], 0, sizeof(hnsw_node_impl_t) * (n - idx->node_capacity));
+    idx->nodes = new_nodes;
+    idx->node_capacity = n;
+    
+    uint32_t* new_epochs = realloc(idx->visited_epochs, sizeof(uint32_t) * n);
+    if (new_epochs) {
+        memset(&new_epochs[idx->node_count], 0, sizeof(uint32_t) * (n - idx->node_count));
+        idx->visited_epochs = new_epochs;
+    }
+    
+    return CACHE_OK;
+}
+
 // ====== 插入 ======
 
 int hnsw_insert(hnsw_index_t* idx, size_t id, const float* vector) {
@@ -504,6 +540,159 @@ int hnsw_insert(hnsw_index_t* idx, size_t id, const float* vector) {
     if (node->level > idx->max_level) {
         idx->max_level = node->level;
         idx->entry_point = node_idx;
+    }
+    
+    return CACHE_OK;
+}
+
+// ====== 并行插入（线程安全，用于批量构建）======
+
+int hnsw_insert_parallel(hnsw_index_t* idx, size_t id, const float* vector) {
+    if (!idx || !vector) return CACHE_ERR_INVAL;
+    
+    // 原子分配 node_idx
+    size_t node_idx = __atomic_fetch_add(&idx->node_count, 1, __ATOMIC_SEQ_CST);
+    if (node_idx >= idx->node_capacity) {
+        // 回滚
+        __atomic_fetch_sub(&idx->node_count, 1, __ATOMIC_SEQ_CST);
+        return CACHE_ERR_NOMEM;
+    }
+    
+    hnsw_node_impl_t* node = &idx->nodes[node_idx];
+    node->id = id;
+    node->vector = malloc(sizeof(float) * idx->dim);
+    if (!node->vector) {
+        node->valid = 0;
+        return CACHE_ERR_NOMEM;
+    }
+    memcpy(node->vector, vector, sizeof(float) * idx->dim);
+    
+    // 线程安全随机数：用 id 作为 seed
+    unsigned int rng_state = (unsigned int)(id + 12345);
+    node->level = hnsw_random_level_ts(idx, &rng_state);
+    node->valid = 1;
+    __atomic_fetch_add(&idx->valid_count, 1, __ATOMIC_RELAXED);
+    
+    // 分配邻居列表
+    node->neighbors = calloc(node->level + 1, sizeof(neighbor_list_t));
+    if (!node->neighbors) {
+        free(node->vector);
+        node->vector = NULL;
+        node->valid = 0;
+        return CACHE_ERR_NOMEM;
+    }
+    
+    int M = idx->M;
+    for (int l = 0; l <= node->level; l++) {
+        int cap = (l == 0) ? idx->M_max : M;
+        if (neighbor_list_init(&node->neighbors[l], cap) < 0) {
+            for (int j = 0; j < l; j++) {
+                neighbor_list_destroy(&node->neighbors[j]);
+            }
+            free(node->neighbors);
+            free(node->vector);
+            node->vector = NULL;
+            node->valid = 0;
+            return CACHE_ERR_NOMEM;
+        }
+    }
+    
+    // 第一个节点：设为 entry point
+    int is_first = 0;
+    #pragma omp critical(hnsw_ep)
+    {
+        if (idx->entry_point == (size_t)-1) {
+            idx->entry_point = node_idx;
+            idx->max_level = node->level;
+            is_first = 1;
+        }
+    }
+    if (is_first) return CACHE_OK;
+    
+    // 获取当前 entry point（可能已被其他线程更新）
+    size_t curr_ep;
+    int top_level;
+    #pragma omp critical(hnsw_ep)
+    {
+        curr_ep = idx->entry_point;
+        top_level = idx->max_level;
+    }
+    
+    // 1. 从顶层下降到新节点的层数+1（读操作，无竞争）
+    for (int lc = top_level; lc > node->level; lc--) {
+        curr_ep = hnsw_greedy_search_layer(idx, vector, curr_ep, lc);
+    }
+    
+    // 2. 每层搜索最近邻居并连接
+    for (int lc = (node->level < top_level ? node->level : top_level); lc >= 0; lc--) {
+        size_t* nearest_ids = malloc(sizeof(size_t) * idx->ef_construction);
+        float* nearest_dists = malloc(sizeof(float) * idx->ef_construction);
+        if (!nearest_ids || !nearest_dists) {
+            free(nearest_ids);
+            free(nearest_dists);
+            continue;
+        }
+        
+        int found = hnsw_search_layer_nearest(idx, vector, curr_ep, lc,
+                                               idx->ef_construction, nearest_ids, nearest_dists);
+        
+        int max_neighbors = (lc == 0) ? idx->M_max : M;
+        int selected = 0;
+        
+        for (int i = 0; i < found && selected < max_neighbors; i++) {
+            size_t nid = nearest_ids[i];
+            if (nid == node_idx) continue;
+            
+            // 新节点的邻居列表（只有自己访问，无竞争）
+            neighbor_list_add(&node->neighbors[lc], nid);
+            
+            // 已有邻居的邻居列表修改（需要 critical section）
+            #pragma omp critical(hnsw_conn)
+            {
+                hnsw_node_impl_t* nb_node = &idx->nodes[nid];
+                if (lc <= nb_node->level) {
+                    if (nb_node->neighbors[lc].count >= (size_t)max_neighbors) {
+                        float max_d = 0;
+                        size_t max_i = 0;
+                        for (size_t j = 0; j < nb_node->neighbors[lc].count; j++) {
+                            size_t other = nb_node->neighbors[lc].ids[j];
+                            float d = hnsw_distance(idx, nb_node->vector, idx->nodes[other].vector);
+                            if (d > max_d) {
+                                max_d = d;
+                                max_i = j;
+                            }
+                        }
+                        float d_new = nearest_dists[i];
+                        if (d_new < max_d) {
+                            nb_node->neighbors[lc].ids[max_i] = nb_node->neighbors[lc].ids[--nb_node->neighbors[lc].count];
+                            neighbor_list_add(&nb_node->neighbors[lc], node_idx);
+                        }
+                    } else {
+                        neighbor_list_add(&nb_node->neighbors[lc], node_idx);
+                    }
+                }
+            }
+            
+            selected++;
+        }
+        
+        if (found > 0) {
+            curr_ep = nearest_ids[0];
+        }
+        
+        free(nearest_ids);
+        free(nearest_dists);
+    }
+    
+    // 更新 entry point（如果新节点 level 更高）
+    if (node->level > top_level) {
+        #pragma omp critical(hnsw_ep)
+        {
+            if (node->level > idx->max_level) {
+                idx->max_level = node->level;
+                idx->entry_point = node_idx;
+            }
+        }
     }
     
     return CACHE_OK;
