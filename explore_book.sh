@@ -13,6 +13,7 @@
 #   2. 页面读取：从 KV Cache 获取 md 文件路径，直接读取 Markdown 内容
 #   3. 章节浏览：列出书籍目录结构和章节内容
 #   4. 自动 GPU 环境配置（TensorRT + cuDNN + CUDA）
+#   5. 兼容新旧导入格式（有/无 chapters/ 子目录）
 #
 # 依赖：
 #   - KV Cache 记忆系统（ai_code_memory/）
@@ -36,22 +37,26 @@
 # =============================================================================
 #
 # 1. overview — 书籍概览
-#    查看书籍的基本信息：标题、作者、章节数、页数
+#    查看书籍的基本信息：标题、作者、章节数、总页数
 #    用法：./explore_book.sh /books/my_book overview
-#    适用：第一次接触新书，了解结构
+#    适用：第一次接触新书，快速了解整体结构
 #
 # 2. search "<query>" — 语义搜索（核心功能）
 #    用自然语言搜索书中内容，返回最相关的页面
 #    用法：./explore_book.sh /books/my_book search "consensus algorithm"
-#    适用：快速定位感兴趣的主题，不知道具体章节位置
+#    用法：./explore_book.sh /books/my_book search "SpaceX" --max 10
+#    适用：快速定位感兴趣的主题，无需知道具体章节位置
 #    参数：--max N  返回结果数量（默认5）
-#    输出：每页显示预览、相关度分数、Markdown 文件路径
+#    输出：每页显示 [相关度分数] 页面路径 和可直接执行的 read 命令
+#    注意：搜索结果中的 Read: 提示可以直接复制执行
 #
 # 3. read <page_key> — 读取页面内容
 #    读取指定页面的完整 Markdown 内容
-#    用法：./explore_book.sh /books/my_book read page_0005
-#    用法：./explore_book.sh /books/my_book read chapters/03-Consensus/page_0005
+#    用法（推荐）：./explore_book.sh /books/my_book read chapters/03-Consensus/page_0005
+#    用法（旧格式）：./explore_book.sh /books/my_book read 03-Consensus/page_0005
+#    用法（简写）：./explore_book.sh /books/my_book read page_0005
 #    适用：通过搜索结果定位到具体页面后，阅读完整内容
+#    注意：脚本会自动兼容新旧导入格式（有无 chapters/ 前缀）
 #
 # 4. chapter [name] — 章节浏览
 #    列出所有章节，或查看某个章节的页面列表
@@ -60,9 +65,10 @@
 #    适用：按章节浏览书籍结构
 #
 # 5. toc — 目录结构
-#    显示书籍的完整目录树
+#    显示书籍的完整目录树（章节名 + 页面数 + 示例页面）
 #    用法：./explore_book.sh /books/my_book toc
-#    适用：了解书籍整体组织架构
+#    适用：了解书籍整体组织架构，查找特定章节
+#    注意：支持 Unicode 章节名（中文、特殊符号等）
 #
 # =============================================================================
 # 典型工作流（AI 阅读电子书）
@@ -73,38 +79,39 @@
 #
 # Step 2: 语义搜索感兴趣的主题
 #   ./explore_book.sh /books/ddia search "consensus algorithm"
-#   → 返回相关页面列表，包含预览和 md 文件路径
+#   → 返回相关页面列表，包含预览和可直接执行的 read 命令
 #
-# Step 3: 阅读具体内容
+# Step 3: 阅读具体内容（直接复制搜索结果的 Read: 提示）
 #   ./explore_book.sh /books/ddia read chapters/08-Distributed_Consensus/page_0012
 #   → 输出完整的 Markdown 内容
 #
 # Step 4: 继续搜索或浏览
 #   ./explore_book.sh /books/ddia search "Raft leader election"
+#   ./explore_book.sh /books/ddia toc
 #   ./explore_book.sh /books/ddia chapter "08-Distributed_Consensus"
 #
 # =============================================================================
 # 使用示例
 # =============================================================================
 #
-# 示例 1: 搜索分布式系统相关内容
+# 示例 1: 搜索并直接阅读
 #   ./explore_book.sh /books/ddia search "distributed transaction"
-#   → 返回最相关的 5 个页面，包含文件路径
+#   # 看到结果中的 Read: 提示，直接复制执行：
+#   ./explore_book.sh /books/ddia read chapters/07-Transactions/page_0005
 #
-# 示例 2: 搜索并阅读
-#   ./explore_book.sh /books/ddia search "CAP theorem"
-#   # 看到结果：chapters/09-Consistency/page_0003.md
-#   ./explore_book.sh /books/ddia read chapters/09-Consistency/page_0003
+# 示例 2: 查看目录后按章节阅读
+#   ./explore_book.sh /books/elon_musk toc
+#   ./explore_book.sh /books/elon_musk read chapters/12-SpaceX/page_0000
 #
-# 示例 3: 浏览章节
+# 示例 3: 跨书搜索（不指定 --repo）
+#   ./tools/cache_query "concurrency" --type search --analysis-dir ./ai_code_memory --max-results 10
+#   → 同时在所有已导入书籍中搜索
+#
+# 示例 4: 浏览章节
 #   ./explore_book.sh /books/ddia chapter
 #   → 列出所有章节
 #   ./explore_book.sh /books/ddia chapter "02-Data_Models"
 #   → 显示该章节的所有页面
-#
-# 示例 4: 查看目录
-#   ./explore_book.sh /books/ddia toc
-#   → 树形结构显示书籍目录
 #
 # =============================================================================
 # 注意事项
@@ -115,13 +122,26 @@
 #    strings ai_code_memory/cache.bin | grep "^/books/" | sort -u
 #
 # 2. 搜索依赖向量缓存：
-#    语义搜索需要 import_book 成功生成向量。如果搜索无结果，
-#    可能是向量生成失败（检查 GPU 环境）。
+#    语义搜索需要 import_book 成功生成向量文件（vectors/*.jina.bin.hnsw）。
+#    如果搜索无结果，可能是向量未生成（检查 GPU 环境和 import_book 输出）。
 #
 # 3. 读取路径格式：
-#    read 命令支持两种格式：
-#    - page_0005（自动查找所属章节）
-#    - chapters/03-Consensus/page_0005（完整路径）
+#    read 命令支持多种格式，脚本会自动处理：
+#    - 新格式（推荐）：chapters/03-Consensus/page_0005
+#    - 旧格式：03-Consensus/page_0005
+#    - 简写：page_0005（自动查找所属章节）
+#
+# 4. Unicode 章节名：
+#    中文书籍的章节名可能包含 Unicode 字符（如 U+FFFD 替换字符）。
+#    toc 命令使用 find -print0 处理，不会出错，但显示可能为 "�"。
+#
+# 5. GPU 环境：
+#    脚本自动配置 LD_LIBRARY_PATH 加载 TensorRT 和 cuDNN。
+#    如果看到 "CUDA not available, falling back to CPU"，搜索会变慢但仍可用。
+#
+# 6. 向量文件位置：
+#    向量索引文件位于 ai_code_memory/vectors/books_{name}.jina.bin.hnsw
+#    搜索时 --analysis-dir 指向 ai_code_memory/ 目录
 #
 # =============================================================================
 
@@ -337,10 +357,23 @@ cmd_read() {
         md_file=$(echo "$result" | grep -oP '"md_file":"\K[^"]+' || true)
     fi
     
+    # 兼容旧格式：相对路径转换为绝对路径
+    if [[ "$md_file" == ./* ]]; then
+        md_file="/opt${md_file#.}"
+    fi
+    
     if [[ -z "$md_file" ]]; then
         # 尝试直接构建路径
         local book_name=$(basename "$NAMESPACE")
         md_file="/opt/books/${book_name}/${page_key}.md"
+        # 兼容旧格式：如果没有 chapters/ 子目录，去掉 chapters/ 前缀
+        if [[ ! -f "$md_file" ]] && [[ "$page_key" == chapters/* ]]; then
+            local alt_key="${page_key#chapters/}"
+            local alt_file="/opt/books/${book_name}/${alt_key}.md"
+            if [[ -f "$alt_file" ]]; then
+                md_file="$alt_file"
+            fi
+        fi
     fi
     
     if [[ ! -f "$md_file" ]]; then
@@ -439,15 +472,27 @@ cmd_toc() {
     
     echo "$book_name/"
     
+    # 优先使用 chapters/ 子目录，兼容旧格式（直接在 book_dir 下）
     local chapters_dir="${book_dir}/chapters"
-    if [[ -d "$chapters_dir" ]]; then
-        local chapters=$(ls -1 "$chapters_dir" | sort)
-        local total_chapters=$(echo "$chapters" | wc -l)
+    local search_dir="$chapters_dir"
+    if [[ ! -d "$chapters_dir" ]]; then
+        search_dir="$book_dir"
+    fi
+    
+    if [[ -d "$search_dir" ]]; then
+        # 使用 find -print0 + read -d '' 避免任何换行符问题
+        local ch_dirs=()
+        while IFS= read -r -d '' line; do
+            ch_dirs+=("$line")
+        done < <(find "$search_dir" -maxdepth 1 -mindepth 1 -type d -print0 | sort -z)
+        
+        local total_chapters=${#ch_dirs[@]}
         local idx=0
         
-        echo "$chapters" | while read ch; do
+        for ch_path in "${ch_dirs[@]}"; do
+            local ch=$(basename "$ch_path")
             idx=$((idx + 1))
-            local page_count=$(ls -1 "$chapters_dir/$ch"/page_*.md 2>/dev/null | wc -l)
+            local page_count=$(find "$ch_path" -maxdepth 1 -name "page_*.md" -type f -print0 2>/dev/null | tr -cd '\0' | wc -c)
             
             if [[ $idx -eq $total_chapters ]]; then
                 echo "└── $ch/ ($page_count pages)"
@@ -456,11 +501,15 @@ cmd_toc() {
             fi
             
             # 显示该章节的前几个页面
-            local pages=$(ls -1 "$chapters_dir/$ch"/page_*.md 2>/dev/null | sort | head -3)
-            if [[ -n "$pages" ]]; then
+            local page_files=()
+            while IFS= read -r -d '' line; do
+                page_files+=("$line")
+            done < <(find "$ch_path" -maxdepth 1 -name "page_*.md" -type f -print0 | sort -z | head -z -n 3)
+            
+            local page_total=${#page_files[@]}
+            if [[ $page_total -gt 0 ]]; then
                 local page_idx=0
-                local page_total=$(echo "$pages" | wc -l)
-                echo "$pages" | while read page_file; do
+                for page_file in "${page_files[@]}"; do
                     page_idx=$((page_idx + 1))
                     local page_name=$(basename "$page_file" .md)
                     if [[ $idx -eq $total_chapters ]]; then
@@ -479,10 +528,12 @@ cmd_toc() {
                 done
             fi
         done
+    else
+        echo "No chapters found"
     fi
     
     echo ""
-    log "Total chapters: $(ls -1 "$chapters_dir" 2>/dev/null | wc -l)"
+    log "Total chapters: $(ls -1 "$search_dir" 2>/dev/null | wc -l)"
 }
 
 # =============================================================================

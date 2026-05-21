@@ -109,7 +109,7 @@ static void sanitize_filename(char* dst, size_t dst_size, const char* src) {
         if (c == '/' || c == '\\' || c == ':' || c == '*' || 
             c == '?' || c == '"' || c == '<' || c == '>' || c == '|') {
             dst[j++] = '_';
-        } else if (c == ' ' || c == '\t') {
+        } else if (c == ' ' || c == '\t' || c == '\n' || c == '\r') {
             dst[j++] = '_';
         } else {
             dst[j++] = c;
@@ -129,7 +129,13 @@ static void chapter_dirname(char* dst, size_t dst_size, int idx, const char* tit
     sanitize_filename(safe_title, sizeof(safe_title), title);
     
     if (strlen(safe_title) > 60) {
-        safe_title[60] = '\0';
+        // 确保不在多字节 UTF-8 字符中间截断
+        int cut_pos = 60;
+        // 如果截断位置是 UTF-8 续字节 (0x80-0xBF)，向前找到字符起始字节
+        while (cut_pos > 0 && ((unsigned char)safe_title[cut_pos] >= 0x80 && (unsigned char)safe_title[cut_pos] < 0xC0)) {
+            cut_pos--;
+        }
+        safe_title[cut_pos] = '\0';
     }
     
     snprintf(dst, dst_size, "%02d-%s", idx + 1, safe_title);
