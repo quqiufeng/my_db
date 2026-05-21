@@ -1066,15 +1066,20 @@ users = _lib.db_table_register(db, "users", ffi.sizeof("user_t"), fields, 5)
 #### JOIN 查询示例
 
 ```lua
--- employees × departments (department_id = dept_id)
+-- employees × departments (department_id = dept_id, INT32 = 4 bytes)
 local result = _lib.db_join_json(
-    employees,  ffi.offsetof("employee_t", "department_id"),
+    employees,   ffi.offsetof("employee_t", "department_id"),
     departments, ffi.offsetof("department_t", "dept_id"),
-    ffi.sizeof("employee_t", "department_id")
+    4  -- field size: sizeof(int)
 )
 print(ffi.string(result))
 _lib.db_json_free(result)
 ```
+
+**注意**：LuaJIT FFI 不支持 `ffi.sizeof("type", "field")`，字段大小需手动指定：
+- `INT32` / `FLOAT`: 4 bytes
+- `INT64` / `UINT64` / `DOUBLE`: 8 bytes
+- `STRING[N]`: N bytes
 
 #### 与 mydb.lua 高级封装的对比
 
