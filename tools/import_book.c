@@ -494,7 +494,7 @@ static int import_book(cache_t* cache, const char* namespace,
             size_t chapter_len = text_len;
             
             if (chapter_count > 1 && chapters[i].title && strlen(chapters[i].title) > 0) {
-                // 查找章节标题在文本中的位置
+                // 策略1: 尝试完整标题匹配
                 const char* best_pos = NULL;
                 size_t best_len = 0;
                 const char* search = text;
@@ -503,7 +503,6 @@ static int import_book(cache_t* cache, const char* namespace,
                     const char* found = strstr(search, chapters[i].title);
                     if (!found) break;
                     
-                    // 计算该位置后的文本长度
                     size_t body_len = text_len - (found - text);
                     if (i < chapter_count - 1) {
                         const char* next_title = strstr(found + 1, chapters[i+1].title);
@@ -512,13 +511,71 @@ static int import_book(cache_t* cache, const char* namespace,
                         }
                     }
                     
-                    // 选择正文最长的匹配（跳过目录中的短匹配）
                     if (body_len > best_len) {
                         best_len = body_len;
                         best_pos = found;
                     }
                     
                     search = found + 1;
+                }
+                
+                // 策略2: 如果完整标题匹配失败，尝试提取章节号匹配（如"第一章"）
+                if (!best_pos) {
+                    char chapter_prefix[64] = {0};
+                    const char* p = chapters[i].title;
+                    // 提取"第X章"前缀
+                    while (*p && (*p == ' ' || *p == '\t')) p++;
+                    if (strncmp(p, "第", 3) == 0 || strncmp(p, "推荐序", 9) == 0 ||
+                        strncmp(p, "附录", 6) == 0 || strncmp(p, "后记", 6) == 0) {
+                        // 找到前缀结束位置（第一个空格或字符串结束）
+                        const char* end = p;
+                        while (*end && *end != ' ' && *end != '\t') end++;
+                        size_t prefix_len = end - p;
+                        if (prefix_len < sizeof(chapter_prefix)) {
+                            memcpy(chapter_prefix, p, prefix_len);
+                            chapter_prefix[prefix_len] = '\0';
+                        }
+                    }
+                    
+                    if (chapter_prefix[0]) {
+                        search = text;
+                        while (search < text + text_len) {
+                            const char* found = strstr(search, chapter_prefix);
+                            if (!found) break;
+                            
+                            size_t body_len = text_len - (found - text);
+                            if (i < chapter_count - 1) {
+                                // 获取下一章的前缀
+                                char next_prefix[64] = {0};
+                                const char* np = chapters[i+1].title;
+                                while (*np && (*np == ' ' || *np == '\t')) np++;
+                                if (strncmp(np, "第", 3) == 0 || strncmp(np, "推荐序", 9) == 0 ||
+                                    strncmp(np, "附录", 6) == 0 || strncmp(np, "后记", 6) == 0) {
+                                    const char* end = np;
+                                    while (*end && *end != ' ' && *end != '\t') end++;
+                                    size_t prefix_len = end - np;
+                                    if (prefix_len < sizeof(next_prefix)) {
+                                        memcpy(next_prefix, np, prefix_len);
+                                        next_prefix[prefix_len] = '\0';
+                                    }
+                                }
+                                
+                                if (next_prefix[0]) {
+                                    const char* next_found = strstr(found + strlen(chapter_prefix), next_prefix);
+                                    if (next_found) {
+                                        body_len = next_found - found;
+                                    }
+                                }
+                            }
+                            
+                            if (body_len > best_len) {
+                                best_len = body_len;
+                                best_pos = found;
+                            }
+                            
+                            search = found + 1;
+                        }
+                    }
                 }
                 
                 if (best_pos) {
@@ -845,6 +902,8 @@ int main(int argc, char* argv[]) {
         int (*mobi_extract_text)(void*, char**, size_t*) = dlsym(lib, "mobi_extract_text");
         int (*mobi_get_metadata)(void*, char*, size_t, char*, size_t) = dlsym(lib, "mobi_get_metadata");
         int (*mobi_get_chapters)(void*, void**, int*) = dlsym(lib, "mobi_get_chapters");
+        int (*mobi_get_chapter_text)(void*, int, char**, size_t*) = dlsym(lib, "mobi_get_chapter_text");
+        void (*mobi_free_chapter_text)(char*) = dlsym(lib, "mobi_free_chapter_text");
         void (*mobi_close)(void*) = dlsym(lib, "mobi_close");
         
         if (!mobi_open || !mobi_extract_text || !mobi_close) {
@@ -879,23 +938,49 @@ int main(int argc, char* argv[]) {
             mobi_get_chapters(handle, (void**)&chapters, &chapter_count);
         }
         
+        printf("Title: %s\n", title);
+        printf("Author: %s\n", author);
+        printf("Chapters: %d\n", chapter_count);
+        printf("\n");
+        
+        // 创建书籍输出目录
+        mkdir_p(md_dir);
+        
+        // 存储书籍元数据
+        char key[1024];
+        char value[4096];
+        snprintf(key, sizeof(key), "%s/_meta", namespace);
+        snprintf(value, sizeof(value),
+                 "{\"type\":\"book\",\"title\":\"%s\",\"author\":\"%s\",\"chapters\":%d}",
+                 title, author, chapter_count);
+        cache_set(cache, key, value, 0);
+        
+        printf("Importing book: %s by %s\n", title, author);
+        printf("Output directory: %s\n", md_dir);
+        printf("Namespace: %s\n", namespace);
+        printf("Chapters: %d\n", chapter_count);
+        printf("\n");
+        
         char* text = NULL;
         size_t text_len = 0;
         if (mobi_extract_text) {
             mobi_extract_text(handle, &text, &text_len);
         }
         
-        printf("Title: %s\n", title);
-        printf("Author: %s\n", author);
         printf("Text length: %zu bytes\n", text_len);
-        printf("Chapters: %d\n", chapter_count);
-        printf("\n");
         
         if (text && text_len > 0) {
             total_pages = import_book(cache, namespace, md_dir,
                                       title, author, text, text_len,
                                       chapters, chapter_count);
         }
+        
+        // 更新元数据中的总页数
+        snprintf(key, sizeof(key), "%s/_meta", namespace);
+        snprintf(value, sizeof(value),
+                 "{\"type\":\"book\",\"title\":\"%s\",\"author\":\"%s\",\"chapters\":%d,\"pages\":%d}",
+                 title, author, chapter_count, total_pages);
+        cache_set(cache, key, value, 0);
         
         mobi_close(handle);
         dlclose(lib);
