@@ -950,6 +950,161 @@ mydb.db_delete(users, rid)
 mydb.db_close(db)
 ```
 
+### 6.3 LuaJIT FFI 示例
+
+> 完整可运行示例位于 `examples/` 目录：
+> - `luajit_crud_example.lua` — CRUD + 事务 + 压缩
+> - `luajit_join_example.lua` — JOIN 关联查询 + 索引
+> - `luajit_dynamic_schema.lua` — 运行时动态 Schema + 零拷贝 reload
+
+#### 运行前置要求
+
+- LuaJIT 2.1+
+- `libmydb.so` 已编译（项目根目录）
+- Linux 系统（示例使用 `RTLD_DEEPBIND` 隔离符号冲突）
+
+#### 零拷贝架构示例
+
+```lua
+local ffi = require("ffi")
+
+-- 1. 加载共享库（RTLD_DEEPBIND 隔离 crc32 符号冲突）
+local RTLD_NOW = 0x00002
+local RTLD_DEEPBIND = 0x00008
+local _lib = ffi.load("./libmydb.so", RTLD_NOW + RTLD_DEEPBIND)
+
+-- 2. 声明 C API（与 include/mydb.h 完全一致）
+ffi.cdef[[
+    typedef struct db_instance* db_t;
+    typedef struct db_table*    table_t;
+    typedef uint64_t            rowid_t;
+    
+    typedef struct {
+        const char* name;
+        size_t      offset;
+        size_t      size;
+        int         type;
+    } db_field_def_t;
+    
+    db_t db_open(const char* db_dir, size_t pool_size);
+    void db_close(db_t db);
+    table_t db_table_register(db_t db, const char* name, size_t row_size,
+                              const db_field_def_t* fields, size_t field_count);
+    rowid_t db_insert(table_t table, const void* row, size_t row_size);
+    const char* db_select_all_json(table_t table);
+    void db_json_free(const char* json);
+]]
+
+-- 3. 定义业务结构体（内存布局与 C 侧完全一致）
+ffi.cdef[[
+    typedef struct {
+        int     id;
+        char    name[32];
+        char    email[64];
+        int     age;
+        double  score;
+    } user_t;
+]]
+
+-- 4. 打开数据库
+local db = _lib.db_open("/tmp/mydb_example", 10 * 1024 * 1024)
+
+-- 5. 注册 Schema（字段偏移、大小、类型必须与 C struct 一致）
+local fields = ffi.new("db_field_def_t[5]")
+fields[0] = {"id",    ffi.offsetof("user_t", "id"),    4, 0}  -- INT32
+fields[1] = {"name",  ffi.offsetof("user_t", "name"),  32, 5} -- STRING
+fields[2] = {"email", ffi.offsetof("user_t", "email"), 64, 5} -- STRING
+fields[3] = {"age",   ffi.offsetof("user_t", "age"),   4, 0}  -- INT32
+fields[4] = {"score", ffi.offsetof("user_t", "score"), 8, 4}  -- DOUBLE
+
+local users = _lib.db_table_register(db, "users", ffi.sizeof("user_t"), fields, 5)
+
+-- 6. 插入（零拷贝：直接传递 struct 指针）
+local user = ffi.new("user_t")
+user.id = 1; user.age = 25; user.score = 95.5
+ffi.copy(user.name, "Alice", 5); user.name[5] = 0
+ffi.copy(user.email, "alice@example.com", 17); user.email[17] = 0
+
+local rowid = _lib.db_insert(users, user, ffi.sizeof("user_t"))
+
+-- 7. 查询（返回 JSON 字符串）
+local json = _lib.db_select_all_json(users)
+print(ffi.string(json))  -- [{"id":1,"name":"Alice","email":"alice@example.com","age":25,"score":95.5}]
+_lib.db_json_free(json)
+
+_lib.db_close(db)
+```
+
+#### 动态 Schema 与零拷贝 Reload
+
+LuaJIT FFI 的核心优势是**运行时动态定义 C struct**：
+
+```lua
+-- 运行时定义 Schema（无需重新编译 C 库）
+ffi.cdef[[
+    typedef struct {
+        int    order_id;
+        int    customer_id;
+        char   product[64];
+        int    quantity;
+        double unit_price;
+        char   status[16];
+    } order_t;
+]]
+
+-- 插入后关闭，数据通过 mmap 刷盘
+_lib.db_sync(db)
+_lib.db_close(db)
+
+-- 重新打开：mmap 重新映射文件，数据立即可用（零拷贝 reload）
+db = _lib.db_open("/tmp/mydb_example", 10 * 1024 * 1024)
+-- Schema 需在 Lua 侧重新定义，但数据结构本身不变
+users = _lib.db_table_register(db, "users", ffi.sizeof("user_t"), fields, 5)
+-- 数据已在内存中，无需反序列化
+```
+
+#### JOIN 查询示例
+
+```lua
+-- employees × departments (department_id = dept_id)
+local result = _lib.db_join_json(
+    employees,  ffi.offsetof("employee_t", "department_id"),
+    departments, ffi.offsetof("department_t", "dept_id"),
+    ffi.sizeof("employee_t", "department_id")
+)
+print(ffi.string(result))
+_lib.db_json_free(result)
+```
+
+#### 与 mydb.lua 高级封装的对比
+
+| 特性 | 底层 FFI (示例代码) | mydb.lua 高级封装 |
+|------|-------------------|-------------------|
+| **Schema 定义** | 手动 C struct + field_def | Lua table 自动转换 |
+| **插入性能** | 零拷贝（直接 struct 指针） | 零拷贝（内部同样直接指针） |
+| **查询结果** | JSON 字符串，手动解析 | JSON 字符串，内置解析 |
+| **代码量** | 较冗长 | 较简洁 |
+| **灵活性** | 完全控制内存布局 | 封装层可能限制 |
+| **动态 Schema** | 运行时 `ffi.cdef()` | 预定义 Schema 表 |
+
+**零拷贝架构链路：**
+
+```
+LuaJIT FFI struct → db_insert() → C mmap pool → disk (msync)
+                                        |
+                                        ↓
+                               关闭后重新打开
+                                        |
+                                        ↓
+disk → mmap() → C mmap pool → ffi.new() 指向同一内存
+```
+
+- `ffi.new("struct_t")` 创建的 struct 位于 LuaJIT GC 内存
+- `db_insert()` 接受 `void*` 指针，复制到 mmap 内存池（一次 memcpy）
+- 查询返回 JSON，由 C 库序列化（查询结果有序列化开销，插入没有）
+- 持久化通过 `mmap` + `msync` 实现，磁盘和内存共享同一页
+- 重新打开时，`mmap` 重新映射文件，数据立即可用
+
 ## 7. 关键设计决策
 
 | 决策项 | 原设计 | 实际实现 | 变更理由 |
