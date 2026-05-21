@@ -213,6 +213,9 @@ static int ensure_dir(const char* path) {
 cache_t* cache_open(const char* db_dir, size_t max_memory) {
     if (!db_dir) return NULL;
     
+    struct timespec t_start, t_now;
+    clock_gettime(CLOCK_MONOTONIC, &t_start);
+    
     // 确保目录存在
     if (ensure_dir(db_dir) < 0) return NULL;
     
@@ -233,6 +236,9 @@ cache_t* cache_open(const char* db_dir, size_t max_memory) {
         free(cache);
         return NULL;
     }
+    
+    clock_gettime(CLOCK_MONOTONIC, &t_now);
+    long pool_ms = (t_now.tv_sec - t_start.tv_sec) * 1000 + (t_now.tv_nsec - t_start.tv_nsec) / 1000000;
     
     // 检查是否是新文件（pool 头大小为 16）
     bool is_new = (pool_used == 16);
@@ -279,11 +285,23 @@ cache_t* cache_open(const char* db_dir, size_t max_memory) {
 
     if (!is_new) {
         // 已有文件：尝试加载持久化索引（零拷贝）
+        clock_gettime(CLOCK_MONOTONIC, &t_now);
+        long init_ms = (t_now.tv_sec - t_start.tv_sec) * 1000 + (t_now.tv_nsec - t_start.tv_nsec) / 1000000;
+        
         int index_loaded = (cache_index_load(cache) == 0);
+        clock_gettime(CLOCK_MONOTONIC, &t_now);
+        long load_ms = (t_now.tv_sec - t_start.tv_sec) * 1000 + (t_now.tv_nsec - t_start.tv_nsec) / 1000000 - init_ms;
+        
         if (index_loaded) {
             printf("[CACHE] Loaded persisted indexes, skipping rebuild\n");
-            // 即使加载了持久化索引，向量索引仍需从 value 中重建
-            cache_vector_index_rebuild(cache);
+            // 如果持久化索引中已包含 vector_index 数据，跳过耗时重建
+            if (cache->vector_index.count == 0) {
+                cache_vector_index_rebuild(cache);
+            }
+            clock_gettime(CLOCK_MONOTONIC, &t_now);
+            long rebuild_ms = (t_now.tv_sec - t_start.tv_sec) * 1000 + (t_now.tv_nsec - t_start.tv_nsec) / 1000000 - init_ms - load_ms;
+            printf("[CACHE] Timing: pool=%ldms, init=%ldms, index_load=%ldms, vector_rebuild=%ldms\n",
+                   pool_ms, init_ms - pool_ms, load_ms, rebuild_ms);
         } else {
             // 加载失败，回退到扫描重建
             printf("[CACHE] No persisted index found, rebuilding...\n");
