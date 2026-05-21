@@ -24,14 +24,44 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 IMPORT_BOOK="${SCRIPT_DIR}/tools/import_book"
 
 # =============================================================================
-# GPU 环境设置（参考 ai_code_search.sh，包含项目根目录）
+# GPU 环境设置（兼容本地和远程服务器）
 # =============================================================================
-export LD_LIBRARY_PATH="/home/dministrator/my_db:\
-    /opt/TensorRT-10/lib:\
-    /home/dministrator/anaconda3/envs/dl/lib:\
-    /home/dministrator/anaconda3/envs/dl/lib/python3.10/site-packages/tensorrt_libs:\
-    /home/dministrator/anaconda3/envs/dl/lib/python3.10/site-packages/nvidia/cudnn/lib:\
-    ${LD_LIBRARY_PATH:-}"
+# 动态构建 LD_LIBRARY_PATH：如果目录存在则加入
+GPU_LIBS=""
+
+# 项目目录（脚本所在位置）
+GPU_LIBS="${GPU_LIBS}:${SCRIPT_DIR}"
+
+# TensorRT
+if [ -d "/opt/TensorRT-10/lib" ]; then
+    GPU_LIBS="${GPU_LIBS}:/opt/TensorRT-10/lib"
+fi
+
+# cuDNN
+if [ -d "/opt/cudnn-linux-x86_64-8.9.7.29_cuda12/lib" ]; then
+    GPU_LIBS="${GPU_LIBS}:/opt/cudnn-linux-x86_64-8.9.7.29_cuda12/lib"
+fi
+
+# CUDA
+if [ -d "/opt/cuda/lib64" ]; then
+    GPU_LIBS="${GPU_LIBS}:/opt/cuda/lib64"
+fi
+
+# 本地 anaconda 环境（向后兼容）
+if [ -d "/home/dministrator/anaconda3/envs/dl/lib" ]; then
+    GPU_LIBS="${GPU_LIBS}:/home/dministrator/anaconda3/envs/dl/lib"
+fi
+if [ -d "/home/dministrator/anaconda3/envs/dl/lib/python3.10/site-packages/tensorrt_libs" ]; then
+    GPU_LIBS="${GPU_LIBS}:/home/dministrator/anaconda3/envs/dl/lib/python3.10/site-packages/tensorrt_libs"
+fi
+if [ -d "/home/dministrator/anaconda3/envs/dl/lib/python3.10/site-packages/nvidia/cudnn/lib" ]; then
+    GPU_LIBS="${GPU_LIBS}:/home/dministrator/anaconda3/envs/dl/lib/python3.10/site-packages/nvidia/cudnn/lib"
+fi
+
+# 去除开头的冒号
+GPU_LIBS="${GPU_LIBS#:}"
+
+export LD_LIBRARY_PATH="${GPU_LIBS}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
 
 # =============================================================================
 # 颜色输出

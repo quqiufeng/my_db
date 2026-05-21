@@ -153,10 +153,17 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # 工具路径
 CACHE_QUERY="${SCRIPT_DIR}/tools/cache_query"
 
-# GPU 环境（语义搜索需要）
-# GPU 库路径（TensorRT + cuDNN + CUDA）
-# 注意：根据实际环境调整以下路径
-export LD_LIBRARY_PATH="/home/dministrator/anaconda3/envs/dl/lib:/home/dministrator/anaconda3/envs/dl/lib/python3.10/site-packages/tensorrt_libs:/home/dministrator/anaconda3/envs/dl/lib/python3.10/site-packages/nvidia/cudnn/lib:${LD_LIBRARY_PATH:-}"
+# GPU 环境（兼容本地和远程）
+GPU_LIBS=""
+[ -d "${SCRIPT_DIR}" ] && GPU_LIBS="${GPU_LIBS}:${SCRIPT_DIR}"
+[ -d "/opt/TensorRT-10/lib" ] && GPU_LIBS="${GPU_LIBS}:/opt/TensorRT-10/lib"
+[ -d "/opt/cudnn-linux-x86_64-8.9.7.29_cuda12/lib" ] && GPU_LIBS="${GPU_LIBS}:/opt/cudnn-linux-x86_64-8.9.7.29_cuda12/lib"
+[ -d "/opt/cuda/lib64" ] && GPU_LIBS="${GPU_LIBS}:/opt/cuda/lib64"
+[ -d "/home/dministrator/anaconda3/envs/dl/lib" ] && GPU_LIBS="${GPU_LIBS}:/home/dministrator/anaconda3/envs/dl/lib"
+[ -d "/home/dministrator/anaconda3/envs/dl/lib/python3.10/site-packages/tensorrt_libs" ] && GPU_LIBS="${GPU_LIBS}:/home/dministrator/anaconda3/envs/dl/lib/python3.10/site-packages/tensorrt_libs"
+[ -d "/home/dministrator/anaconda3/envs/dl/lib/python3.10/site-packages/nvidia/cudnn/lib" ] && GPU_LIBS="${GPU_LIBS}:/home/dministrator/anaconda3/envs/dl/lib/python3.10/site-packages/nvidia/cudnn/lib"
+GPU_LIBS="${GPU_LIBS#:}"
+export LD_LIBRARY_PATH="${GPU_LIBS}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
 
 # 颜色输出
 RED='\033[0;31m'

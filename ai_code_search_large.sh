@@ -191,7 +191,16 @@ set -euo pipefail
 # ============================================
 # 环境变量
 # ============================================
-export LD_LIBRARY_PATH="/home/dministrator/my_db:/opt/TensorRT-10/lib:/home/dministrator/anaconda3/envs/dl/lib:${LD_LIBRARY_PATH:-}"
+# 动态 GPU 环境（兼容本地和远程）
+GPU_LIBS=""
+[ -d "/home/dministrator/my_db" ] && GPU_LIBS="${GPU_LIBS}:/home/dministrator/my_db"
+[ -d "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" ] && GPU_LIBS="${GPU_LIBS}:$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+[ -d "/opt/TensorRT-10/lib" ] && GPU_LIBS="${GPU_LIBS}:/opt/TensorRT-10/lib"
+[ -d "/opt/cudnn-linux-x86_64-8.9.7.29_cuda12/lib" ] && GPU_LIBS="${GPU_LIBS}:/opt/cudnn-linux-x86_64-8.9.7.29_cuda12/lib"
+[ -d "/opt/cuda/lib64" ] && GPU_LIBS="${GPU_LIBS}:/opt/cuda/lib64"
+[ -d "/home/dministrator/anaconda3/envs/dl/lib" ] && GPU_LIBS="${GPU_LIBS}:/home/dministrator/anaconda3/envs/dl/lib"
+GPU_LIBS="${GPU_LIBS#:}"
+export LD_LIBRARY_PATH="${GPU_LIBS}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LARGE_CONFIG="${SCRIPT_DIR}/.large_project_config"
