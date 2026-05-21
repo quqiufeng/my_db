@@ -1,14 +1,14 @@
 # E-book Parser Wrappers Makefile
-# 编译 libmobi + mupdf 的 C++ Wrapper 为 .so 共享库
+# 编译 libmobi + mupdf + epub 的 C++ Wrapper 为 .so 共享库
 
 # 配置
 OUTPUT_DIR = ../libs
 LIBMOBI_SRC = /opt/libmobi
 MUPDF_SRC = /opt/mupdf
 
-.PHONY: all mobi pdf clean
+.PHONY: all mobi pdf epub clean
 
-all: mobi pdf
+all: mobi pdf epub
 
 # === libmobi wrapper ===
 mobi:
@@ -36,7 +36,19 @@ pdf:
 	  -o $(OUTPUT_DIR)/libpdfparse.so
 	@echo "完成: $(OUTPUT_DIR)/libpdfparse.so"
 
+# === epub wrapper (libzip + libxml2) ===
+epub:
+	@echo "编译 EPUB wrapper..."
+	mkdir -p $(OUTPUT_DIR)
+	g++ -shared -fPIC -std=c++17 \
+	  epub_wrapper.cpp \
+	  -I/usr/include/libxml2 -lzip -lxml2 -lz \
+	  -o $(OUTPUT_DIR)/libepubparse.so \
+	  -lpthread -ldl
+	@echo "完成: $(OUTPUT_DIR)/libepubparse.so"
+
 clean:
 	rm -f $(OUTPUT_DIR)/libmobiparse.so
 	rm -f $(OUTPUT_DIR)/libpdfparse.so
+	rm -f $(OUTPUT_DIR)/libepubparse.so
 	@echo "已清理"

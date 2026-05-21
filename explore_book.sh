@@ -247,7 +247,7 @@ cmd_search() {
     
     # 从命名空间提取书籍名
     local book_name=$(basename "$NAMESPACE")
-    local cache_dir="./books/${book_name}"
+    local cache_dir="/opt/books/${book_name}"
     
     if [[ ! -d "$cache_dir" ]]; then
         warn "Book directory not found: $cache_dir"
@@ -331,7 +331,7 @@ cmd_read() {
     if [[ -z "$md_file" ]]; then
         # 尝试直接构建路径
         local book_name=$(basename "$NAMESPACE")
-        md_file="./books/${book_name}/${page_key}.md"
+        md_file="/opt/books/${book_name}/${page_key}.md"
     fi
     
     if [[ ! -f "$md_file" ]]; then
@@ -377,7 +377,7 @@ if results:
         
         # 扫描目录结构
         local book_name=$(basename "$NAMESPACE")
-        local chapters_dir="./books/${book_name}/chapters"
+        local chapters_dir="/opt/books/${book_name}/chapters"
         
         if [[ -d "$chapters_dir" ]]; then
             echo "章节列表："
@@ -394,7 +394,7 @@ if results:
         echo ""
         
         local book_name=$(basename "$NAMESPACE")
-        local chapter_dir="./books/${book_name}/chapters/${chapter_name}"
+        local chapter_dir="/opt/books/${book_name}/chapters/${chapter_name}"
         
         if [[ ! -d "$chapter_dir" ]]; then
             error "Chapter not found: $chapter_dir"
@@ -421,7 +421,7 @@ cmd_toc() {
     echo ""
     
     local book_name=$(basename "$NAMESPACE")
-    local book_dir="./books/${book_name}"
+    local book_dir="/opt/books/${book_name}"
     
     if [[ ! -d "$book_dir" ]]; then
         error "Book directory not found: $book_dir"

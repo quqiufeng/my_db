@@ -6,7 +6,9 @@
 
 **🚀 KV Cache 系统（Agent 记忆存储）**: [kvCache.md](kvCache.md) - 专为 AI Agent 设计的层级化记忆存储，支持前缀/范围/正则搜索
 
-## 四大入口脚本（根据场景选择）
+## 六大入口脚本（根据场景选择）
+
+### 代码分析
 
 | 脚本 | 定位 | 数据存储 | 适用场景 | 核心能力 |
 |------|------|---------|---------|---------|
@@ -15,11 +17,19 @@
 | **`analyze_repo.sh`** | **记忆系统版**一键导入 | **KV Cache** (`ai_code_memory/`) | 需要 AI Agent 自动集成、跨项目关联 | 6步流水线全自动：源码→索引→向量→调用图→数据流→记忆存储 |
 | **`explore_repo.sh`** | **记忆系统版**AI 探索 | **KV Cache** (`ai_code_memory/`) | AI Agent 程序化查询、深度架构分析 | 符号查询、语义搜索、子系统探索、跨项目对比 |
 
+### 电子书/知识库
+
+| 脚本 | 定位 | 数据存储 | 适用场景 | 核心能力 |
+|------|------|---------|---------|---------|
+| **`import_book.sh`** | **电子书导入** | **KV Cache** + Markdown 文件 | 将 EPUB/MOBI/PDF 导入记忆系统 | 自动解析章节、生成语义向量、持久化存储 |
+| **`explore_book.sh`** | **电子书探索** | **KV Cache** (`ai_code_memory/`) | AI Agent 阅读、搜索电子书内容 | 语义搜索、章节浏览、页面阅读、目录查看 |
+
 ### 如何选择？
 
 - **只想人工探索代码** → `ai_code_search.sh`（磁盘版，简单直接）
 - **分析 Linux 内核等超大项目** → `ai_code_search_large.sh`（分治策略）
-- **想让 AI Agent 记住并查询** → `analyze_repo.sh`（导入记忆系统）+ `explore_repo.sh`（AI 查询接口）
+- **想让 AI Agent 记住并查询代码** → `analyze_repo.sh`（导入记忆系统）+ `explore_repo.sh`（AI 查询接口）
+- **想让 AI Agent 阅读电子书/知识库** → `import_book.sh`（导入电子书）+ `explore_book.sh`（AI 阅读接口）
 
 ### 磁盘版 vs 记忆系统版对比
 
@@ -62,6 +72,21 @@
 ./explore_repo.sh /code/local/redis symbol zmalloc --depth 2   # 深度调用链分析
 ./explore_repo.sh /code/local/redis explore "memory allocation" # 子系统探索
 ./explore_repo.sh /code/local/redis compare /code/nginx "memory pool"  # 跨项目对比
+```
+
+**电子书/知识库 — AI 阅读：**
+```bash
+# 导入电子书（支持 EPUB/MOBI/AZW3/PDF）
+./import_book.sh ./ai_code_memory ~/book.epub /books/ddia
+
+# 语义搜索书中内容
+./explore_book.sh /books/ddia search "consensus algorithm"
+
+# 阅读具体页面
+./explore_book.sh /books/ddia read chapters/08-Distributed_Consensus/page_0012
+
+# 查看目录结构
+./explore_book.sh /books/ddia toc
 ```
 
 **大项目分治策略（Linux 内核实测）**:

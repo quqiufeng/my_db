@@ -4,7 +4,7 @@
  * 功能：将 MOBI/PDF/AZW3 电子书导入 KV Cache 记忆系统
  * 
  * 架构设计：
- *   1. 电子书内容保存为 Markdown 文件到磁盘（./books/{name}/chapters/.../page_{idx}.md）
+ *   1. 电子书内容保存为 Markdown 文件到磁盘（/opt/books/{name}/chapters/.../page_{idx}.md）
  *   2. KV Cache 只存储元数据 + md 文件路径 + 预览 + 向量
  *   3. AI 通过 KV Cache 定位到 md 文件路径，然后读取完整内容
  * 
@@ -547,25 +547,36 @@ static void* load_pdf_lib(void) {
     return lib;
 }
 
+static void* load_epub_lib(void) {
+    void* lib = dlopen("src/importer/libs/libepubparse.so", RTLD_LAZY);
+    if (!lib) {
+        fprintf(stderr, "Failed to load libepubparse.so: %s\n", dlerror());
+        return NULL;
+    }
+    return lib;
+}
+
 // =============================================================================
 // 主函数
 // =============================================================================
 
 int main(int argc, char* argv[]) {
     if (argc < 3) {
-        printf("Usage: %s <cache_dir> <book_file> [namespace]\n", argv[0]);
+        printf("Usage: %s <cache_dir> <book_file> [namespace] [output_dir]\n", argv[0]);
         printf("\n");
         printf("Arguments:\n");
         printf("  cache_dir   KV Cache 目录 (如 ./ai_code_memory)\n");
-        printf("  book_file   电子书文件 (.mobi, .azw, .azw3, .pdf)\n");
+        printf("  book_file   电子书文件 (.mobi, .azw, .azw3, .pdf, .epub)\n");
         printf("  namespace   命名空间 (可选，默认从文件名生成)\n");
+        printf("  output_dir  Markdown 输出目录 (可选，默认 /opt/books)\n");
         printf("\n");
         printf("Examples:\n");
         printf("  %s ./ai_code_memory ~/book.mobi /books/my_book\n", argv[0]);
         printf("  %s ./ai_code_memory ~/paper.pdf\n", argv[0]);
+        printf("  %s ./ai_code_memory ~/paper.pdf /books/paper /data/books\n", argv[0]);
         printf("\n");
         printf("Output structure:\n");
-        printf("  ./books/{book_name}/\n");
+        printf("  /opt/books/{book_name}/\n");
         printf("    ├── _meta.json\n");
         printf("    └── chapters/\n");
         printf("        └── 01-Chapter_Title/\n");
@@ -575,7 +586,22 @@ int main(int argc, char* argv[]) {
     
     const char* cache_dir = argv[1];
     const char* book_path = argv[2];
-    const char* ns = argc > 3 ? argv[3] : NULL;
+    const char* ns = NULL;
+    const char* output_dir = "/opt/books";
+    
+    // 智能解析可选参数
+    if (argc > 3) {
+        if (argv[3][0] == '/') {
+            // 以 / 开头，视为 namespace
+            ns = argv[3];
+            if (argc > 4) {
+                output_dir = argv[4];
+            }
+        } else {
+            // 不以 / 开头，视为 output_dir
+            output_dir = argv[3];
+        }
+    }
     
     // 确定文件类型
     size_t path_len = strlen(book_path);
@@ -637,7 +663,7 @@ int main(int argc, char* argv[]) {
     
     // 创建 Markdown 输出目录
     char md_dir[1024];
-    snprintf(md_dir, sizeof(md_dir), "./books/%s", book_name);
+    snprintf(md_dir, sizeof(md_dir), "%s/%s", output_dir, book_name);
     mkdir_p(md_dir);
     
     printf("Importing: %s\n", book_path);
@@ -775,9 +801,75 @@ int main(int argc, char* argv[]) {
         pdf_close(handle);
         dlclose(lib);
         
+    } else if (strcasecmp(ext, ".epub") == 0) {
+        void* lib = load_epub_lib();
+        if (!lib) {
+            cache_close(cache);
+            return 1;
+        }
+        
+        void* (*epub_open)(const char*) = dlsym(lib, "epub_open");
+        int (*epub_extract_text)(void*, char**, size_t*) = dlsym(lib, "epub_extract_text");
+        int (*epub_get_metadata)(void*, char*, size_t, char*, size_t) = dlsym(lib, "epub_get_metadata");
+        int (*epub_get_chapters)(void*, void**, int*) = dlsym(lib, "epub_get_chapters");
+        void (*epub_close)(void*) = dlsym(lib, "epub_close");
+        
+        if (!epub_open || !epub_extract_text || !epub_close) {
+            fprintf(stderr, "Missing required EPUB functions\n");
+            dlclose(lib);
+            cache_close(cache);
+            return 1;
+        }
+        
+        void* handle = epub_open(book_path);
+        if (!handle) {
+            fprintf(stderr, "Failed to open EPUB: %s\n", book_path);
+            dlclose(lib);
+            cache_close(cache);
+            return 1;
+        }
+        
+        char title[512] = {0}, author[512] = {0};
+        if (epub_get_metadata) {
+            epub_get_metadata(handle, title, sizeof(title), author, sizeof(author));
+        }
+        if (strlen(title) == 0) {
+            strncpy(title, book_name, sizeof(title) - 1);
+        }
+        if (strlen(author) == 0) {
+            strcpy(author, "Unknown");
+        }
+        
+        ChapterInfo* chapters = NULL;
+        int chapter_count = 0;
+        if (epub_get_chapters) {
+            epub_get_chapters(handle, (void**)&chapters, &chapter_count);
+        }
+        
+        char* text = NULL;
+        size_t text_len = 0;
+        if (epub_extract_text) {
+            epub_extract_text(handle, &text, &text_len);
+        }
+        
+        printf("Title: %s\n", title);
+        printf("Author: %s\n", author);
+        printf("Text length: %zu bytes\n", text_len);
+        printf("Chapters: %d\n", chapter_count);
+        printf("\n");
+        
+        if (text && text_len > 0) {
+            total_pages = import_book(cache, namespace, md_dir,
+                                      title, author, text, text_len,
+                                      chapters, chapter_count);
+        }
+        
+        epub_close(handle);
+        dlclose(lib);
+        
     } else {
         fprintf(stderr, "Unsupported format: %s\n", ext);
-        fprintf(stderr, "Supported: .mobi, .azw, .azw3, .pdf\n");
+        fprintf(stderr, "Supported: .mobi, .azw, .azw3, .pdf, .epub\n");
         cache_close(cache);
         return 1;
     }
