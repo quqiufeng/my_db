@@ -1,5 +1,7 @@
 # tokenizers-cpp 集成指南
 
+> [← 返回项目总览](README.md)
+
 ## 概述
 
 本项目使用 **tokenizers-cpp**（HuggingFace 官方 C++ tokenizer 绑定）替代手写 BPE tokenizer，实现 CodeBERT 等模型的纯 C 推理。
