@@ -44,6 +44,9 @@
 - ✅ 源码语义分析：C/C++/Python/JS/Java/Go/Rust AST 提取
 - ✅ 向量相似度搜索：float 数组 + 余弦相似度
 - ✅ TCP 远程操作层：文本协议服务器（PING/SET/GET/DEL/SEARCH）
+- ✅ HTTP RESTful API 服务器
+- ✅ 电子书语义搜索系统（EPUB/MOBI/AZW3/PDF）
+- ✅ 代码探索记忆系统（代码索引 + 语义搜索 + 调用图 + 数据流）
 - 但核心永远是单机嵌入，网络层只是包装
 
 ### 1.2 市场空白分析
@@ -276,8 +279,9 @@ typedef struct {
 
 ### 4.2 刷盘策略
 
-- **每条事务后立即 `fsync`**：最安全，性能略低
-- **批量 `fsync`**（可配置）：每 N 条或每 T 毫秒 fsync 一次
+- **每次写操作后自动 `fsync`**：`db_insert`/`db_update`/`db_delete` 在写入 WAL 后自动调用 `wal_fsync()`，确保数据不丢失
+- **显式 `db_sync()`**：强制同步所有表数据和 WAL
+- **后台刷盘线程**：暂未实现（当前为同步刷盘）
 
 ### 4.3 清理策略
 
@@ -963,10 +967,12 @@ mydb.db_close(db)
 | **JOIN 算法** | 纯嵌套循环 O(L×R) | **Hash Join** + 嵌套循环 fallback | 自动检测右表索引，性能提升 orders of magnitude |
 | **内存分配** | Bump Allocator（只增不减） | Bump Allocator + **Free List** | 顺序分配 + 空闲复用 |
 | **并发** | **无锁，用户自行保证** | 同上 | 类似 Redis，简单快速第一 |
-| **查询优化** | 简单规则匹配 | 同上 | 复合索引优先 → 单列索引 → 全表扫描 |
+| **查询优化** | 简单规则匹配 | **HASH + BTREE 索引** | HASH 等值查询 + BTREE 等值查询，范围查询回退全表扫描 |
 | **字符串类型** | 仅 `DB_TYPE_STRING`（定长） | 定长 `STRING` + **变长 `VARSTRING`** | 支持任意长度文本，独立 `.strings` 文件 |
 | **变长字段** | offset 指向池中（手动管理） | **自动 string_pool**（独立 mmap） | 透明管理，零拷贝 |
 | **结构体对齐** | `__attribute__((packed))` 或自然对齐 | 自然对齐 | FFI 两侧必须一致 |
+| **事务** | BEGIN/COMMIT/ROLLBACK 骨架 | **完整实现** | BEGIN 记录 WAL 偏移；ROLLBACK 截断 WAL + 重载数据文件 + 重建索引 |
+| **索引恢复** | 仅恢复索引定义 | **定义 + 数据完全恢复** | 打开表时扫描所有行重建索引数据 |
 
 ## 8. 目录结构
 
@@ -1094,6 +1100,57 @@ db_select_by_pk(table, id, &u, sizeof(u));  // 拷贝到栈上
 - 默认 `max_rows = 10000`，超过返回 `DB_ERR_RESULT_TOO_LARGE`
 - 可配置：`db_config_max_rows(db, 50000)`
 
+### 10.3 WAL 刷盘策略 → 自动 fsync
+
+**问题**：`wal_append()` 写入后不 fsync，只在 `db_sync()` 时才刷盘，系统崩溃可能丢失最近写入
+
+**方案**：
+- `db_insert()` / `db_update()` / `db_delete()` 在 `wal_append()` 后自动调用 `wal_fsync()`
+- 每次写操作都保证 WAL 落盘，数据零丢失
+- 代价：每次写入多一次 fsync，性能略降（嵌入式场景可接受）
+
+### 10.4 Compact 字符串池 → 临时备份
+
+**问题**：`compact_rebuild_string_pool()` 先 `memzero` 整个 string_pool，再从旧 offset 复制数据 → 旧数据已被清空，复制的是零
+
+**方案**：
+- compact 前先用 `malloc` 创建临时缓冲区，备份整个 string_pool
+- `memzero` 后从临时缓冲区复制字符串数据回新 pool
+- 更新所有 `db_string_ref_t.offset` 指向新位置
+
+### 10.5 BTREE 索引未使用 → 完整实现
+
+**问题**：`index_create()` 对数值类型创建 `INDEX_BTREE`，但：
+1. `data_offset` 却调用 `hash_create()`（bug）
+2. `index_insert()` / `index_delete()` 不处理 BTREE
+3. `query_with_index()` 只支持 HASH
+4. 没有 `btree_lookup()` 函数
+
+**方案**：
+1. 修复 `index_create()`：数值类型调用 `btree_create()`
+2. 实现 `btree_lookup()`：B+树等值查找（从根节点递归到叶子）
+3. `index_insert()` / `index_lookup()` 添加 BTREE 分支
+4. `query_with_index()` 同时支持 HASH 和 BTREE 等值查询
+
+### 10.6 事务空壳 → WAL 截断回滚
+
+**问题**：`db_begin()` / `db_commit()` / `db_rollback()` 都是空壳
+
+**方案**：
+- `db_begin()`：记录当前 WAL 文件偏移和各表的 `max_rowid`/`row_count`
+- `db_commit()`：清除事务标志，调用 `db_sync()` 强制刷盘
+- `db_rollback()`：
+  1. 截断 WAL 到事务开始时的偏移
+  2. 关闭并重新打开所有表的数据文件（从磁盘重新加载）
+  3. 恢复 `max_rowid` 和 `row_count`
+  4. 清空 free list，重建所有索引
+
+### 10.7 索引恢复不完整 → 扫描重建
+
+**问题**：`load_index_defs()` 只恢复索引定义（字段名、offset、type），索引数据（hash bucket / btree 节点）是空的
+
+**方案**：`db_table_register()` 最后扫描所有未删除的行，调用 `index_insert()` 重建索引数据
+
 ## 11. 已实现扩展
 
 ### 11.1 KV Cache 高级索引
@@ -1148,5 +1205,8 @@ db_select_by_pk(table, id, &u, sizeof(u));  // 拷贝到栈上
 - [ ] 增量同步：GitHub webhook 自动更新
 - [ ] **自动 WAL 追踪**：`db_get()` 返回的指针被修改后，自动检测并写 WAL
 - [ ] 可选锁模块（表级锁/MVCC，作为插件供需要并发的用户使用）
-- [ ] 事务（BEGIN / COMMIT / ROLLBACK）
+- [x] ~~事务（BEGIN / COMMIT / ROLLBACK）~~ **已实现**
 - [ ] 在线备份（热拷贝 mmap 文件）
+- [ ] 后台异步刷盘线程（当前为同步刷盘）
+- [ ] BTREE 范围查询优化（当前范围查询回退到全表扫描）
+- [ ] ORDER BY 使用 BTREE 索引加速（当前使用 qsort）

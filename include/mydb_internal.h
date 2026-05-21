@@ -111,6 +111,12 @@ typedef struct db_instance {
     size_t          max_rows;
     int             last_error;
     char            error_msg[256];
+    
+    // 事务状态
+    int             in_transaction;     // 是否处于事务中
+    size_t          txn_wal_offset;     // 事务开始时的 WAL 文件偏移
+    uint64_t        txn_max_rowid[MYDB_MAX_TABLES]; // 事务开始时各表的 max_rowid
+    size_t          txn_row_count[MYDB_MAX_TABLES]; // 事务开始时各表的 row_count
 } db_instance_t;
 
 // ====== 工具函数 ======
@@ -156,6 +162,7 @@ int hash_delete(db_pool_t* pool, size_t table_offset, const void* key, size_t ke
 size_t btree_create(db_pool_t* pool, size_t key_size, int key_type);
 void btree_destroy(db_pool_t* pool, size_t tree_offset);
 int btree_insert(db_pool_t* pool, size_t tree_offset, const void* key, rowid_t value);
+rowid_t btree_lookup(db_pool_t* pool, size_t tree_offset, const void* key);
 rowid_t* btree_range(db_pool_t* pool, size_t tree_offset,
                       const void* min_key, const void* max_key, size_t* count);
 
@@ -173,6 +180,7 @@ void db_table_set_compact_threshold(table_t table, float threshold);
 void free_table_indexes(db_table_t* table);
 void free_table_fields(db_table_t* table);
 void free_list_destroy(db_table_t* table);
+void save_table_meta(db_table_t* t);
 
 // ====== JSON 序列化 ======
 char* json_row(db_table_t* table, void* row_ptr);

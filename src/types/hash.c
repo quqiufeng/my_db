@@ -262,12 +262,12 @@ int index_create(db_table_t* table, const char* field_name,
     
     if (field_type == DB_TYPE_STRING || field_type == DB_TYPE_VARSTRING) {
         index->type = INDEX_HASH;
+        index->data_offset = hash_create(&table->index_pool);
     } else {
         index->type = INDEX_BTREE;
+        index->data_offset = btree_create(&table->index_pool, index->field_sizes[0], field_type);
     }
     
-    // 从零拷贝 pool 创建 hash 表
-    index->data_offset = hash_create(&table->index_pool);
     if (!index->data_offset) {
         free(index);
         return -1;
@@ -289,8 +289,9 @@ void index_insert(db_table_t* table, rowid_t rowid, void* row_ptr) {
         if (key) {
             if (index->type == INDEX_HASH) {
                 hash_insert(&table->index_pool, index->data_offset, key, key_len, rowid);
+            } else if (index->type == INDEX_BTREE) {
+                btree_insert(&table->index_pool, index->data_offset, key, rowid);
             }
-            // B+树索引后续实现
             free(key);
         }
         index = index->next;
@@ -309,6 +310,7 @@ void index_delete(db_table_t* table, rowid_t rowid, void* row_ptr) {
             if (index->type == INDEX_HASH) {
                 hash_delete(&table->index_pool, index->data_offset, key, key_len);
             }
+            // BTREE 删除暂不实现（B+树删除较复杂，compact 时会重建）
             free(key);
         }
         index = index->next;
@@ -333,6 +335,8 @@ rowid_t* index_lookup(db_table_t* table, const char* field_name,
             rowid_t rowid = 0;
             if (index->type == INDEX_HASH) {
                 rowid = hash_lookup(&table->index_pool, index->data_offset, value, key_len);
+            } else if (index->type == INDEX_BTREE) {
+                rowid = btree_lookup(&table->index_pool, index->data_offset, value);
             }
             
             if (rowid > 0) {

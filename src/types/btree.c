@@ -240,6 +240,40 @@ static void btree_insert_non_full(db_pool_t* pool, size_t node_off,
     }
 }
 
+// B+树查找（等值查询）
+rowid_t btree_lookup(db_pool_t* pool, size_t tree_offset, const void* key) {
+    if (!pool || !tree_offset || !key) return 0;
+    
+    btree_header_t* hdr = BTREE_HDR(pool, tree_offset);
+    size_t key_size = hdr->key_size;
+    int key_type = hdr->key_type;
+    
+    size_t node_off = hdr->root_offset;
+    btree_node_t* node = BTREE_NODE(pool, node_off);
+    
+    // 从根节点向下查找
+    while (node && !node->is_leaf) {
+        int i = node->num_keys - 1;
+        while (i >= 0 && btree_compare_key(pool, key, node->keys[i], key_size, key_type) < 0) {
+            i--;
+        }
+        i++;
+        node_off = node->children[i];
+        node = BTREE_NODE(pool, node_off);
+    }
+    
+    // 在叶子节点中线性查找
+    if (node && node->is_leaf) {
+        for (int i = 0; i < node->num_keys; i++) {
+            if (btree_compare_key(pool, key, node->keys[i], key_size, key_type) == 0) {
+                return node->values[i];
+            }
+        }
+    }
+    
+    return 0;
+}
+
 rowid_t* btree_range(db_pool_t* pool, size_t tree_offset,
                       const void* min_key, const void* max_key, size_t* count) {
     if (!pool || !tree_offset || !count) return NULL;

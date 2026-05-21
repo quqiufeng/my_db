@@ -96,16 +96,124 @@ void db_config_max_rows(db_t db, size_t max_rows) {
 }
 
 int db_begin(db_t db) {
-    (void)db;
+    if (!db) return DB_ERR_INVAL;
+    db_instance_t* inst = (db_instance_t*)db;
+    
+    if (inst->in_transaction) return DB_ERR_INVAL; // 不支持嵌套事务
+    
+    // 记录事务开始时的状态
+    inst->in_transaction = 1;
+    
+    // 记录 WAL 文件当前大小
+    struct stat st;
+    if (fstat(inst->wal.fd, &st) == 0) {
+        inst->txn_wal_offset = st.st_size;
+    } else {
+        inst->txn_wal_offset = 0;
+    }
+    
+    // 记录各表的 max_rowid 和 row_count
+    for (size_t i = 0; i < inst->table_count; i++) {
+        if (inst->tables[i]) {
+            inst->txn_max_rowid[i] = inst->tables[i]->max_rowid;
+            inst->txn_row_count[i] = inst->tables[i]->row_count;
+        }
+    }
+    
     return DB_OK;
 }
 
 int db_commit(db_t db) {
+    if (!db) return DB_ERR_INVAL;
+    db_instance_t* inst = (db_instance_t*)db;
+    
+    if (!inst->in_transaction) return DB_ERR_INVAL;
+    
+    inst->in_transaction = 0;
+    
+    // 同步所有数据到磁盘
     return db_sync(db);
 }
 
 int db_rollback(db_t db) {
-    (void)db;
+    if (!db) return DB_ERR_INVAL;
+    db_instance_t* inst = (db_instance_t*)db;
+    
+    if (!inst->in_transaction) return DB_ERR_INVAL;
+    
+    // 1. 截断 WAL 到事务开始时的位置
+    if (inst->wal.fd >= 0) {
+        ftruncate(inst->wal.fd, inst->txn_wal_offset);
+        lseek(inst->wal.fd, inst->txn_wal_offset, SEEK_SET);
+    }
+    
+    // 2. 关闭并重新打开所有表的数据文件（从磁盘重新加载）
+    for (size_t i = 0; i < inst->table_count; i++) {
+        db_table_t* t = inst->tables[i];
+        if (!t) continue;
+        
+        char path[MYDB_TABLE_NAME_LEN * 2];
+        
+        // 关闭旧 pool
+        pool_close(&t->data_pool);
+        pool_close(&t->index_pool);
+        pool_close(&t->string_pool);
+        
+        // 重新打开（从磁盘加载）
+        build_path(path, sizeof(path), inst->db_dir, t->name, ".bin");
+        pool_init(&t->data_pool, path, 1024 * 1024);
+        
+        build_path(path, sizeof(path), inst->db_dir, t->name, ".index");
+        pool_init(&t->index_pool, path, 1024 * 1024);
+        
+        build_path(path, sizeof(path), inst->db_dir, t->name, ".strings");
+        pool_init(&t->string_pool, path, 1024 * 1024);
+        
+        // 恢复 max_rowid 和 row_count
+        t->max_rowid = inst->txn_max_rowid[i];
+        t->row_count = inst->txn_row_count[i];
+        t->deleted_count = 0;
+        
+        // 清空 free list
+        if (t->free_list) {
+            free(t->free_list);
+            t->free_list = NULL;
+        }
+        t->free_count = 0;
+        t->free_capacity = 0;
+        
+        // 重建索引
+        if (t->indexes) {
+            // 重置索引数据
+            db_index_t* idx = t->indexes;
+            while (idx) {
+                if (idx->type == INDEX_HASH) {
+                    hash_destroy(&t->index_pool, idx->data_offset);
+                    idx->data_offset = hash_create(&t->index_pool);
+                } else if (idx->type == INDEX_BTREE) {
+                    btree_destroy(&t->index_pool, idx->data_offset);
+                    idx->data_offset = btree_create(&t->index_pool, idx->field_sizes[0], idx->field_types[0]);
+                }
+                idx = idx->next;
+            }
+            
+            // 从数据重新插入索引
+            for (rowid_t id = 1; id <= t->max_rowid; id++) {
+                size_t offset = id * t->row_stride;
+                row_header_t* header = (row_header_t*)PTR(t->data_pool.base, offset);
+                if (!(header->flags & MYDB_DELETED_FLAG)) {
+                    void* row_ptr = (char*)header + sizeof(row_header_t);
+                    index_insert(t, id, row_ptr);
+                }
+            }
+        }
+        
+        // 保存元数据
+        save_table_meta(t);
+    }
+    
+    inst->in_transaction = 0;
+    
     return DB_OK;
 }
 

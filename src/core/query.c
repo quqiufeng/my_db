@@ -62,21 +62,27 @@ static rowid_t* query_with_index(db_table_t* table, db_index_t* index,
     if (!table || !index || !cond || !count) return NULL;
     *count = 0;
     
-    if (index->type == INDEX_HASH && cond->op == 0) {
-        // 哈希索引只支持等值查询
+    if (cond->op == 0) {
+        // 等值查询：支持 HASH 和 BTREE 索引
         size_t key_len = 0;
         void* key = build_index_key(index, cond, 1, &key_len);
         if (!key) return NULL;
         
-        if (index->field_types[0] == DB_TYPE_STRING && index->field_count == 1) {
-            key_len = strlen((char*)cond->value);
-        } else if (index->field_types[0] == DB_TYPE_VARSTRING && index->field_count == 1) {
-            key_len = strlen(*(char**)cond->value);
-        } else if (index->field_count == 1) {
-            key_len = sizeof(uint64_t);
+        rowid_t rowid = 0;
+        
+        if (index->type == INDEX_HASH) {
+            if (index->field_types[0] == DB_TYPE_STRING && index->field_count == 1) {
+                key_len = strlen((char*)cond->value);
+            } else if (index->field_types[0] == DB_TYPE_VARSTRING && index->field_count == 1) {
+                key_len = strlen(*(char**)cond->value);
+            } else if (index->field_count == 1) {
+                key_len = sizeof(uint64_t);
+            }
+            rowid = hash_lookup(&table->index_pool, index->data_offset, key, key_len);
+        } else if (index->type == INDEX_BTREE) {
+            rowid = btree_lookup(&table->index_pool, index->data_offset, key);
         }
         
-        rowid_t rowid = hash_lookup(&table->index_pool, index->data_offset, key, key_len);
         free(key);
         
         if (rowid > 0) {
@@ -87,6 +93,9 @@ static rowid_t* query_with_index(db_table_t* table, db_index_t* index,
             }
             return result;
         }
+    } else if (index->type == INDEX_BTREE && (cond->op == 1 || cond->op == 2)) {
+        // 范围查询：BTREE 索引支持大于/小于
+        // TODO: 实现 btree_range 查询优化
     }
     
     return NULL;

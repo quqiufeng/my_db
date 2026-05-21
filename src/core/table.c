@@ -121,7 +121,7 @@ static void load_index_defs(db_table_t* t) {
 
 #define TABLE_META_OFFSET 16
 
-static void save_table_meta(db_table_t* t) {
+void save_table_meta(db_table_t* t) {
     if (!t || !t->data_pool.base) return;
     uint8_t* p = (uint8_t*)t->data_pool.base + TABLE_META_OFFSET;
     *(size_t*)(p + 0) = t->row_count;
@@ -282,6 +282,20 @@ table_t db_table_register(db_t db, const char* name, size_t row_size,
         save_table_meta(table);
     }
     
+    // 重建索引数据（从已有行数据恢复索引）
+    // 注意：load_index_defs 只恢复了索引定义，索引数据是空的
+    // 需要扫描所有未删除的行，重新插入到索引中
+    if (table->max_rowid > 0 && table->indexes) {
+        for (rowid_t id = 1; id <= table->max_rowid; id++) {
+            size_t offset = id * table->row_stride;
+            row_header_t* header = (row_header_t*)PTR(table->data_pool.base, offset);
+            if (!(header->flags & MYDB_DELETED_FLAG)) {
+                void* row_ptr = (char*)header + sizeof(row_header_t);
+                index_insert(table, id, row_ptr);
+            }
+        }
+    }
+    
     return table;
 }
 
@@ -390,10 +404,17 @@ static void compact_reset_indexes(db_table_t* t) {
 static void compact_rebuild_string_pool(db_table_t* t) {
     if (!t->string_pool.base) return;
     
+    // 备份旧字符串池数据到临时缓冲区（避免 memzero 后无法读取）
+    char* temp_pool = (char*)malloc(t->string_pool.size);
+    if (!temp_pool) return;
+    memcpy(temp_pool, t->string_pool.base, t->string_pool.size);
+    
+    // 重置 string_pool
     memset((char*)t->string_pool.base + 16, 0, t->string_pool.size - 16);
     t->string_pool.used = 16;
     *(size_t*)((char*)t->string_pool.base + 8) = 16;
     
+    // 从临时缓冲区复制字符串到新 pool
     for (rowid_t id = 1; id <= t->max_rowid; id++) {
         size_t offset = id * t->row_stride;
         row_header_t* header = (row_header_t*)PTR(t->data_pool.base, offset);
@@ -406,17 +427,19 @@ static void compact_rebuild_string_pool(db_table_t* t) {
             db_field_def_t* f = &t->fields[i];
             if (f->type == DB_TYPE_VARSTRING) {
                 db_string_ref_t* ref = (db_string_ref_t*)(dst + f->offset);
-                if (ref->length > 0) {
+                if (ref->length > 0 && ref->offset > 0) {
                     void* str_ptr = pool_alloc(&t->string_pool, ref->length + 1);
                     if (str_ptr) {
                         size_t old_offset = ref->offset;
                         ref->offset = (size_t)((char*)str_ptr - (char*)t->string_pool.base);
-                        memcpy(str_ptr, (char*)t->string_pool.base + old_offset, ref->length + 1);
+                        memcpy(str_ptr, temp_pool + old_offset, ref->length + 1);
                     }
                 }
             }
         }
     }
+    
+    free(temp_pool);
 }
 
 static void compact_rebuild_all_indexes(db_table_t* t) {
@@ -568,6 +591,7 @@ rowid_t db_insert(table_t table, const void* row, size_t row_size) {
     // 写 WAL
     if (t->db) {
         wal_append(&t->db->wal, 1, t->name, row_ptr, row_size, id);
+        wal_fsync(&t->db->wal);  // 确保 WAL 落盘，防止数据丢失
     }
     
     return id;
@@ -640,6 +664,7 @@ int db_update(table_t table, rowid_t id, const void* row, size_t row_size) {
     // 写 WAL
     if (t->db) {
         wal_append(&t->db->wal, 2, t->name, old_row, t->row_size, id);
+        wal_fsync(&t->db->wal);  // 确保 WAL 落盘，防止数据丢失
     }
     
     return DB_OK;
@@ -663,6 +688,7 @@ int db_delete(table_t table, rowid_t id) {
     // 写 WAL
     if (t->db) {
         wal_append(&t->db->wal, 3, t->name, NULL, 0, id);
+        wal_fsync(&t->db->wal);  // 确保 WAL 落盘，防止数据丢失
     }
     
     header->flags |= MYDB_DELETED_FLAG;
