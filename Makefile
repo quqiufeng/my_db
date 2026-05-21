@@ -22,7 +22,8 @@ else
     ONNX_LIB = .
 endif
 
-ONNX_LDFLAGS = -L$(ONNX_LIB) -lonnxruntime_gpu -Wl,-rpath,$(ONNX_LIB)
+# 同时搜索项目目录和标准路径（兼容本地和远程）
+ONNX_LDFLAGS = -L. -L$(ONNX_LIB) -lonnxruntime_gpu -Wl,-rpath,'$$ORIGIN' -Wl,-rpath,$(ONNX_LIB)
 
 SRC_DIR = src
 OBJ_DIR = obj
