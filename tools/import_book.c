@@ -47,8 +47,10 @@
 
 // 分块配置
 #define MAX_PARAGRAPHS      5000    // 单章节最大段落数
-#define MIN_PARA_LEN        20      // 最小段落长度
+#define MIN_PARA_LEN        50      // 最小段落长度（过滤碎片）
 #define TARGET_CHUNK_SIZE   800     // 目标段落长度（字符）
+#define MAX_CHUNK_SIZE      3000    // 最大段落长度（超过则强制切分）
+#define MERGE_THRESHOLD     300     // 短页合并阈值（小于此值尝试合并）
 #define PREVIEW_LEN         200     // KV Cache 中保存的预览长度
 
 // 章节信息结构（与 wrapper 兼容）
@@ -191,28 +193,97 @@ static int is_noise(const char* text) {
 // =============================================================================
 
 /*
- * 将文本分割为语义段落
+ * 检测是否是句子结束边界（多格式支持）
+ * 支持：英文 . ! ? + 空格，中文 。！？；：
+ */
+static int is_sentence_boundary(const char* p, const char* end) {
+    if (p >= end) return 0;
+    
+    // 英文标点 + 空白
+    if ((*p == '.' || *p == '!' || *p == '?') && p + 1 < end) {
+        char next = p[1];
+        if (next == ' ' || next == '\n' || next == '\r' || next == '"' || next == '\'') {
+            return 1;
+        }
+    }
+    
+    // 中文标点（UTF-8）
+    if ((unsigned char)*p == 0xe3 && p + 2 < end) {
+        unsigned char c2 = (unsigned char)p[1];
+        unsigned char c3 = (unsigned char)p[2];
+        if (c2 == 0x80) {
+            // 。 ！ ？ ； ：
+            if (c3 == 0x82 || c3 == 0x81 || c3 == 0x9c || c3 == 0x83 || c3 == 0x9a) {
+                return 1;
+            }
+        }
+    }
+    
+    // 换行符（某些格式用单行换行分隔段落）
+    if (*p == '\n' && p + 1 < end && p[1] == '\n') {
+        return 1;
+    }
+    
+    return 0;
+}
+
+/*
+ * 在指定范围内寻找最佳切分点（优先语义边界，fallback到空白处）
+ */
+static const char* find_best_cut(const char* start, const char* end, size_t target) {
+    const char* p = start + target;
+    if (p >= end) return end;
+    
+    // 向前搜索语义边界（最多回退 target/3）
+    const char* best = p;
+    size_t max_backtrack = target / 3;
+    if (max_backtrack > 300) max_backtrack = 300;
+    
+    for (size_t i = 0; i < max_backtrack && p > start; i++, p--) {
+        if (is_sentence_boundary(p, end)) {
+            best = p + 1;
+            break;
+        }
+    }
+    
+    // 如果没找到语义边界，在空白处切分
+    if (best == start + target) {
+        p = start + target;
+        for (size_t i = 0; i < max_backtrack && p > start; i++, p--) {
+            if (*p == ' ' || *p == '\n') {
+                best = p + 1;
+                break;
+            }
+        }
+    }
+    
+    return best;
+}
+
+/*
+ * 将文本分割为语义段落（通用版本，支持所有电子书格式）
+ * 
  * 策略：
- *   1. 优先按空白行（段落边界）分割
- *   2. 如果段落太长，按句子边界分割
- *   3. 如果段落太短（< MIN_PARA_LEN），合并到下一个
+ *   1. 优先按空白行分割（EPUB/PDF 常见）
+ *   2. 如果段落太少，按句子边界再分割（AZW3/MOBI 中文）
+ *   3. 超长段落按语义边界+固定大小分割
+ *   4. 合并相邻短页，避免碎片
  */
 static int split_paragraphs(const char* text, size_t text_len,
                             char*** out_paragraphs, int* out_count) {
     int capacity = 1000;
     int count = 0;
-    char** paragraphs = malloc(sizeof(char*) * capacity);
-    if (!paragraphs) return -1;
+    char** raw = malloc(sizeof(char*) * capacity);
+    if (!raw) return -1;
     
-    const char* p = text;
     const char* end = text + text_len;
     
+    // ===== 阶段 1: 按空白行分割 =====
+    const char* p = text;
     while (p < end) {
-        // 跳过空白
         while (p < end && (*p == '\n' || *p == '\r' || *p == ' ' || *p == '\t')) p++;
         if (p >= end) break;
         
-        // 找段落结束
         const char* para_end = p;
         int blank_lines = 0;
         
@@ -232,27 +303,159 @@ static int split_paragraphs(const char* text, size_t text_len,
         
         size_t len = para_end - p;
         if (len >= MIN_PARA_LEN) {
-            // 扩展容量
             if (count >= capacity) {
                 capacity *= 2;
-                char** new_p = realloc(paragraphs, sizeof(char*) * capacity);
-                if (!new_p) break;
-                paragraphs = new_p;
+                char** np = realloc(raw, sizeof(char*) * capacity);
+                if (!np) break;
+                raw = np;
             }
-            
-            paragraphs[count] = malloc(len + 1);
-            if (paragraphs[count]) {
-                memcpy(paragraphs[count], p, len);
-                paragraphs[count][len] = '\0';
+            raw[count] = malloc(len + 1);
+            if (raw[count]) {
+                memcpy(raw[count], p, len);
+                raw[count][len] = '\0';
                 count++;
             }
         }
-        
         p = para_end;
         while (p < end && (*p == '\n' || *p == '\r')) p++;
     }
     
-    *out_paragraphs = paragraphs;
+    // ===== 阶段 2: 如果段落太少，按句子边界分割 =====
+    if (count < 5 && text_len > 2000) {
+        for (int i = 0; i < count; i++) free(raw[i]);
+        count = 0;
+        
+        const char* chunk_start = text;
+        const char* q = text;
+        
+        while (q < end) {
+            if (is_sentence_boundary(q, end)) {
+                size_t len = q - chunk_start + 1;
+                if (len >= TARGET_CHUNK_SIZE || (len >= MIN_PARA_LEN && q + 3 >= end)) {
+                    if (count >= capacity) {
+                        capacity *= 2;
+                        char** np = realloc(raw, sizeof(char*) * capacity);
+                        if (!np) break;
+                        raw = np;
+                    }
+                    raw[count] = malloc(len + 1);
+                    if (raw[count]) {
+                        memcpy(raw[count], chunk_start, len);
+                        raw[count][len] = '\0';
+                        count++;
+                    }
+                    chunk_start = q + 1;
+                }
+            }
+            q++;
+        }
+        
+        // 剩余文本
+        size_t len = end - chunk_start;
+        if (len >= MIN_PARA_LEN) {
+            if (count >= capacity) {
+                capacity *= 2;
+                char** np = realloc(raw, sizeof(char*) * capacity);
+                if (!np) goto done;
+                raw = np;
+            }
+            raw[count] = malloc(len + 1);
+            if (raw[count]) {
+                memcpy(raw[count], chunk_start, len);
+                raw[count][len] = '\0';
+                count++;
+            }
+        }
+    }
+    
+    // ===== 阶段 3: 超长段落按语义边界分割 =====
+    int stage3_count = 0;
+    char** stage3 = malloc(sizeof(char*) * capacity * 2);
+    if (!stage3) goto done;
+    
+    for (int i = 0; i < count; i++) {
+        size_t len = strlen(raw[i]);
+        if (len > MAX_CHUNK_SIZE) {
+            const char* fp = raw[i];
+            const char* fend = raw[i] + len;
+            
+            while (fp < fend) {
+                size_t remain = fend - fp;
+                size_t target = (remain > TARGET_CHUNK_SIZE * 2) ? TARGET_CHUNK_SIZE * 2 : remain;
+                const char* cut = find_best_cut(fp, fend, target);
+                size_t chunk = cut - fp;
+                if (chunk == 0) chunk = remain;
+                
+                if (stage3_count >= capacity * 2) {
+                    capacity *= 2;
+                    char** np = realloc(stage3, sizeof(char*) * capacity * 2);
+                    if (!np) break;
+                    stage3 = np;
+                }
+                stage3[stage3_count] = malloc(chunk + 1);
+                if (stage3[stage3_count]) {
+                    memcpy(stage3[stage3_count], fp, chunk);
+                    stage3[stage3_count][chunk] = '\0';
+                    stage3_count++;
+                }
+                fp += chunk;
+            }
+        } else {
+            if (stage3_count >= capacity * 2) {
+                capacity *= 2;
+                char** np = realloc(stage3, sizeof(char*) * capacity * 2);
+                if (!np) break;
+                stage3 = np;
+            }
+            stage3[stage3_count] = strdup(raw[i]);
+            if (stage3[stage3_count]) stage3_count++;
+        }
+    }
+    
+    for (int i = 0; i < count; i++) free(raw[i]);
+    free(raw);
+    
+    // ===== 阶段 4: 合并相邻短页 =====
+    int final_count = 0;
+    char** final = malloc(sizeof(char*) * capacity * 2);
+    if (!final) {
+        *out_paragraphs = stage3;
+        *out_count = stage3_count;
+        return 0;
+    }
+    
+    for (int i = 0; i < stage3_count; i++) {
+        size_t len = strlen(stage3[i]);
+        
+        // 当前页太短，尝试与上一页或下一页合并
+        if (len < MERGE_THRESHOLD && final_count > 0) {
+            size_t prev_len = strlen(final[final_count - 1]);
+            // 如果上一页也不长，合并到上一页
+            if (prev_len < MAX_CHUNK_SIZE - len - 10) {
+                size_t new_len = prev_len + len + 2;
+                char* merged = malloc(new_len + 1);
+                if (merged) {
+                    snprintf(merged, new_len + 1, "%s\n%s", final[final_count - 1], stage3[i]);
+                    free(final[final_count - 1]);
+                    final[final_count - 1] = merged;
+                    free(stage3[i]);
+                    continue;
+                }
+            }
+        }
+        
+        final[final_count] = stage3[i];
+        final_count++;
+    }
+    
+    free(stage3);
+    
+    *out_paragraphs = final;
+    *out_count = final_count;
+    return 0;
+    
+done:
+    *out_paragraphs = raw;
     *out_count = count;
     return 0;
 }
