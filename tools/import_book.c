@@ -27,6 +27,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
 #include <dlfcn.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -386,9 +387,14 @@ static int import_chapter(cache_t* cache, const char* namespace,
         }
         preview_escaped[j] = '\0';
         
-        // 生成向量
+        // 生成向量（确保文本中没有NULL字节）
         float* vector = NULL;
         if (g_embedder) {
+            // 替换段落中的NULL字节为空格，避免tokenizer panic
+            for (size_t k = 0; k < content_len; k++) {
+                if (paragraphs[i][k] == '\0') paragraphs[i][k] = ' ';
+            }
+            
             vector = malloc(sizeof(float) * EMBEDDING_DIM);
             if (vector) {
                 if (onnx_embedder_encode(g_embedder, paragraphs[i], vector) != 0) {
@@ -491,23 +497,71 @@ static int import_book(cache_t* cache, const char* namespace,
                                      title, text, text_len);
     } else {
         // 按章节导入
+        // 过滤深层级小节，避免空章节和重复内容
+        int main_chapter_count = 0;
         for (int i = 0; i < chapter_count; i++) {
+            if (chapters[i].level < 2) main_chapter_count++;
+        }
+        
+        int chapter_idx = 0;
+        for (int i = 0; i < chapter_count; i++) {
+            // 跳过深层级小节（level >= 2）
+            if (chapters[i].level >= 2) {
+                continue;
+            }
+            
+            // 跳过 Part 级别章节（正文通常无标题标记，内容被子章节覆盖）
+            const char* p = chapters[i].title;
+            while (*p && (*p == ' ' || *p == '\t')) p++;
+            if (strncasecmp(p, "Part", 4) == 0 && chapters[i].level == 0) {
+                continue;
+            }
+            
             char ch_dir[256];
-            chapter_dirname(ch_dir, sizeof(ch_dir), i, chapters[i].title);
+            chapter_dirname(ch_dir, sizeof(ch_dir), chapter_idx, chapters[i].title);
+            chapter_idx++;
             
             // 定位章节文本范围
             const char* chapter_text = text;
             size_t chapter_len = text_len;
             
-            if (chapter_count > 1 && chapters[i].title && strlen(chapters[i].title) > 0) {
-                // 策略1: 尝试完整标题匹配
+            if (main_chapter_count > 1 && chapters[i].title && strlen(chapters[i].title) > 0) {
+                // 策略0: 优先使用MOBI wrapper提供的offset信息（最可靠）
+                if (chapters[i].offset > 0 && chapters[i].offset < text_len) {
+                    chapter_text = text + chapters[i].offset;
+                    
+                    // 查找下一个主要章节的offset作为结束位置
+                    size_t next_offset = text_len;
+                    for (int j = i + 1; j < chapter_count; j++) {
+                        if (chapters[j].level < 2 && chapters[j].offset > chapters[i].offset 
+                            && chapters[j].offset < text_len) {
+                            next_offset = chapters[j].offset;
+                            break;
+                        }
+                    }
+                    
+                    chapter_len = next_offset - chapters[i].offset;
+                    
+                    // 验证长度是否合理（至少100字节，不超过全书的30%）
+                    if (chapter_len > 100 && chapter_len < text_len * 3 / 10) {
+                        goto chapter_ready;
+                    }
+                }
+                
+                // 策略1: 行首标题匹配（只在行首匹配，避免目录匹配）
                 const char* best_pos = NULL;
                 size_t best_len = 0;
                 const char* search = text;
+                size_t max_chapter_len = text_len / 3;  // 最大为全书的33%
                 
                 while (search < text + text_len) {
                     const char* found = strstr(search, chapters[i].title);
                     if (!found) break;
+                    
+                    // 检查是否在行首（前面是换行、文本开头或空格）
+                    int is_line_start = (found == text) || 
+                                        (found[-1] == '\n') || (found[-1] == '\r') ||
+                                        (found[-1] == ' ') || (found[-1] == '\t');
                     
                     size_t body_len = text_len - (found - text);
                     if (i < chapter_count - 1) {
@@ -515,6 +569,12 @@ static int import_book(cache_t* cache, const char* namespace,
                         if (next_title) {
                             body_len = next_title - found;
                         }
+                    }
+                    
+                    // 优先使用行首匹配，跳过目录中的非行首匹配
+                    if (!is_line_start && body_len > max_chapter_len) {
+                        search = found + 1;
+                        continue;
                     }
                     
                     if (body_len > best_len) {
@@ -574,6 +634,95 @@ static int import_book(cache_t* cache, const char* namespace,
                                 }
                             }
                             
+                            if (body_len > max_chapter_len) {
+                                search = found + 1;
+                                continue;
+                            }
+                            
+                            if (body_len > best_len) {
+                                best_len = body_len;
+                                best_pos = found;
+                            }
+                            
+                            search = found + 1;
+                        }
+                    }
+                }
+                
+                // 策略3: 英文书章节前缀匹配
+                // MOBI文本中章节标题可能是 "Chapter X: Title" 格式，
+                // 而NCX索引中存储的是 "X. Title" 格式
+                if (!best_pos) {
+                    char chapter_prefix[64] = {0};
+                    const char* p = chapters[i].title;
+                    while (*p && (*p == ' ' || *p == '\t')) p++;
+                    
+                    // 如果标题以数字开头（如 "6. Title"），同时尝试 "Chapter 6" 格式
+                    if (isdigit((unsigned char)*p)) {
+                        // 提取数字
+                        int chapter_num = atoi(p);
+                        if (chapter_num > 0) {
+                            // 尝试 "Chapter X:" 格式（更精确，避免匹配引用中的"Chapter X"）
+                            snprintf(chapter_prefix, sizeof(chapter_prefix), 
+                                     "Chapter %d:", chapter_num);
+                        }
+                    }
+                    // 如果标题已经是 "Chapter X" 格式
+                    else if (strncasecmp(p, "chapter", 7) == 0) {
+                        const char* end = p + 7;
+                        while (*end && (*end == ' ' || isdigit((unsigned char)*end))) end++;
+                        size_t prefix_len = end - p;
+                        if (prefix_len > 7 && prefix_len < sizeof(chapter_prefix)) {
+                            memcpy(chapter_prefix, p, prefix_len);
+                            chapter_prefix[prefix_len] = '\0';
+                        }
+                    }
+                    
+                    if (chapter_prefix[0]) {
+                        search = text;
+                        while (search < text + text_len) {
+                            const char* found = strstr(search, chapter_prefix);
+                            if (!found) break;
+                            
+                            // 检查是否在行首
+                            int is_line_start = (found == text) || 
+                                                (found[-1] == '\n') || (found[-1] == '\r') ||
+                                                (found[-1] == ' ') || (found[-1] == '\t');
+                            
+                            size_t body_len = text_len - (found - text);
+                            if (i < chapter_count - 1) {
+                                char next_prefix[64] = {0};
+                                const char* np = chapters[i+1].title;
+                                while (*np && (*np == ' ' || *np == '\t')) np++;
+                                if (isdigit((unsigned char)*np)) {
+                                    int next_num = atoi(np);
+                                    if (next_num > 0) {
+                                        snprintf(next_prefix, sizeof(next_prefix), 
+                                                 "Chapter %d", next_num);
+                                    }
+                                } else if (strncasecmp(np, "chapter", 7) == 0) {
+                                    const char* end = np + 7;
+                                    while (*end && (*end == ' ' || isdigit((unsigned char)*end))) end++;
+                                    size_t prefix_len = end - np;
+                                    if (prefix_len > 7 && prefix_len < sizeof(next_prefix)) {
+                                        memcpy(next_prefix, np, prefix_len);
+                                        next_prefix[prefix_len] = '\0';
+                                    }
+                                }
+                                
+                                if (next_prefix[0]) {
+                                    const char* next_found = strstr(found + strlen(chapter_prefix), next_prefix);
+                                    if (next_found) {
+                                        body_len = next_found - found;
+                                    }
+                                }
+                            }
+                            
+                            if (!is_line_start && body_len > max_chapter_len) {
+                                search = found + 1;
+                                continue;
+                            }
+                            
                             if (body_len > best_len) {
                                 best_len = body_len;
                                 best_pos = found;
@@ -588,6 +737,15 @@ static int import_book(cache_t* cache, const char* namespace,
                     chapter_text = best_pos;
                     chapter_len = best_len;
                 }
+            }
+            
+            chapter_ready:
+            
+            // 限制单个章节的最大段落数（防止章节切分失败导致超大章节）
+            if (chapter_len > 200000) {
+                fprintf(stderr, "  Warning: Chapter '%s' too long (%zu bytes), truncating to 200KB\n", 
+                        chapters[i].title, chapter_len);
+                chapter_len = 200000;
             }
             
             int pages = import_chapter(cache, namespace, md_dir, ch_dir,
@@ -729,9 +887,19 @@ static int export_vectors(cache_t* cache, const char* cache_dir,
     printf("  Index:  %s\n", idx_file);
     
     // 构建 HNSW 索引（语义搜索必需）
+    struct stat st_hnsw;
+    if (stat("./tools/build_hnsw_index", &st_hnsw) != 0) {
+        printf("  Warning: build_hnsw_index not found. Building...\n");
+        int make_ret = system("make tools/build_hnsw_index >/dev/null 2>&1");
+        if (make_ret != 0) {
+            printf("  Warning: Failed to build HNSW index tool (search may not work)\n");
+            printf("  Fix: run 'make tools/build_hnsw_index' manually\n");
+        }
+    }
+    
     char hnsw_cmd[2048];
     snprintf(hnsw_cmd, sizeof(hnsw_cmd),
-             "./tools/build_hnsw_index %s >/dev/null 2>&1", bin_file);
+             "./tools/build_hnsw_index %s 2>&1", bin_file);
     int hnsw_ret = system(hnsw_cmd);
     if (hnsw_ret == 0) {
         printf("  HNSW index built successfully\n");
@@ -967,18 +1135,68 @@ int main(int argc, char* argv[]) {
         printf("Chapters: %d\n", chapter_count);
         printf("\n");
         
-        char* text = NULL;
-        size_t text_len = 0;
-        if (mobi_extract_text) {
-            mobi_extract_text(handle, &text, &text_len);
+        // MOBI: 尝试使用 mobi_get_chapter_text() 逐章提取（比全文切分更精确）
+        int use_per_chapter = (mobi_get_chapter_text != NULL);
+        int chapter_idx = 0;
+        int imported_chapters = 0;
+        
+        if (use_per_chapter) {
+            for (int i = 0; i < chapter_count; i++) {
+                if (chapters[i].level >= 2) continue;
+                
+                char* chapter_text = NULL;
+                size_t chapter_len = 0;
+                mobi_get_chapter_text(handle, i, &chapter_text, &chapter_len);
+                
+                if (!chapter_text || chapter_len < 100) {
+                    use_per_chapter = 0;
+                    break;
+                }
+                imported_chapters++;
+                if (mobi_free_chapter_text && chapter_text) {
+                    mobi_free_chapter_text(chapter_text);
+                }
+            }
         }
         
-        printf("Text length: %zu bytes\n", text_len);
-        
-        if (text && text_len > 0) {
-            total_pages = import_book(cache, namespace, md_dir,
-                                      title, author, text, text_len,
-                                      chapters, chapter_count);
+        if (use_per_chapter) {
+            printf("Using per-chapter text extraction (%d chapters)\n", imported_chapters);
+            chapter_idx = 0;
+            for (int i = 0; i < chapter_count; i++) {
+                if (chapters[i].level >= 2) continue;
+                
+                char ch_dir[256];
+                chapter_dirname(ch_dir, sizeof(ch_dir), chapter_idx, chapters[i].title);
+                chapter_idx++;
+                
+                char* chapter_text = NULL;
+                size_t chapter_len = 0;
+                mobi_get_chapter_text(handle, i, &chapter_text, &chapter_len);
+                
+                if (chapter_text && chapter_len > 0) {
+                    int pages = import_chapter(cache, namespace, md_dir, ch_dir,
+                                               chapters[i].title, chapter_text, chapter_len);
+                    total_pages += pages;
+                }
+                
+                if (mobi_free_chapter_text && chapter_text) {
+                    mobi_free_chapter_text(chapter_text);
+                }
+            }
+        } else {
+            // Fallback: 提取全文后手动切分（兼容旧格式）
+            printf("Using full-text chapter splitting\n");
+            char* text = NULL;
+            size_t text_len = 0;
+            if (mobi_extract_text) {
+                mobi_extract_text(handle, &text, &text_len);
+            }
+            
+            if (text && text_len > 0) {
+                total_pages = import_book(cache, namespace, md_dir,
+                                          title, author, text, text_len,
+                                          chapters, chapter_count);
+            }
         }
         
         // 更新元数据中的总页数

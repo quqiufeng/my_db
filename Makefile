@@ -4,26 +4,22 @@ LDFLAGS = -shared
 
 
 # ONNX Runtime 路径检测（兼容本地和远程）
-# 优先级：1. 远程标准路径 2. 本地 anaconda 路径
+# 头文件路径（优先标准安装路径）
 ONNX_BASE := $(wildcard /opt/onnxruntime-linux-x64-1.20.1)
-ifeq ($(ONNX_BASE),)
-    ONNX_BASE := $(wildcard /opt/piper-src/build/p/src/piper_phonemize_external/lib/onnxruntime-linux-x64-1.14.1)
-endif
 ifeq ($(ONNX_BASE),)
     ONNX_BASE := $(wildcard /usr/local/onnxruntime)
 endif
-
 ifneq ($(ONNX_BASE),)
     ONNX_CFLAGS = -I$(ONNX_BASE)/include
     ONNX_LIB = $(ONNX_BASE)/lib
 else
-    # 回退：使用项目目录下的库
-    ONNX_CFLAGS =
+    ONNX_CFLAGS = -I./include
     ONNX_LIB = .
 endif
 
-# 同时搜索项目目录和标准路径（兼容本地和远程）
-ONNX_LDFLAGS = -L. -L$(ONNX_LIB) -lonnxruntime_gpu -Wl,-rpath,'$$ORIGIN' -Wl,-rpath,$(ONNX_LIB)
+# 库链接路径：优先项目目录（可能包含更新版本的GPU库），再搜索标准路径
+# RUNPATH 顺序：项目目录优先，避免加载系统旧版本 ONNX Runtime
+ONNX_LDFLAGS = -L. -L$(ONNX_LIB) -lonnxruntime_gpu -Wl,-rpath,'$$ORIGIN/..' -Wl,-rpath,'$$ORIGIN' -Wl,-rpath,$(ONNX_LIB)
 
 SRC_DIR = src
 OBJ_DIR = obj

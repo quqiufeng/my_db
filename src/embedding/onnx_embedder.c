@@ -182,16 +182,6 @@ static int vocab_lookup(vocab_hash_entry_t* hash_table, int hash_size, const cha
 }
 
 // UTF-8 character classification
-// Returns number of bytes for the character, or 0 for ASCII/control
-static int utf8_char_len(const char* p) {
-    unsigned char c = (unsigned char)*p;
-    if (c < 0x80) return 1;
-    if ((c & 0xE0) == 0xC0) return 2;
-    if ((c & 0xF0) == 0xE0) return 3;
-    if ((c & 0xF8) == 0xF0) return 4;
-    return 1; // Invalid UTF-8, treat as single byte
-}
-
 static int is_cjk_utf8(const char* p) {
     unsigned char c = (unsigned char)*p;
     // CJK Unified Ideographs: U+4E00-U+9FFF (UTF-8: E4 B8 80 - E9 BF BF)
@@ -568,19 +558,23 @@ onnx_embedder_t* onnx_embedder_init(const char* model_path, const char* vocab_pa
         return NULL;
     }
     
-    // 尝试添加 TensorRT Execution Provider (RTX 3080)
+    // 尝试添加 TensorRT Execution Provider (RTX 4090D - 24GB VRAM)
     // TensorRT 比 CUDA 更快（通常 2-5x）
     OrtTensorRTProviderOptions trt_options;
     memset(&trt_options, 0, sizeof(trt_options));
     trt_options.device_id = 0;
     trt_options.trt_max_partition_iterations = 1000;
     trt_options.trt_min_subgraph_size = 1;
-    trt_options.trt_max_workspace_size = 6ULL * 1024 * 1024 * 1024;  // 6GB workspace
+    // RTX 4090D 有 24GB 显存，分配更多 workspace 提升性能
+    trt_options.trt_max_workspace_size = 12ULL * 1024 * 1024 * 1024;  // 12GB workspace
     // Jina model requires FP32 precision (FP16 causes embedding quality issues)
     trt_options.trt_fp16_enable = is_jina ? 0 : 1;
     trt_options.trt_int8_enable = 0;
     trt_options.trt_engine_cache_enable = 1;  // 缓存 engine，下次启动更快
-    trt_options.trt_engine_cache_path = "./trt_cache";  // engine 缓存路径
+    // 使用绝对路径避免相对路径问题
+    static char trt_cache_path[512];
+    snprintf(trt_cache_path, sizeof(trt_cache_path), "%s/trt_cache", getenv("HOME") ? getenv("HOME") : "/tmp");
+    trt_options.trt_engine_cache_path = trt_cache_path;
     trt_options.trt_dump_subgraphs = 0;
     
     status = g_ort->SessionOptionsAppendExecutionProvider_TensorRT(session_options, &trt_options);
@@ -592,13 +586,14 @@ onnx_embedder_t* onnx_embedder_init(const char* model_path, const char* vocab_pa
         memset(&cuda_options, 0, sizeof(cuda_options));
         cuda_options.device_id = 0;
         cuda_options.arena_extend_strategy = 0;
-        cuda_options.gpu_mem_limit = 8ULL * 1024 * 1024 * 1024;
+        // RTX 4090D: 24GB VRAM, allow up to 16GB for CUDA
+        cuda_options.gpu_mem_limit = 16ULL * 1024 * 1024 * 1024;
         cuda_options.cudnn_conv_algo_search = OrtCudnnConvAlgoSearchHeuristic;
         cuda_options.do_copy_in_default_stream = 1;
         
         status = g_ort->SessionOptionsAppendExecutionProvider_CUDA(session_options, &cuda_options);
         if (status != NULL) {
-            printf("  CUDA not available, falling back to CPU\n");
+            fprintf(stderr, "  [ERROR] CUDA not available, falling back to CPU. Check LD_LIBRARY_PATH for CUDA/cuDNN libraries.\n");
             g_ort->ReleaseStatus(status);
         } else {
             printf("  Using CUDA GPU acceleration\n");
@@ -641,13 +636,69 @@ int onnx_embedder_encode(onnx_embedder_t* e, const char* text, float* vector) {
         return -1;
     }
     
+    // Safety: limit text length and ensure valid UTF-8
+    size_t text_len = strlen(text);
+    if (text_len > 4096) text_len = 4096;  // Hard limit to prevent tokenizer panic
+    
+    // Create a cleaned copy of the text: replace invalid UTF-8 sequences with spaces
+    static __thread char clean_text[4096 + 4];
+    size_t clean_len = 0;
+    for (size_t i = 0; i < text_len && clean_len < 4096; ) {
+        unsigned char c = (unsigned char)text[i];
+        if (c < 0x80) {
+            // ASCII
+            clean_text[clean_len++] = c;
+            i++;
+        } else if ((c & 0xE0) == 0xC0 && i + 1 < text_len && 
+                   ((unsigned char)text[i+1] & 0xC0) == 0x80) {
+            // Valid 2-byte UTF-8
+            clean_text[clean_len++] = text[i++];
+            clean_text[clean_len++] = text[i++];
+        } else if ((c & 0xF0) == 0xE0 && i + 2 < text_len &&
+                   ((unsigned char)text[i+1] & 0xC0) == 0x80 &&
+                   ((unsigned char)text[i+2] & 0xC0) == 0x80) {
+            // Valid 3-byte UTF-8
+            clean_text[clean_len++] = text[i++];
+            clean_text[clean_len++] = text[i++];
+            clean_text[clean_len++] = text[i++];
+        } else if ((c & 0xF8) == 0xF0 && i + 3 < text_len &&
+                   ((unsigned char)text[i+1] & 0xC0) == 0x80 &&
+                   ((unsigned char)text[i+2] & 0xC0) == 0x80 &&
+                   ((unsigned char)text[i+3] & 0xC0) == 0x80) {
+            // Valid 4-byte UTF-8
+            clean_text[clean_len++] = text[i++];
+            clean_text[clean_len++] = text[i++];
+            clean_text[clean_len++] = text[i++];
+            clean_text[clean_len++] = text[i++];
+        } else {
+            // Invalid byte - skip and replace with space
+            if (clean_len == 0 || clean_text[clean_len-1] != ' ') {
+                clean_text[clean_len++] = ' ';
+            }
+            i++;
+        }
+    }
+    clean_text[clean_len] = '\0';
+    
+    if (clean_len == 0) {
+        // Empty text after cleaning - return zero vector
+        memset(vector, 0, sizeof(float) * e->dim);
+        float norm = 0.0f;
+        for (int j = 0; j < e->dim; j++) norm += vector[j] * vector[j];
+        norm = sqrtf(norm);
+        if (norm > 0) {
+            for (int j = 0; j < e->dim; j++) vector[j] /= norm;
+        }
+        return 0;
+    }
+    
     // Tokenize
     int token_count;
     if (e->tokenizer_type == TOKENIZER_BPE) {
         TokenizerEncodeResult result;
         // Note: tokenizers-cpp byte_level_bpe does NOT add special tokens automatically
         // We need to add BOS/EOS manually
-        tokenizers_encode(e->tokenizers_handle, text, strlen(text), 0, &result);
+        tokenizers_encode(e->tokenizers_handle, clean_text, clean_len, 0, &result);
         
         token_count = (int)result.len + 2; // +2 for BOS and EOS
         if (token_count > e->max_seq_length) {

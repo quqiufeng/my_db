@@ -786,6 +786,11 @@ struct vector_engine {
     int meta_loaded;
     int word_freq_loaded;
     int callgraph_loaded;
+    
+    // Cached embedder for query encoding (avoids reloading model on every search)
+    onnx_embedder_t* embedder;
+    char embedder_model_path[512];
+    char embedder_vocab_path[512];
 };
 
 // ============================================================
@@ -815,6 +820,21 @@ vector_engine_t* vector_engine_open(const char* cache_dir, const char* model) {
     load_call_graph(cache_dir);
     engine->callgraph_loaded = g_callgraph_loaded;
     
+    // Pre-initialize embedder to avoid reload on every search
+    if (strcmp(engine->model, "jina") == 0) {
+        strncpy(engine->embedder_model_path, "models/jina-embeddings-v2-base-code/model.onnx", sizeof(engine->embedder_model_path) - 1);
+        strncpy(engine->embedder_vocab_path, "models/jina-embeddings-v2-base-code/vocab.json", sizeof(engine->embedder_vocab_path) - 1);
+        engine->embedder = onnx_embedder_init(engine->embedder_model_path, engine->embedder_vocab_path, 512, VE_DIM);
+    } else {
+        strncpy(engine->embedder_model_path, "models/all-mpnet-base-v2/model.onnx", sizeof(engine->embedder_model_path) - 1);
+        strncpy(engine->embedder_vocab_path, "models/all-mpnet-base-v2/vocab.txt", sizeof(engine->embedder_vocab_path) - 1);
+        engine->embedder = onnx_embedder_init(engine->embedder_model_path, engine->embedder_vocab_path, 128, VE_DIM);
+    }
+    
+    if (!engine->embedder) {
+        fprintf(stderr, "[VECTOR] Warning: Failed to preload embedder (%s). Will retry on first search.\n", onnx_embedder_error());
+    }
+    
     return engine;
 }
 
@@ -822,6 +842,10 @@ void vector_engine_close(vector_engine_t* engine) {
     if (!engine) return;
     for (int i = 0; i < engine->num_sources; i++) {
         munmap_source(&engine->sources[i]);
+    }
+    if (engine->embedder) {
+        onnx_embedder_free(engine->embedder);
+        engine->embedder = NULL;
     }
     free_metadata();
     free_word_freq();
@@ -863,35 +887,36 @@ int vector_engine_search_ex(vector_engine_t* engine, const char* query,
         return -1;
     }
     
-    // Encode query
+    // Encode query using cached embedder (initialized in vector_engine_open)
     float query_vec[VE_DIM];
-    onnx_embedder_t* embedder = NULL;
-    
-    if (strcmp(engine->model, "jina") == 0) {
-        embedder = onnx_embedder_init(
-            "models/jina-embeddings-v2-base-code/model.onnx",
-            "models/jina-embeddings-v2-base-code/vocab.json",
-            512, VE_DIM
-        );
-    } else {
-        embedder = onnx_embedder_init(
-            "models/all-mpnet-base-v2/model.onnx",
-            "models/all-mpnet-base-v2/vocab.txt",
-            128, VE_DIM
-        );
-    }
+    onnx_embedder_t* embedder = engine->embedder;
     
     if (!embedder) {
-        set_error(onnx_embedder_error());
-        return -1;
+        // Lazy initialization if pre-load failed
+        if (strcmp(engine->model, "jina") == 0) {
+            embedder = onnx_embedder_init(
+                "models/jina-embeddings-v2-base-code/model.onnx",
+                "models/jina-embeddings-v2-base-code/vocab.json",
+                512, VE_DIM
+            );
+        } else {
+            embedder = onnx_embedder_init(
+                "models/all-mpnet-base-v2/model.onnx",
+                "models/all-mpnet-base-v2/vocab.txt",
+                128, VE_DIM
+            );
+        }
+        if (!embedder) {
+            set_error(onnx_embedder_error());
+            return -1;
+        }
+        engine->embedder = embedder;
     }
     
     if (onnx_embedder_encode(embedder, query, query_vec) != 0) {
         set_error("Failed to encode query");
-        onnx_embedder_free(embedder);
         return -1;
     }
-    onnx_embedder_free(embedder);
     
     // Search all matching sources
     ve_search_result_t* raw_results = malloc(top_k * 4 * sizeof(ve_search_result_t));
