@@ -6,8 +6,8 @@ Usage:
     python3 tools/export_onnx.py
     
 Outputs:
-    models/all-MiniLM-L6-v2/model.onnx
-    models/all-MiniLM-L6-v2/vocab.txt
+    /opt/models/all-MiniLM-L6-v2/model.onnx
+    /opt/models/all-MiniLM-L6-v2/vocab.txt
 """
 
 import os
@@ -27,7 +27,7 @@ except ImportError:
 
 # Model configuration
 MODEL_NAME = 'all-MiniLM-L6-v2'
-OUTPUT_DIR = Path('models') / MODEL_NAME
+OUTPUT_DIR = Path('/opt/models') / MODEL_NAME
 MAX_SEQ_LENGTH = 128
 HIDDEN_SIZE = 384  # all-MiniLM-L6-v2 output dimension
 

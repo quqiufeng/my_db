@@ -14,8 +14,8 @@ int main(int argc, char** argv) {
         printf("Build HNSW index from vector binary file\n");
         printf("Usage: %s <vec_file> [--threads N]\n", argv[0]);
         printf("\nExample:\n");
-        printf("  %s ./ai_code_memory/vectors/code_local_llama.cpp.jina.bin\n", argv[0]);
-        printf("  %s ./ai_code_memory/vectors/code_local_llama.cpp.jina.bin --threads 4\n", argv[0]);
+        printf("  %s /opt/ai_code_memory/vectors/code_local_llama.cpp.jina.bin\n", argv[0]);
+        printf("  %s /opt/ai_code_memory/vectors/code_local_llama.cpp.jina.bin --threads 4\n", argv[0]);
         return 1;
     }
     

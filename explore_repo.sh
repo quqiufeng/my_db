@@ -31,7 +31,7 @@
 #   这是项目在 KV Cache 中的命名空间路径。导入时由 analyze_repo.sh 自动生成：
 #   - GitHub 项目：https://github.com/redis/redis → /code/redis/redis
 #   - 本地项目：/opt/redis → /code/local/redis
-#   - 查看当前有哪些项目：ls ai_code_memory/ 或直接查询 /code 前缀
+#   - 查看当前有哪些项目：ls /opt/ai_code_memory/ 或直接查询 /code 前缀
 #
 # =============================================================================
 # 命令详解
@@ -129,10 +129,10 @@
 #
 # 1. 命名空间获取：
 #    如果不确定 namespace，可以用以下命令查看已导入的项目：
-#    strings ai_code_memory/cache.bin | grep "^/code/" | sort -u | head -20
+#    strings /opt/ai_code_memory/cache.bin | grep "^/code/" | sort -u | head -20
 #
 # 2. 向量缓存：
-#    explore/search/compare 命令需要向量缓存（./{project}_cache/vectors/）
+#    explore/search/compare 命令需要向量缓存（/opt/code_caches/{project}_cache/vectors/）
 #    如果缺失，脚本会提示：需要先运行 ./analyze_repo.sh 导入项目
 #
 # 3. GPU 环境：
@@ -327,7 +327,7 @@ cmd_search() {
     echo ""
     
     local project_name=$(basename "$NAMESPACE")
-    local cache_dir="./${project_name}_cache"
+    local cache_dir="/opt/code_caches/${project_name}_cache"
     
     if [[ ! -d "$cache_dir/vectors" ]]; then
         warn "Vector cache not found at $cache_dir/vectors"
@@ -364,7 +364,7 @@ cmd_explore() {
     echo ""
     
     local project_name=$(basename "$NAMESPACE")
-    local cache_dir="./${project_name}_cache"
+    local cache_dir="/opt/code_caches/${project_name}_cache"
     
     if [[ ! -d "$cache_dir/vectors" ]]; then
         warn "Vector cache not found. Using symbol search only."
@@ -373,7 +373,7 @@ cmd_explore() {
         echo ""
         
         # Try to find symbols by searching the cache keys
-        strings ai_code_memory/cache.bin 2>/dev/null | \
+        strings /opt/ai_code_memory/cache.bin 2>/dev/null | \
             grep "^${NAMESPACE}/symbols/" | \
             sed "s|^${NAMESPACE}/symbols/||" | \
             grep -i "$(echo "$query" | tr ' ' '|')" | head -20 | \
@@ -463,8 +463,8 @@ cmd_compare() {
     
     local proj1=$(basename "$NAMESPACE")
     local proj2=$(basename "$ns2")
-    local cache_dir1="./${proj1}_cache"
-    local cache_dir2="./${proj2}_cache"
+    local cache_dir1="/opt/code_caches/${proj1}_cache"
+    local cache_dir2="/opt/code_caches/${proj2}_cache"
     
     # Project 1 semantic search
     echo "=== $proj1: Semantic Search ==="
@@ -567,7 +567,7 @@ cmd_top() {
     echo ""
     
     # 从 cache.bin 中提取 callers/callees 统计
-    strings ai_code_memory/cache.bin 2>/dev/null | \
+    strings /opt/ai_code_memory/cache.bin 2>/dev/null | \
         grep -E "^${NAMESPACE}/(callers|callees)/" | \
         sed "s|^${NAMESPACE}/callers/||; s|^${NAMESPACE}/callees/||" | \
         sort | uniq -c | sort -rn | head -n "$n" | \

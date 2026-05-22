@@ -227,8 +227,8 @@ while true; do
     
     # Step 1: 感知 - 分析自己的代码
     echo "[1/7] 感知：分析自身代码..." >> $EVOLVE_LOG
-    ./ai_code_search.sh analyze $SELF_CODE ./self_cache
-    ./tools/code_to_memory.sh --cache ./self_cache --project self
+    ./ai_code_search.sh analyze $SELF_CODE /opt/code_caches/self_cache
+    ./tools/code_to_memory.sh --cache /opt/code_caches/self_cache --project self
     
     # Step 2: 记忆 - 对比历史，识别变化
     echo "[2/7] 记忆：加载历史知识..." >> $EVOLVE_LOG
@@ -652,15 +652,11 @@ echo "=== Code Intelligence Benchmark ==="
 echo "Date: $(date)" >> benchmark.log
 
 # 索引速度
-time ./tools/code_indexer /opt/linux/mm ./test_cache 8
-# → 记录: 188 files, 11,405 chunks, 0.1s
+time ./tools/code_indexer /opt/linux/mm /opt/code_caches/test_cache 8
 
-# 向量生成速度
-time ./tools/batch_embedder ./test_cache --model jina
-# → 记录: 11,405 chunks, 116s, 98 items/s
+time ./tools/batch_embedder /opt/code_caches/test_cache --model jina
 
-# 搜索延迟
-time ./tools/vector_search ./test_cache "page allocation" 10
+time ./tools/vector_search /opt/code_caches/test_cache "page allocation" 10
 # → 记录: <1s
 
 # 内存占用
@@ -766,7 +762,7 @@ huggingface-cli download TheBloke/CodeLlama-70B-Instruct-GGUF
 
 # 3. 启动本地推理服务
 ./llama.cpp/server \
-  -m models/codellama-70b.Q4_K_M.gguf \
+  -m /opt/models/codellama-70b.Q4_K_M.gguf \
   --ctx-size 131072 \
   --port 8080
 
@@ -839,273 +835,23 @@ python finetune.py \
   --base_model codellama-13b \
   --train_data ./training_data.jsonl \
   --lora_r 64 \
-  --output ./models/agent-lora \
-  --epochs 3
+  --output /opt/models/agent-lora \
 
-# 3. 合并并导出GGUF
-python merge_lora.py \
-  --base codellama-13b \
-  --lora ./models/agent-lora \
-  --output ./models/agent-specialized.gguf
+  --lora /opt/models/agent-lora \
 
-# 4. 现在Agent有了自己的"专业知识"
-# 不是通用编程知识，而是"我分析过Linux/nginx/Redis"的专属知识
-```
+  --output /opt/models/agent-specialized.gguf
 
----
+  --base_model /opt/models/codellama-13b.Q4_K_M.gguf \
 
-## 15. 终极自举：替换远程API，实现完全内循环
+  --output /opt/models/agent-lora
 
-### 15.1 当前架构的外部依赖
+  --base /opt/models/codellama-13b.Q4_K_M.gguf \
 
-**现在的系统还有一个致命的外部依赖**:
+  --lora /opt/models/agent-lora \
 
-```
-┌──────────────────────────────────────────────────────────────┐
-│                     当前系统（半自举）                         │
-├──────────────────────────────────────────────────────────────┤
-│                                                              │
-│  ┌──────────────┐         ┌──────────────┐                 │
-│  │   远程API    │◄───────►│   KV Cache   │                 │
-│  │  (GPT-4/我)  │  RAG检索 │  (长期记忆)   │                 │
-│  └──────┬───────┘         └──────────────┘                 │
-│         │                                                    │
-│         │ Function Calling                                   │
-│         ▼                                                    │
-│  ┌──────────────────────────────────────┐                   │
-│  │           工具链（手脚）               │                   │
-│  │  code_indexer / batch_embedder / ... │                   │
-│  └──────────────────────────────────────┘                   │
-│                                                              │
-│  问题：大脑在远程，网络延迟、API费用、隐私泄露风险            │
-└──────────────────────────────────────────────────────────────┘
-```
+  --output /opt/models/agent-self-hosted.gguf
 
-**依赖风险**:
-- **网络中断**: 远程API不可用，系统瘫痪
-- **API费用**: 大规模分析成本高昂（$0.01-0.1/次调用）
-- **隐私泄露**: 代码片段上传到第三方服务器
-- **速率限制**: 高频调用被限流
-- **模型更新**: 远程模型行为变化，不可控
-
-### 15.2 终极自举架构（零外部依赖）
-
-**目标**: 本地大模型 + 本地记忆 + 本地工具 = **完全内循环**
-
-```
-┌──────────────────────────────────────────────────────────────┐
-│                 完全自举的数字生命体                           │
-│              （零外部依赖，完全内循环）                         │
-└──────────────────────────────────────────────────────────────┘
-                            │
-        ┌───────────────────┼───────────────────┐
-        ▼                   ▼                   ▼
-┌──────────────┐  ┌──────────────┐  ┌──────────────┐
-│   本地大模型  │◄───────►│   KV Cache   │◄───────►│   工具链     │
-│  (LLM Brain) │  RAG检索 │  (长期记忆)   │ 调用   │ (手脚)      │
-└──────────────┘         └──────────────┘         └──────────────┘
-        │                                              │
-        │ 自我改进                                       │ 执行
-        │                                              │
-        ▼                                              ▼
-┌──────────────────────────────────────────────────────────────┐
-│                      代码仓库                                 │
-│            （分析对象 + 自我改进目标）                          │
-│                                                              │
-│  本地LLM分析代码 → 生成改进方案 → 编辑代码 → 编译 → 测试      │
-│       ▲                                              │       │
-│       └────────────── 验证结果 ──────────────────────┘       │
-│                                                              │
-│  外部依赖：零                                                │
-│  网络连接：不需要（可选同步备份）                              │
-│  人工成本：零（启动后自动运行）                                │
-└──────────────────────────────────────────────────────────────┘
-```
-
-### 15.3 替换远程API的完整路径
-
-**阶段A：接入本地LLM（消除远程依赖）**
-
-```bash
-# 1. 安装本地推理框架
-# 选项1: ollama（最简单）
-curl -fsSL https://ollama.com/install.sh | sh
-ollama pull codellama:13b
-
-# 选项2: llama.cpp（最灵活）
-git clone https://github.com/ggerganov/llama.cpp
-cd llama.cpp && make -j
-wget https://huggingface.co/TheBloke/CodeLlama-13B-Instruct-GGUF/resolve/main/codellama-13b-instruct.Q4_K_M.gguf
-./server -m codellama-13b-instruct.Q4_K_M.gguf --ctx-size 32768 --port 8080
-
-# 2. 验证本地推理
-curl http://localhost:8080/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "codellama:13b",
-    "messages": [{"role": "user", "content": "解释Reactor模式"}]
-  }'
-# → 本地返回，零网络延迟，零API费用
-```
-
-**阶段B：RAG增强（连接记忆与模型）**
-
-```python
-# local_agent.py - 本地Agent核心
-
-import requests
-import json
-
-class LocalAgent:
-    def __init__(self, memory_path="./ai_memory.bin", llm_url="http://localhost:8080"):
-        self.memory = KVCache(memory_path)  # 复用现有KV Cache
-        self.llm_url = llm_url
-        self.tools = {
-            "search_code": self.search_semantic,
-            "get_dataflow": self.get_dataflow,
-            "get_callgraph": self.get_callgraph,
-            "edit_file": self.edit_file,
-            "compile": self.compile_code,
-            "run_test": self.run_test
-        }
-    
-    def think(self, task):
-        # 1. 从KV Cache检索相关知识
-        context = self.memory.rag_search(task, top_k=10)
-        
-        # 2. 构建增强Prompt
-        prompt = self.build_prompt(task, context)
-        
-        # 3. 本地LLM推理
-        response = requests.post(f"{self.llm_url}/v1/chat/completions", json={
-            "model": "local",
-            "messages": [
-                {"role": "system", "content": "你是资深系统架构师，基于代码事实回答。"},
-                {"role": "user", "content": prompt}
-            ],
-            "tools": self.get_tool_schemas(),
-            "tool_choice": "auto"
-        })
-        
-        # 4. 解析Tool Calling
-        result = response.json()
-        if "tool_calls" in result:
-            for tool_call in result["tool_calls"]:
-                tool_name = tool_call["function"]["name"]
-                args = json.loads(tool_call["function"]["arguments"])
-                output = self.tools[tool_name](**args)
-                
-                # 5. 记录到记忆
-                self.memory.store(f"/agent/actions/{tool_name}", json.dumps({
-                    "task": task,
-                    "args": args,
-                    "output": output,
-                    "timestamp": time.time()
-                }))
-        
-        return result
-    
-    def build_prompt(self, task, context):
-        return f"""
-任务: {task}
-
-根据以下代码知识库中的事实信息回答:
-{context}
-
-要求:
-1. 基于具体的代码事实，不要猜测
-2. 如果需要执行操作，请使用提供的工具
-3. 引用具体的函数名、文件名、行号
-4. 如果不确定，说明需要进一步分析的方向
-"""
-    
-    def search_semantic(self, query, project="linux"):
-        # 调用现有vector_search工具
-        cmd = f"./tools/vector_search ./{project}_cache '{query}' 5 --json"
-        return subprocess.check_output(cmd, shell=True).decode()
-    
-    def get_dataflow(self, variable, project="linux"):
-        cmd = f"./tools/dataflow show ./{project}_cache {variable}"
-        return subprocess.check_output(cmd, shell=True).decode()
-    
-    def get_callgraph(self, function, project="linux"):
-        cmd = f"./tools/vector_search ./{project}_cache '{function}' 1 --callgraph --json"
-        return subprocess.check_output(cmd, shell=True).decode()
-    
-    def edit_file(self, file_path, diff_patch):
-        # 应用diff补丁
-        with open("/tmp/patch.diff", "w") as f:
-            f.write(diff_patch)
-        subprocess.run(["patch", "-p1", "-i", "/tmp/patch.diff"], check=True)
-        return f"Applied patch to {file_path}"
-    
-    def compile_code(self, target="all"):
-        result = subprocess.run(["make", "-j$(nproc)", target], 
-                              capture_output=True, text=True)
-        return {
-            "success": result.returncode == 0,
-            "stdout": result.stdout[-1000:],  # 最后1000字符
-            "stderr": result.stderr[-1000:]
-        }
-    
-    def run_test(self, test_name=""):
-        if test_name:
-            cmd = f"./tests/run_test.sh {test_name}"
-        else:
-            cmd = "./tests/run_all_tests.sh"
-        result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
-        return {
-            "success": result.returncode == 0,
-            "output": result.stdout[-2000:]
-        }
-```
-
-**阶段C：自我训练闭环（进化加速）**
-
-```bash
-# 1. 积累足够数据后，微调本地模型
-
-# 导出训练数据（从KV Cache）
-./tools/memory_export.sh \
-  --format alpaca \
-  --min-quality 0.8 \
-  --output ./training_data.jsonl
-
-# 训练数据格式：
-# {
-#   "instruction": "分析nginx的内存管理机制",
-#   "input": "",
-#   "output": "nginx使用内存池（ngx_pool_t）管理请求生命周期内存。\n\n"
-#            "核心函数：\n"
-#            "- ngx_create_pool: 创建内存池 (src/core/ngx_palloc.c:45)\n"
-#            "- ngx_palloc: 从池中分配内存 (src/core/ngx_palloc.c:127)\n"
-#            "- ngx_destroy_pool: 销毁内存池，释放所有内存 (src/core/ngx_palloc.c:89)\n\n"
-#            "设计模式：Object Pool，避免频繁malloc/free和内存泄漏。\n\n"
-#            "与malloc对比：\n"
-#            "- malloc: 需要逐个free，容易泄漏\n"
-#            "- pool: 一次性destroy，全部释放\n\n"
-#            "调用关系：\n"
-#            "- ngx_http_init_connection → ngx_create_pool\n"
-#            "- ngx_http_close_connection → ngx_destroy_pool"
-# }
-
-# 2. 使用LoRA微调（低资源）
-python finetune_lora.py \
-  --base_model ./models/codellama-13b.Q4_K_M.gguf \
-  --train_data ./training_data.jsonl \
-  --lora_r 128 \
-  --lora_alpha 256 \
-  --epochs 5 \
-  --output ./models/agent-lora
-
-# 3. 合并LoRA到基础模型
-python merge_lora.py \
-  --base ./models/codellama-13b.Q4_K_M.gguf \
-  --lora ./models/agent-lora \
-  --output ./models/agent-self-hosted.gguf
-
-# 4. 替换原来的通用模型
-mv ./models/agent-self-hosted.gguf ./models/agent-current.gguf
+mv /opt/models/agent-self-hosted.gguf /opt/models/agent-current.gguf
 
 # 5. 重启Agent，使用自训练模型
 systemctl restart agent-local-llm

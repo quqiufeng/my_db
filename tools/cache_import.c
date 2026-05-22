@@ -482,14 +482,14 @@ int main(int argc, char** argv) {
     if (argc < 3) {
         printf("Usage: %s <analysis_dir> <namespace> [--cache-dir <dir>]\n", argv[0]);
         printf("\nExamples:\n");
-        printf("  %s ./nginx_cache /code/nginx\n", argv[0]);
+        printf("  %s /opt/code_caches/nginx_cache /code/nginx\n", argv[0]);
         printf("  %s ./linux_subsystems/mm_cache /code/linux/mm --cache-dir ./ai_memory\n", argv[0]);
         return 1;
     }
     
     const char* analysis_dir = argv[1];
     const char* namespace = argv[2];
-    const char* cache_dir = "./ai_code_memory";
+    const char* cache_dir = "/opt/ai_code_memory";
     
     for (int i = 3; i < argc; i++) {
         if (strcmp(argv[i], "--cache-dir") == 0 && i + 1 < argc) {

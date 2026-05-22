@@ -6,8 +6,8 @@ ONNX Embedder Python FFI Wrapper
 用法:
     from mydb.onnx_embedder import OnnxEmbedder
     
-    embedder = OnnxEmbedder("models/all-MiniLM-L6-v2/model.onnx", 
-                            "models/all-MiniLM-L6-v2/vocab.txt")
+    embedder = OnnxEmbedder("/opt/models/all-MiniLM-L6-v2/model.onnx", 
+                            "/opt/models/all-MiniLM-L6-v2/vocab.txt")
     vector = embedder.encode("def hello(): pass")
     # vector: list[float] of length 384
 """
@@ -99,16 +99,16 @@ class OnnxEmbedder:
         初始化 ONNX embedder
         
         Args:
-            model_path: ONNX 模型路径（默认 models/all-MiniLM-L6-v2/model.onnx）
-            vocab_path: 词汇表路径（默认 models/all-MiniLM-L6-v2/vocab.txt）
+            model_path: ONNX 模型路径（默认 /opt/models/all-MiniLM-L6-v2/model.onnx）
+            vocab_path: 词汇表路径（默认 /opt/models/all-MiniLM-L6-v2/vocab.txt）
             max_seq_length: 最大序列长度
             dim: 输出向量维度
         """
         # 支持环境变量覆盖
         if model_path is None:
-            model_path = os.environ.get("EMBEDDING_MODEL", "models/all-MiniLM-L6-v2/model.onnx")
-        if vocab_path is None:
-            vocab_path = os.environ.get("EMBEDDING_VOCAB", "models/all-MiniLM-L6-v2/vocab.txt")
+            model_path = os.environ.get("EMBEDDING_MODEL", "/opt/models/all-MiniLM-L6-v2/model.onnx")
+
+            vocab_path = os.environ.get("EMBEDDING_VOCAB", "/opt/models/all-MiniLM-L6-v2/vocab.txt")
         
         self.dim = dim
         self._ptr = _lib.onnx_embedder_init(

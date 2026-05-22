@@ -4,7 +4,7 @@
  * Extracted from vector_search.c for reuse in cache_query and other tools.
  * 
  * Usage:
- *   vector_engine_t* engine = vector_engine_open("./nginx_cache", "jina");
+ *   vector_engine_t* engine = vector_engine_open("/opt/code_caches/nginx_cache", "jina");
  *   vector_result_t results[10];
  *   int n = vector_engine_search(engine, "memory pool allocation", 10, results);
  *   for (int i = 0; i < n; i++) {

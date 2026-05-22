@@ -29,8 +29,8 @@ vec_file = os.path.join(vec_dir, vec_files[0])
 idx_file = vec_file.replace('.bin', '.idx')
 
 print(f"Loading Jina model...")
-tokenizer = Tokenizer.from_file('/home/dministrator/my_db/models/jina-embeddings-v2-base-code/tokenizer.json')
-sess = ort.InferenceSession('/home/dministrator/my_db/models/jina-embeddings-v2-base-code/model.onnx', providers=['CUDAExecutionProvider', 'CPUExecutionProvider'])
+tokenizer = Tokenizer.from_file('/opt/models/jina-embeddings-v2-base-code/tokenizer.json')
+sess = ort.InferenceSession('/opt/models/jina-embeddings-v2-base-code/model.onnx', providers=['CUDAExecutionProvider', 'CPUExecutionProvider'])
 
 print(f"Loading vectors from {vec_file}...")
 with open(vec_file, 'rb') as f:

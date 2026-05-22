@@ -11,7 +11,7 @@ AI Agent 编码助手 - 实时第三方源码查询
 用法：
     from tools.coding_assistant import CodingAssistant
     
-    assistant = CodingAssistant("./ai_code_memory")
+    assistant = CodingAssistant("/opt/ai_code_memory")
     
     # AI 正在写代码，提供上下文
     context = '''
@@ -46,7 +46,7 @@ class CodingAssistant:
     让 AI 在编码时能实时了解第三方库的具体实现
     """
     
-    def __init__(self, cache_dir: str = "./ai_code_memory"):
+    def __init__(self, cache_dir: str = "/opt/ai_code_memory"):
         self.memory = AICodeMemory(cache_dir)
         self._repo_cache = {}  # 缓存已识别的仓库
         
@@ -398,7 +398,7 @@ def main():
         """
     )
     
-    parser.add_argument('--cache-dir', default='./ai_code_memory', help='Cache directory')
+    parser.add_argument('--cache-dir', default='/opt/ai_code_memory', help='Cache directory')
     parser.add_argument('--repo', default=None, help='Current repository namespace')
     
     subparsers = parser.add_subparsers(dest='command', help='Commands')

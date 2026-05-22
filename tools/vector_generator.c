@@ -36,8 +36,8 @@ static void print_usage(const char* prog) {
     printf("  --model <type>   Model type: mpnet (default) or jina\n");
     printf("  --help, -h      Show this help\n");
     printf("\nExamples:\n");
-    printf("  %s ./ai_code_memory\n", prog);
-    printf("  %s --model jina ./ai_code_memory /code/local/my-project\n", prog);
+    printf("  %s /opt/ai_code_memory\n", prog);
+    printf("  %s --model jina /opt/ai_code_memory /code/local/my-project\n", prog);
     printf("\nModels:\n");
     printf("  mpnet - all-mpnet-base-v2 (general text, fast C tokenizer)\n");
     printf("  jina  - jina-embeddings-v2-base-code (code retrieval, BPE tokenizer)\n");
@@ -165,8 +165,8 @@ int main(int argc, char** argv) {
     if (use_jina) {
         printf("Loading Jina embedder...\n");
         embedder = onnx_embedder_init(
-            "models/jina-embeddings-v2-base-code/model.onnx",
-            "models/jina-embeddings-v2-base-code/vocab.json",
+            "/opt/models/jina-embeddings-v2-base-code/model.onnx",
+            "/opt/models/jina-embeddings-v2-base-code/vocab.json",
             512, DIM
         );
         if (!embedder) {
@@ -177,8 +177,8 @@ int main(int argc, char** argv) {
     } else {
         printf("Loading MPNet embedder...\n");
         embedder = onnx_embedder_init(
-            "models/all-mpnet-base-v2/model.onnx",
-            "models/all-mpnet-base-v2/vocab.txt",
+            "/opt/models/all-mpnet-base-v2/model.onnx",
+            "/opt/models/all-mpnet-base-v2/vocab.txt",
             128, DIM
         );
         if (!embedder) {

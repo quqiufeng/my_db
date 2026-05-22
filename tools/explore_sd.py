@@ -15,7 +15,7 @@ sys.path.insert(0, '/home/dministrator/my_db')
 from mydb.cache import open_cache
 
 SD_DIR = '/opt/stable-diffusion.cpp'
-cache = open_cache('/home/dministrator/my_db/ai_code_memory')
+cache = open_cache('/opt/ai_code_memory')
 
 def explore_structure():
     """Explore project structure"""

@@ -822,12 +822,12 @@ vector_engine_t* vector_engine_open(const char* cache_dir, const char* model) {
     
     // Pre-initialize embedder to avoid reload on every search
     if (strcmp(engine->model, "jina") == 0) {
-        strncpy(engine->embedder_model_path, "models/jina-embeddings-v2-base-code/model.onnx", sizeof(engine->embedder_model_path) - 1);
-        strncpy(engine->embedder_vocab_path, "models/jina-embeddings-v2-base-code/vocab.json", sizeof(engine->embedder_vocab_path) - 1);
+        strncpy(engine->embedder_model_path, "/opt/models/jina-embeddings-v2-base-code/model.onnx", sizeof(engine->embedder_model_path) - 1);
+        strncpy(engine->embedder_vocab_path, "/opt/models/jina-embeddings-v2-base-code/vocab.json", sizeof(engine->embedder_vocab_path) - 1);
         engine->embedder = onnx_embedder_init(engine->embedder_model_path, engine->embedder_vocab_path, 512, VE_DIM);
     } else {
-        strncpy(engine->embedder_model_path, "models/all-mpnet-base-v2/model.onnx", sizeof(engine->embedder_model_path) - 1);
-        strncpy(engine->embedder_vocab_path, "models/all-mpnet-base-v2/vocab.txt", sizeof(engine->embedder_vocab_path) - 1);
+        strncpy(engine->embedder_model_path, "/opt/models/all-mpnet-base-v2/model.onnx", sizeof(engine->embedder_model_path) - 1);
+        strncpy(engine->embedder_vocab_path, "/opt/models/all-mpnet-base-v2/vocab.txt", sizeof(engine->embedder_vocab_path) - 1);
         engine->embedder = onnx_embedder_init(engine->embedder_model_path, engine->embedder_vocab_path, 128, VE_DIM);
     }
     
@@ -895,14 +895,14 @@ int vector_engine_search_ex(vector_engine_t* engine, const char* query,
         // Lazy initialization if pre-load failed
         if (strcmp(engine->model, "jina") == 0) {
             embedder = onnx_embedder_init(
-                "models/jina-embeddings-v2-base-code/model.onnx",
-                "models/jina-embeddings-v2-base-code/vocab.json",
+                "/opt/models/jina-embeddings-v2-base-code/model.onnx",
+                "/opt/models/jina-embeddings-v2-base-code/vocab.json",
                 512, VE_DIM
             );
         } else {
             embedder = onnx_embedder_init(
-                "models/all-mpnet-base-v2/model.onnx",
-                "models/all-mpnet-base-v2/vocab.txt",
+                "/opt/models/all-mpnet-base-v2/model.onnx",
+                "/opt/models/all-mpnet-base-v2/vocab.txt",
                 128, VE_DIM
             );
         }

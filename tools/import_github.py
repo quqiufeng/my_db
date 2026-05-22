@@ -470,9 +470,9 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例:
-  %(prog)s https://github.com/redis/redis ./my_cache
-  %(prog)s https://github.com/python/cpython ./my_cache --namespace /github/cpython
-  %(prog)s https://github.com/torvalds/linux ./my_cache --max-file-size 200000
+  %(prog)s https://github.com/redis/redis /opt/code_caches/redis_cache
+  %(prog)s https://github.com/python/cpython /opt/code_caches/cpython_cache --namespace /github/cpython
+  %(prog)s https://github.com/torvalds/linux /opt/code_caches/linux_cache --max-file-size 200000
         """
     )
     

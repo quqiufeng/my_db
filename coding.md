@@ -101,7 +101,7 @@
 | `--skip-vectors` | 否 | 跳过向量生成（更快，但无语义搜索） |
 | `--skip-callgraph` | 否 | 跳过调用图分析 |
 | `--skip-dataflow` | 否 | 跳过数据流分析 |
-| `--cache-dir <dir>` | 否 | KV Cache 目录（默认: ./ai_code_memory） |
+| `--cache-dir <dir>` | 否 | KV Cache 目录（默认: /opt/ai_code_memory） |
 | `--jobs <n>` | 否 | 并行工作进程数（默认: CPU 核心数） |
 | `--name <name>` | 否 | 项目名（用于目录命名） |
 
@@ -143,7 +143,7 @@
 
 **输出数据结构**：
 ```
-./{project}_cache/                    # 分析目录（临时数据）
+/opt/code_caches/{project}_cache/                    # 分析目录（临时数据）
 ├── chunks_text.txt                   # 代码内容（一行一个 chunk）
 ├── chunks_meta.jsonl                 # 元数据（函数名/文件/行号/签名）
 ├── call_graph.json                   # 调用关系图
@@ -153,7 +153,7 @@
     ├── code_local_{project}.jina.idx       # 名称→偏移索引
     └── code_local_{project}.jina.bin.hnsw  # HNSW 近似索引
 
-./ai_code_memory/                     # KV Cache（持久化存储）
+/opt/ai_code_memory/                     # KV Cache（持久化存储）
 ├── cache.bin                         # mmap 数据文件
 └── index.bin                         # 索引文件（Hash + Skip List）
 ```
@@ -216,7 +216,7 @@
 
 **示例**：
 ```bash
-./ai_code_search.sh index /opt/stable-diffusion.cpp ./sd_cache 4
+./ai_code_search.sh index /opt/stable-diffusion.cpp /opt/code_caches/sd_cache 4
 ```
 
 **输出**：
@@ -231,7 +231,7 @@
 
 **示例**：
 ```bash
-./ai_code_search.sh vector ./sd_cache stable-diffusion.cpp
+./ai_code_search.sh vector /opt/code_caches/sd_cache stable-diffusion.cpp
 ```
 
 **内部流程**：
@@ -255,9 +255,9 @@
 
 **示例**：
 ```bash
-./ai_code_search.sh search ./sd_cache "upscale image" 5
-./ai_code_search.sh search ./sd_cache "memory allocation buffer pool" 10
-./ai_code_search.sh search ./sd_cache "VAE encode latent" 5
+./ai_code_search.sh search /opt/code_caches/sd_cache "upscale image" 5
+./ai_code_search.sh search /opt/code_caches/sd_cache "memory allocation buffer pool" 10
+./ai_code_search.sh search /opt/code_caches/sd_cache "VAE encode latent" 5
 ```
 
 **搜索技巧**：
@@ -275,7 +275,7 @@
 
 **示例**：
 ```bash
-./ai_code_search.sh snippet ./sd_cache ./my_kernel.cpp 5
+./ai_code_search.sh snippet /opt/code_caches/sd_cache ./my_kernel.cpp 5
 ```
 
 **原理**：将你的代码片段向量化，搜索代码库中最相似的实现。
@@ -291,13 +291,13 @@
 **示例**：
 ```bash
 # 追踪 connection 指针（含字段级和跨函数流）
-./ai_code_search.sh dataflow ./nginx_cache c
+./ai_code_search.sh dataflow /opt/code_caches/nginx_cache c
 
 # 追踪内存池
-./ai_code_search.sh dataflow ./nginx_cache pool
+./ai_code_search.sh dataflow /opt/code_caches/nginx_cache pool
 
 # 追踪上下文指针
-./ai_code_search.sh dataflow ./sd_cache ctx
+./ai_code_search.sh dataflow /opt/code_caches/sd_cache ctx
 ```
 
 **输出示例**：
@@ -321,7 +321,7 @@
 
 **示例**：
 ```bash
-./ai_code_search.sh analyze /opt/stable-diffusion.cpp ./sd_cache
+./ai_code_search.sh analyze /opt/stable-diffusion.cpp /opt/code_caches/sd_cache
 ```
 
 **流程**：index → vector → 输出使用提示
@@ -334,7 +334,7 @@
 
 **示例**：
 ```bash
-./ai_code_search.sh demo ./sd_cache
+./ai_code_search.sh demo /opt/code_caches/sd_cache
 ```
 
 **演示内容**：
@@ -511,52 +511,52 @@ Cache 目录: ./linux_subsystems
 
 **Phase 1: 索引与向量化**
 ```bash
-./ai_code_search.sh index /opt/nginx ./nginx_cache 4
-./ai_code_search.sh vector ./nginx_cache nginx
+./ai_code_search.sh index /opt/nginx /opt/code_caches/nginx_cache 4
+./ai_code_search.sh vector /opt/code_caches/nginx_cache nginx
 ```
 
 **Phase 2: 架构概览（自然语言搜索核心概念）**
 ```bash
-./ai_code_search.sh search ./nginx_cache "event loop epoll kqueue" 10
-./ai_code_search.sh search ./nginx_cache "HTTP request phase handler" 10
-./ai_code_search.sh search ./nginx_cache "master process worker process fork" 10
-./ai_code_search.sh search ./nginx_cache "memory pool palloc" 10
+./ai_code_search.sh search /opt/code_caches/nginx_cache "event loop epoll kqueue" 10
+./ai_code_search.sh search /opt/code_caches/nginx_cache "HTTP request phase handler" 10
+./ai_code_search.sh search /opt/code_caches/nginx_cache "master process worker process fork" 10
+./ai_code_search.sh search /opt/code_caches/nginx_cache "memory pool palloc" 10
 ```
 
 **Phase 3: 调用关系分析（理解架构依赖）**
 ```bash
-./ai_code_search.sh search ./nginx_cache "upstream load balancing" 10
+./ai_code_search.sh search /opt/code_caches/nginx_cache "upstream load balancing" 10
 # 关键发现：ngx_http_upstream_init_round_robin_peer 被多个算法调用
 # 洞察：Round-robin 是所有负载均衡算法的基础
 
-./ai_code_search.sh callgraph ./nginx_cache
+./ai_code_search.sh callgraph /opt/code_caches/nginx_cache
 # 查看 call_graph.json，搜索某个函数的调用者列表
 ```
 
 **Phase 4: 子系统深入（逐步细化）**
 ```bash
 # 内存管理
-./ai_code_search.sh search ./nginx_cache "shared memory zone slab" 10
-./ai_code_search.sh dataflow ./nginx_cache c
+./ai_code_search.sh search /opt/code_caches/nginx_cache "shared memory zone slab" 10
+./ai_code_search.sh dataflow /opt/code_caches/nginx_cache c
 
 # 配置解析
-./ai_code_search.sh search ./nginx_cache "configuration parser lexer" 10
+./ai_code_search.sh search /opt/code_caches/nginx_cache "configuration parser lexer" 10
 
 # SSL/TLS
-./ai_code_search.sh search ./nginx_cache "SSL certificate handshake" 10
+./ai_code_search.sh search /opt/code_caches/nginx_cache "SSL certificate handshake" 10
 
 # 缓存系统
-./ai_code_search.sh search ./nginx_cache "file cache open read" 10
+./ai_code_search.sh search /opt/code_caches/nginx_cache "file cache open read" 10
 ```
 
 **Phase 5: 代码片段搜索（找到相似实现）**
 ```bash
-./ai_code_search.sh snippet ./nginx_cache ./my_epoll_code.cpp 5
+./ai_code_search.sh snippet /opt/code_caches/nginx_cache ./my_epoll_code.cpp 5
 ```
 
 **Phase 6: 变量数据流（追踪生命周期）**
 ```bash
-./ai_code_search.sh dataflow ./nginx_cache c
+./ai_code_search.sh dataflow /opt/code_caches/nginx_cache c
 # 追踪 connection 指针的定义、赋值、使用位置
 ```
 
@@ -667,7 +667,7 @@ qemu-system-x86_64 \
 ### KV Cache 存储结构
 
 ```
-ai_code_memory/
+/opt/ai_code_memory/
 ├── cache.bin                    # mmap 数据文件（零拷贝持久化）
 │   ├── 实时落盘：每次写入后 msync(MS_SYNC)
 │   ├── 断电不丢：操作系统保证 mmap 数据落盘
@@ -735,7 +735,7 @@ nvidia-smi
 echo $LD_LIBRARY_PATH
 
 # 检查模型文件
-ls -la models/jina-embeddings-v2-base-code/
+ls -la /opt/models/jina-embeddings-v2-base-code/
 
 # 跳过向量生成（仅索引+调用图）
 ./analyze_repo.sh /opt/nginx --skip-vectors
@@ -854,8 +854,8 @@ head -5 {cache_dir}/chunks_meta.jsonl
 | `tools/word_freq` | C 词频统计器 |
 | `tools/cache_import` | C KV Cache 导入工具 |
 | `tools/cache_query` | C KV Cache 查询工具 |
-| `models/jina-embeddings-v2-base-code/` | Jina v2 嵌入模型 |
-| `ai_code_memory/` | KV Cache 数据目录 |
+| `/opt/models/jina-embeddings-v2-base-code/` | Jina v2 嵌入模型 |
+| `/opt/ai_code_memory/` | KV Cache 数据目录 |
 
 ---
 

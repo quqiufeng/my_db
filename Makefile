@@ -147,7 +147,7 @@ $(TEST_HNSW): $(TEST_DIR)/test_hnsw.c $(LIB)
 	$(CC) $(CFLAGS) -o $@ $< -L. -lmydb -lm -Wl,-rpath,.
 
 $(IMPORT_BOOK): $(TOOLS_DIR)/import_book.c $(SRC_DIR)/embedding/onnx_embedder.c $(LIB)
-	$(CC) $(CFLAGS) $(ONNX_CFLAGS) -I./include/tokenizers-cpp -o $@ $(TOOLS_DIR)/import_book.c $(SRC_DIR)/embedding/onnx_embedder.c $(TOKENIZERS_CPP_LIBS) -L. -lmydb $(ONNX_LDFLAGS) -lm -lstdc++ -Wl,-rpath,.
+	$(CC) $(CFLAGS) $(ONNX_CFLAGS) -fopenmp -I./include/tokenizers-cpp -o $@ $(TOOLS_DIR)/import_book.c $(SRC_DIR)/embedding/onnx_embedder.c $(TOKENIZERS_CPP_LIBS) -L. -lmydb $(ONNX_LDFLAGS) -lm -lstdc++ -Wl,-rpath,.
 
 $(CACHE_SERVER): $(TOOLS_DIR)/cache_server.c $(LIB)
 	$(CC) $(CFLAGS) -o $@ $< -L. -lmydb -Wl,-rpath,.

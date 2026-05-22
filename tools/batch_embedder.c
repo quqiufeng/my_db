@@ -158,14 +158,14 @@ int main(int argc, char** argv) {
     onnx_embedder_t* embedder;
     if (strcmp(model_type, "jina") == 0) {
         embedder = onnx_embedder_init(
-            "models/jina-embeddings-v2-base-code/model.onnx",
-            "models/jina-embeddings-v2-base-code/vocab.json",
+            "/opt/models/jina-embeddings-v2-base-code/model.onnx",
+            "/opt/models/jina-embeddings-v2-base-code/vocab.json",
             MAX_SEQ, DIM
         );
     } else {
         embedder = onnx_embedder_init(
-            "models/all-mpnet-base-v2/model.onnx",
-            "models/all-mpnet-base-v2/vocab.txt",
+            "/opt/models/all-mpnet-base-v2/model.onnx",
+            "/opt/models/all-mpnet-base-v2/vocab.txt",
             128, DIM
         );
     }

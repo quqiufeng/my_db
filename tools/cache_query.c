@@ -10,8 +10,8 @@
  * 
  * Example:
  *   ./cache_query ngx_palloc --repo /code/nginx --type context
- *   ./cache_query "memory pool" --repo /code/nginx --type search --analysis-dir ./nginx_cache
- *   ./cache_query "event loop" --repo /code/nginx --type search --analysis-dir ./nginx_cache --kind function --lang c
+ *   ./cache_query "memory pool" --repo /code/nginx --type search --analysis-dir /opt/code_caches/nginx_cache
+ *   ./cache_query "event loop" --repo /code/nginx --type search --analysis-dir /opt/code_caches/nginx_cache --kind function --lang c
  */
 
 #include <stdio.h>
@@ -325,7 +325,7 @@ static void print_usage(const char* prog) {
     printf("\nOptions:\n");
     printf("  --repo <namespace>       Repository namespace (e.g., /code/nginx)\n");
     printf("  --type <type>            Query type: exact, symbol, context, search, auto\n");
-    printf("  --cache-dir <dir>        KV Cache directory (default: ./ai_code_memory)\n");
+    printf("  --cache-dir <dir>        KV Cache directory (default: /opt/ai_code_memory)\n");
     printf("  --analysis-dir <dir>     Analysis directory for semantic search (required for search type)\n");
     printf("  --kind <kind>            Filter by symbol kind: function, struct, macro, typedef\n");
     printf("  --lang <lang>            Filter by language: c, cpp, python, javascript, go, rust\n");
@@ -338,9 +338,9 @@ static void print_usage(const char* prog) {
     printf("\nExamples:\n");
     printf("  %s ngx_palloc --repo /code/nginx --type context\n", prog);
     printf("  %s ngx_palloc --repo /code/nginx --type context --depth 3\n", prog);
-    printf("  %s \"memory pool\" --repo /code/nginx --type search --analysis-dir ./nginx_cache\n", prog);
-    printf("  %s \"event loop\" --repo /code/nginx --type search --analysis-dir ./nginx_cache --kind function --lang c\n", prog);
-    printf("  %s \"GPU kernel\" --repo /code/project --type search --analysis-dir ./project_cache --file cuda\n", prog);
+    printf("  %s \"memory pool\" --repo /code/nginx --type search --analysis-dir /opt/code_caches/nginx_cache\n", prog);
+    printf("  %s \"event loop\" --repo /code/nginx --type search --analysis-dir /opt/code_caches/nginx_cache --kind function --lang c\n", prog);
+    printf("  %s \"GPU kernel\" --repo /code/project --type search --analysis-dir /opt/code_caches/project_cache --file cuda\n", prog);
 }
 
 int main(int argc, char** argv) {
@@ -352,7 +352,7 @@ int main(int argc, char** argv) {
     const char* query = argv[1];
     const char* repo = NULL;
     const char* type = "auto";
-    const char* cache_dir = "./ai_code_memory";
+    const char* cache_dir = "/opt/ai_code_memory";
     const char* analysis_dir = NULL;
     const char* model_type = "jina";
     int pretty = 0;

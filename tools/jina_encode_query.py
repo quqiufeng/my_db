@@ -5,8 +5,8 @@ import numpy as np
 from tokenizers import Tokenizer
 import onnxruntime as ort
 
-model_path = "/home/dministrator/my_db/models/jina-embeddings-v2-base-code/model.onnx"
-tokenizer_path = "/home/dministrator/my_db/models/jina-embeddings-v2-base-code/tokenizer.json"
+model_path = "/opt/models/jina-embeddings-v2-base-code/model.onnx"
+tokenizer_path = "/opt/models/jina-embeddings-v2-base-code/tokenizer.json"
 
 tokenizer = Tokenizer.from_file(tokenizer_path)
 sess = ort.InferenceSession(model_path, providers=['CUDAExecutionProvider', 'CPUExecutionProvider'])

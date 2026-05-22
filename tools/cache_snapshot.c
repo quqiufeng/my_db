@@ -198,8 +198,8 @@ int main(int argc, char* argv[]) {
     if (argc < 3) {
         printf("Usage: %s <export|import|verify> <source> [destination]\n", argv[0]);
         printf("\nExamples:\n");
-        printf("  %s export ./my_cache ./snapshot      # Export cache to snapshot\n", argv[0]);
-        printf("  %s import ./snapshot ./my_cache      # Import snapshot to cache\n", argv[0]);
+        printf("  %s export /opt/code_caches/my_cache ./snapshot      # Export cache to snapshot\n", argv[0]);
+        printf("  %s import ./snapshot /opt/code_caches/my_cache      # Import snapshot to cache\n", argv[0]);
         printf("  %s verify ./snapshot                 # Verify snapshot integrity\n", argv[0]);
         return 1;
     }

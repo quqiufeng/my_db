@@ -32,7 +32,7 @@ static int mkdir_p(const char* path) {
 int main(int argc, char* argv[]) {
     if (argc < 4) {
         printf("Usage: %s <cache_dir> <namespace> <book_name>\n", argv[0]);
-        printf("Example: %s ./ai_code_memory /books/ddia ddia\n", argv[0]);
+        printf("Example: %s /opt/ai_code_memory /books/ddia ddia\n", argv[0]);
         return 1;
     }
     

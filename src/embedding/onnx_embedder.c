@@ -58,6 +58,11 @@ struct onnx_embedder {
     // Working buffers
     int64_t* input_ids;
     int64_t* attention_mask;
+    
+    // Cached tensor descriptors (avoid repeated CreateTensorWithDataAsOrtValue)
+    OrtValue* cached_input_tensor;
+    OrtValue* cached_mask_tensor;
+    int tensor_cache_valid;
 };
 
 static __thread char g_error_msg[256] = {0};
@@ -169,13 +174,13 @@ static int load_vocab(const char* vocab_path, vocab_hash_entry_t** out_hash, int
 
 // Find token id in vocab hash table
 static int vocab_lookup(vocab_hash_entry_t* hash_table, int hash_size, const char* token) {
-    unsigned int h = hash_str(token) % hash_size;
-    int start = h;
+    unsigned int h = hash_str(token) % (unsigned int)hash_size;
+    unsigned int start = h;
     while (hash_table[h].occupied) {
         if (strcmp(hash_table[h].token, token) == 0) {
             return hash_table[h].id;
         }
-        h = (h + 1) % hash_size;
+        h = (h + 1) % (unsigned int)hash_size;
         if (h == start) break;
     }
     return -1;
@@ -560,24 +565,76 @@ onnx_embedder_t* onnx_embedder_init(const char* model_path, const char* vocab_pa
     
     // 尝试添加 TensorRT Execution Provider (RTX 4090D - 24GB VRAM)
     // TensorRT 比 CUDA 更快（通常 2-5x）
-    OrtTensorRTProviderOptions trt_options;
-    memset(&trt_options, 0, sizeof(trt_options));
-    trt_options.device_id = 0;
-    trt_options.trt_max_partition_iterations = 1000;
-    trt_options.trt_min_subgraph_size = 1;
-    // RTX 4090D 有 24GB 显存，分配更多 workspace 提升性能
-    trt_options.trt_max_workspace_size = 12ULL * 1024 * 1024 * 1024;  // 12GB workspace
-    // Jina model requires FP32 precision (FP16 causes embedding quality issues)
-    trt_options.trt_fp16_enable = is_jina ? 0 : 1;
-    trt_options.trt_int8_enable = 0;
-    trt_options.trt_engine_cache_enable = 1;  // 缓存 engine，下次启动更快
-    // 使用绝对路径避免相对路径问题
+    // 使用 V2 API 以支持动态 batch shape profile（batch embedding 必需）
     static char trt_cache_path[512];
     snprintf(trt_cache_path, sizeof(trt_cache_path), "%s/trt_cache", getenv("HOME") ? getenv("HOME") : "/tmp");
-    trt_options.trt_engine_cache_path = trt_cache_path;
-    trt_options.trt_dump_subgraphs = 0;
     
-    status = g_ort->SessionOptionsAppendExecutionProvider_TensorRT(session_options, &trt_options);
+    OrtTensorRTProviderOptionsV2* trt_options_v2 = NULL;
+    int use_tensorrt = 0;
+    
+    // 尝试 V2 API（支持动态 shape profile）
+    if (g_ort->CreateTensorRTProviderOptions) {
+        status = g_ort->CreateTensorRTProviderOptions(&trt_options_v2);
+        if (status == NULL && trt_options_v2 != NULL) {
+            const char* keys[] = {
+                "device_id",
+                "trt_max_workspace_size",
+                "trt_fp16_enable",
+                "trt_int8_enable",
+                "trt_engine_cache_enable",
+                "trt_engine_cache_path",
+                "trt_dump_subgraphs",
+                "trt_profile_min_shapes",
+                "trt_profile_max_shapes",
+                "trt_profile_opt_shapes"
+            };
+            const char* values[] = {
+                "0",
+                "12884901888",
+                is_jina ? "0" : "1",
+                "0",
+                "1",
+                trt_cache_path,
+                "0",
+                "input_ids:1x512,attention_mask:1x512",
+                "input_ids:32x512,attention_mask:32x512",
+                "input_ids:8x512,attention_mask:8x512"
+            };
+            
+            status = g_ort->UpdateTensorRTProviderOptions(trt_options_v2, keys, values, 10);
+            if (status == NULL) {
+                status = g_ort->SessionOptionsAppendExecutionProvider_TensorRT_V2(session_options, trt_options_v2);
+                if (status == NULL) {
+                    use_tensorrt = 1;
+                } else {
+                    fprintf(stderr, "  [WARN] TensorRT V2 append failed, falling back to legacy API\n");
+                    g_ort->ReleaseStatus(status);
+                }
+            } else {
+                fprintf(stderr, "  [WARN] TensorRT V2 config failed, falling back to legacy API\n");
+                g_ort->ReleaseStatus(status);
+            }
+            g_ort->ReleaseTensorRTProviderOptions(trt_options_v2);
+        } else {
+            if (status) g_ort->ReleaseStatus(status);
+        }
+    }
+    
+    // Fallback: 旧版 API（不支持动态 batch，batch embedding 会失败）
+    if (!use_tensorrt) {
+        OrtTensorRTProviderOptions trt_options;
+        memset(&trt_options, 0, sizeof(trt_options));
+        trt_options.device_id = 0;
+        trt_options.trt_max_partition_iterations = 1000;
+        trt_options.trt_min_subgraph_size = 1;
+        trt_options.trt_max_workspace_size = 12ULL * 1024 * 1024 * 1024;
+        trt_options.trt_fp16_enable = is_jina ? 0 : 1;
+        trt_options.trt_int8_enable = 0;
+        trt_options.trt_engine_cache_enable = 1;
+        trt_options.trt_engine_cache_path = trt_cache_path;
+        trt_options.trt_dump_subgraphs = 0;
+        
+        status = g_ort->SessionOptionsAppendExecutionProvider_TensorRT(session_options, &trt_options);
     if (status != NULL) {
         // TensorRT 不可用，回退到 CUDA
         g_ort->ReleaseStatus(status);
@@ -605,6 +662,7 @@ onnx_embedder_t* onnx_embedder_init(const char* model_path, const char* vocab_pa
             printf("  Using TensorRT GPU acceleration (FP16)\n");
         }
     }
+    }  // close if (!use_tensorrt)
     
     status = g_ort->CreateSession(e->env, model_path, session_options, &e->session);
     g_ort->ReleaseSessionOptions(session_options);
@@ -622,6 +680,25 @@ onnx_embedder_t* onnx_embedder_init(const char* model_path, const char* vocab_pa
         g_ort->ReleaseStatus(status);
         onnx_embedder_free(e);
         return NULL;
+    }
+    
+    // Pre-create reusable tensor descriptors for single inference
+    // Shape is fixed at {1, max_seq_length} for single encode
+    int64_t input_shape[] = {1, e->max_seq_length};
+    status = g_ort->CreateTensorWithDataAsOrtValue(
+        e->memory_info, e->input_ids, e->max_seq_length * sizeof(int64_t),
+        input_shape, 2, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64, &e->cached_input_tensor);
+    if (status == NULL) {
+        status = g_ort->CreateTensorWithDataAsOrtValue(
+            e->memory_info, e->attention_mask, e->max_seq_length * sizeof(int64_t),
+            input_shape, 2, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64, &e->cached_mask_tensor);
+        if (status == NULL) {
+            e->tensor_cache_valid = 1;
+        }
+    }
+    if (status != NULL) {
+        g_ort->ReleaseStatus(status);
+        // Non-fatal: fallback to creating tensors per-call
     }
     
     printf("ONNX embedder initialized: model=%s, seq_len=%d, dim=%d\n",
@@ -733,41 +810,48 @@ int onnx_embedder_encode(onnx_embedder_t* e, const char* text, float* vector) {
         }
     }
     
-    // Create input tensors
-    int64_t input_shape[] = {1, e->max_seq_length};
-    OrtValue* input_tensor = NULL;
-    OrtValue* mask_tensor = NULL;
-    OrtStatus* status;
-    
-    status = g_ort->CreateTensorWithDataAsOrtValue(
-        e->memory_info, e->input_ids, e->max_seq_length * sizeof(int64_t),
-        input_shape, 2, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64, &input_tensor);
-    if (status != NULL) {
-        set_error("Failed to create input tensor");
-        g_ort->ReleaseStatus(status);
-        return -1;
-    }
-    
-    status = g_ort->CreateTensorWithDataAsOrtValue(
-        e->memory_info, e->attention_mask, e->max_seq_length * sizeof(int64_t),
-        input_shape, 2, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64, &mask_tensor);
-    if (status != NULL) {
-        g_ort->ReleaseValue(input_tensor);
-        set_error("Failed to create mask tensor");
-        g_ort->ReleaseStatus(status);
-        return -1;
-    }
-    
-    // Run inference
+    // Run inference (reuse cached tensor descriptors if available)
     const char* input_names[] = {"input_ids", "attention_mask"};
     const char* output_names[] = {e->output_name};
     OrtValue* output_tensor = NULL;
-    OrtValue* inputs[] = {input_tensor, mask_tensor};
     
-    status = g_ort->Run(e->session, NULL, input_names, (const OrtValue* const*)inputs, 2, output_names, 1, &output_tensor);
+    OrtStatus* status;
     
-    g_ort->ReleaseValue(input_tensor);
-    g_ort->ReleaseValue(mask_tensor);
+    if (e->tensor_cache_valid) {
+        // Fast path: reuse pre-created tensor descriptors
+        OrtValue* inputs[] = {e->cached_input_tensor, e->cached_mask_tensor};
+        status = g_ort->Run(e->session, NULL, input_names, (const OrtValue* const*)inputs, 2, output_names, 1, &output_tensor);
+    } else {
+        // Fallback: create new tensor descriptors (same as before)
+        int64_t input_shape[] = {1, e->max_seq_length};
+        OrtValue* input_tensor = NULL;
+        OrtValue* mask_tensor = NULL;
+        
+        status = g_ort->CreateTensorWithDataAsOrtValue(
+            e->memory_info, e->input_ids, e->max_seq_length * sizeof(int64_t),
+            input_shape, 2, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64, &input_tensor);
+        if (status != NULL) {
+            set_error("Failed to create input tensor");
+            g_ort->ReleaseStatus(status);
+            return -1;
+        }
+        
+        status = g_ort->CreateTensorWithDataAsOrtValue(
+            e->memory_info, e->attention_mask, e->max_seq_length * sizeof(int64_t),
+            input_shape, 2, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64, &mask_tensor);
+        if (status != NULL) {
+            g_ort->ReleaseValue(input_tensor);
+            set_error("Failed to create mask tensor");
+            g_ort->ReleaseStatus(status);
+            return -1;
+        }
+        
+        OrtValue* inputs[] = {input_tensor, mask_tensor};
+        status = g_ort->Run(e->session, NULL, input_names, (const OrtValue* const*)inputs, 2, output_names, 1, &output_tensor);
+        
+        g_ort->ReleaseValue(input_tensor);
+        g_ort->ReleaseValue(mask_tensor);
+    }
     
     if (status != NULL) {
         set_error("ONNX inference failed");
@@ -964,6 +1048,10 @@ int onnx_embedder_encode_batch(onnx_embedder_t* e, const char** texts, int count
 
 void onnx_embedder_free(onnx_embedder_t* e) {
     if (!e) return;
+    
+    // Release cached tensor descriptors
+    if (e->cached_input_tensor) g_ort->ReleaseValue(e->cached_input_tensor);
+    if (e->cached_mask_tensor) g_ort->ReleaseValue(e->cached_mask_tensor);
     
     if (e->memory_info) g_ort->ReleaseMemoryInfo(e->memory_info);
     if (e->session) g_ort->ReleaseSession(e->session);

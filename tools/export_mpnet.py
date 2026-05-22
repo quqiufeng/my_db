@@ -3,7 +3,7 @@
 import os
 import sys
 
-model_dir = "models/all-mpnet-base-v2"
+model_dir = "/opt/models/all-mpnet-base-v2"
 os.makedirs(model_dir, exist_ok=True)
 
 print("Downloading all-mpnet-base-v2...")

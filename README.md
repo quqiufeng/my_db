@@ -129,7 +129,7 @@ const char* json = db_select_by_pk_json(users, id);
 
 ```bash
 # 导入电子书
-./tools/import_book ./ai_code_memory ~/book.epub /books/my_book
+./tools/import_book /opt/ai_code_memory ~/book.epub /books/my_book
 
 # 语义搜索
 ./explore_book.sh /books/my_book search "distributed consensus"
@@ -172,8 +172,8 @@ make
 
 ```bash
 # 方式一：磁盘版（人工交互）
-./ai_code_search.sh analyze /opt/redis ./redis_cache
-./ai_code_search.sh search ./redis_cache "memory allocation" 10
+./ai_code_search.sh analyze /opt/redis /opt/code_caches/redis_cache
+./ai_code_search.sh search /opt/code_caches/redis_cache "memory allocation" 10
 
 # 方式二：记忆系统版（AI Agent 集成）
 ./analyze_repo.sh /opt/redis
@@ -184,7 +184,7 @@ make
 
 ```bash
 # 导入
-./tools/import_book ./ai_code_memory ~/ddia.epub /books/ddia
+./tools/import_book /opt/ai_code_memory ~/ddia.epub /books/ddia
 
 # 搜索并阅读
 ./explore_book.sh /books/ddia search "consensus algorithm"
@@ -245,7 +245,7 @@ my_db/
 │   ├── test_wal.c           # WAL 恢复测试
 │   └── ...
 │
-└── models/                  # AI 模型
+└── /opt/models/             # AI 模型（共享目录）
     └── jina-embeddings-v2-base-code/  # Jina v2 嵌入模型
 ```
 

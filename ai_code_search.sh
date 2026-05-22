@@ -16,10 +16,10 @@
 #   ./ai_code_search.sh analyze <repo_path> [cache_dir]          # 一键分析
 #
 # 示例:
-#   ./ai_code_search.sh index /opt/stable-diffusion.cpp ./sd_cache 4
-#   ./ai_code_search.sh vector ./sd_cache stable-diffusion.cpp
-#   ./ai_code_search.sh search ./sd_cache "upscale image" 10
-#   ./ai_code_search.sh dataflow ./nginx_cache c                 # 追踪 connection 指针的字段级数据流
+#   ./ai_code_search.sh index /opt/stable-diffusion.cpp /opt/code_caches/sd_cache 4
+#   ./ai_code_search.sh vector /opt/code_caches/sd_cache stable-diffusion.cpp
+#   ./ai_code_search.sh search /opt/code_caches/sd_cache "upscale image" 10
+#   ./ai_code_search.sh dataflow /opt/code_caches/nginx_cache c                 # 追踪 connection 指针的字段级数据流
 #
 
 # ============================================
@@ -62,45 +62,45 @@
 # 本系统用于对陌生代码库进行深度语义分析。以下是以 nginx 为例的完整探索流程：
 #
 # 【Phase 1: 索引与向量化】
-#   ./ai_code_search.sh index /opt/nginx ./nginx_cache 4
-#   ./ai_code_search.sh vector ./nginx_cache nginx
+#   ./ai_code_search.sh index /opt/nginx /opt/code_caches/nginx_cache 4
+#   ./ai_code_search.sh vector /opt/code_caches/nginx_cache nginx
 #   # 说明：先索引源码生成 chunks，再用 TensorRT GPU 生成语义向量
 #
 # 【Phase 2: 架构概览 - 用自然语言搜索核心概念】
-#   ./ai_code_search.sh search ./nginx_cache "event loop epoll kqueue" 10
-#   ./ai_code_search.sh search ./nginx_cache "HTTP request phase handler" 10
-#   ./ai_code_search.sh search ./nginx_cache "master process worker process fork" 10
-#   ./ai_code_search.sh search ./nginx_cache "memory pool palloc" 10
+#   ./ai_code_search.sh search /opt/code_caches/nginx_cache "event loop epoll kqueue" 10
+#   ./ai_code_search.sh search /opt/code_caches/nginx_cache "HTTP request phase handler" 10
+#   ./ai_code_search.sh search /opt/code_caches/nginx_cache "master process worker process fork" 10
+#   ./ai_code_search.sh search /opt/code_caches/nginx_cache "memory pool palloc" 10
 #   # 原理：用架构关键词搜索，找到核心实现文件和函数
 #   # 验证：查看返回的函数名、文件名、调用关系，确认是否为核心实现
 #
 # 【Phase 3: 调用关系分析 - 理解架构依赖】
-#   ./ai_code_search.sh search ./nginx_cache "upstream load balancing" 10
+#   ./ai_code_search.sh search /opt/code_caches/nginx_cache "upstream load balancing" 10
 #   # 关键发现：ngx_http_upstream_init_round_robin_peer 被多个算法调用
 #   # 洞察：Round-robin 是所有负载均衡算法的基础
 #
-#   ./ai_code_search.sh callgraph ./nginx_cache
+#   ./ai_code_search.sh callgraph /opt/code_caches/nginx_cache
 #   # 然后查看 call_graph.json，搜索某个函数的调用者列表
 #   # 例如：ngx_spawn_process 被用于启动 worker、cache manager、回收死亡 worker
 #
 # 【Phase 4: 子系统深入 - 逐步细化】
 #   # 内存管理
-#   ./ai_code_search.sh search ./nginx_cache "shared memory zone slab" 10
-#   ./ai_code_search.sh dataflow ./nginx_cache c
+#   ./ai_code_search.sh search /opt/code_caches/nginx_cache "shared memory zone slab" 10
+#   ./ai_code_search.sh dataflow /opt/code_caches/nginx_cache c
 #   # 配置解析
-#   ./ai_code_search.sh search ./nginx_cache "configuration parser lexer" 10
+#   ./ai_code_search.sh search /opt/code_caches/nginx_cache "configuration parser lexer" 10
 #   # SSL/TLS
-#   ./ai_code_search.sh search ./nginx_cache "SSL certificate handshake" 10
+#   ./ai_code_search.sh search /opt/code_caches/nginx_cache "SSL certificate handshake" 10
 #   # 缓存系统
-#   ./ai_code_search.sh search ./nginx_cache "file cache open read" 10
+#   ./ai_code_search.sh search /opt/code_caches/nginx_cache "file cache open read" 10
 #
 # 【Phase 5: 代码片段搜索 - 找到相似实现】
-#   ./ai_code_search.sh snippet ./nginx_cache ./my_epoll_code.cpp 5
+#   ./ai_code_search.sh snippet /opt/code_caches/nginx_cache ./my_epoll_code.cpp 5
 #   # 原理：将你的代码片段向量化，搜索代码库中最相似的实现
 #   # 用途：学习最佳实践、找到参考实现
 #
 # 【Phase 6: 变量数据流 - 追踪生命周期】
-#   ./ai_code_search.sh dataflow ./nginx_cache c
+#   ./ai_code_search.sh dataflow /opt/code_caches/nginx_cache c
 #   # 追踪 connection 指针的定义、赋值、使用位置
 #   # 理解变量在代码库中的流转路径
 #
@@ -205,16 +205,16 @@ check_tools() {
 # ============================================
 cmd_index() {
     local repo_path="${1:-}"
-    local cache_dir="${2:-./ai_code_memory}"
+    local cache_dir="${2:-/opt/ai_code_memory}"
     local workers="${3:-$(nproc)}"
 
     if [[ -z "$repo_path" ]]; then
         echo "用法: $0 index <repo_path> [cache_dir] [workers]"
         echo "  repo_path:  源码目录路径"
-        echo "  cache_dir:  输出缓存目录 (默认: ./ai_code_memory)"
+        echo "  cache_dir:  输出缓存目录 (默认: /opt/ai_code_memory)"
         echo "  workers:    并行工作进程数 (默认: CPU 核心数)"
         echo ""
-        echo "示例: $0 index /opt/stable-diffusion.cpp ./sd_cache 4"
+        echo "示例: $0 index /opt/stable-diffusion.cpp /opt/code_caches/sd_cache 4"
         exit 1
     fi
 
@@ -249,7 +249,7 @@ cmd_vector() {
         echo "  cache_dir:     缓存目录路径"
         echo "  project_name:  项目名称（用于向量文件命名）"
         echo ""
-        echo "示例: $0 vector ./sd_cache stable-diffusion.cpp"
+        echo "示例: $0 vector /opt/code_caches/sd_cache stable-diffusion.cpp"
         exit 1
     fi
 
@@ -329,9 +329,9 @@ cmd_search() {
         echo "  max_results:  返回结果数量 (默认: 10)"
         echo ""
         echo "示例:"
-        echo "  $0 search ./sd_cache \"upscale image\" 5"
-        echo "  $0 search ./sd_cache \"memory allocation buffer pool\" 10"
-        echo "  $0 search ./sd_cache \"VAE encode latent\" 5"
+        echo "  $0 search /opt/code_caches/sd_cache \"upscale image\" 5"
+        echo "  $0 search /opt/code_caches/sd_cache \"memory allocation buffer pool\" 10"
+        echo "  $0 search /opt/code_caches/sd_cache \"VAE encode latent\" 5"
         exit 1
     fi
 
@@ -365,7 +365,7 @@ cmd_snippet() {
         echo "  max_results: 返回结果数量 (默认: 5)"
         echo ""
         echo "示例:"
-        echo "  $0 snippet ./sd_cache ./my_kernel.cpp 5"
+        echo "  $0 snippet /opt/code_caches/sd_cache ./my_kernel.cpp 5"
         exit 1
     fi
 
@@ -387,14 +387,14 @@ cmd_snippet() {
 # ============================================
 cmd_analyze() {
     local repo_path="${1:-}"
-    local cache_dir="${2:-./ai_code_memory}"
+    local cache_dir="${2:-/opt/ai_code_memory}"
 
     if [[ -z "$repo_path" ]]; then
         echo "用法: $0 analyze <repo_path> [cache_dir]"
         echo "  repo_path:  源码目录路径"
-        echo "  cache_dir:  缓存目录 (默认: ./ai_code_memory)"
+        echo "  cache_dir:  缓存目录 (默认: /opt/ai_code_memory)"
         echo ""
-        echo "示例: $0 analyze /opt/stable-diffusion.cpp ./sd_cache"
+        echo "示例: $0 analyze /opt/stable-diffusion.cpp /opt/code_caches/sd_cache"
         exit 1
     fi
 
@@ -430,7 +430,7 @@ cmd_analyze() {
 # 子命令: demo - 演示系统能力
 # ============================================
 cmd_demo() {
-    local cache_dir="${1:-./sd_cache}"
+    local cache_dir="${1:-/opt/code_caches/sd_cache}"
 
     if [[ ! -d "${cache_dir}/vectors" ]]; then
         error "未找到向量数据，请先运行: $0 vector ${cache_dir}"
@@ -481,12 +481,12 @@ cmd_dataflow() {
         echo "  - 分类显示:   定义(DEF) / 赋值(SET) / 使用(USE)"
         echo ""
         echo "示例:"
-        echo "  $0 dataflow ./nginx_cache c          # 追踪 connection 指针"
+        echo "  $0 dataflow /opt/code_caches/nginx_cache c          # 追踪 connection 指针"
         echo "    输出: c->fd, c->data, c->ssl, c->sockaddr 等字段级分析"
         echo "    输出: 跨函数传递链 (哪些函数接收并使用了 c)"
         echo ""
-        echo "  $0 dataflow ./nginx_cache pool       # 追踪内存池"
-        echo "  $0 dataflow ./sd_cache ctx           # 追踪上下文指针"
+        echo "  $0 dataflow /opt/code_caches/nginx_cache pool       # 追踪内存池"
+        echo "  $0 dataflow /opt/code_caches/sd_cache ctx           # 追踪上下文指针"
         exit 1
     fi
 
@@ -548,12 +548,12 @@ main() {
             echo "  demo [cache]                    - 演示系统能力"
             echo ""
             echo "示例:"
-            echo "  $0 index /opt/stable-diffusion.cpp ./sd_cache 4"
-            echo "  $0 vector ./sd_cache stable-diffusion.cpp"
-            echo "  $0 search ./sd_cache \"upscale image\" 5"
-            echo "  $0 snippet ./sd_cache ./my_code.cpp 5"
-            echo "  $0 dataflow ./nginx_cache c     # 追踪 connection (含字段级和跨函数流)"
-            echo "  $0 analyze /opt/stable-diffusion.cpp ./sd_cache"
+            echo "  $0 index /opt/stable-diffusion.cpp /opt/code_caches/sd_cache 4"
+            echo "  $0 vector /opt/code_caches/sd_cache stable-diffusion.cpp"
+            echo "  $0 search /opt/code_caches/sd_cache \"upscale image\" 5"
+            echo "  $0 snippet /opt/code_caches/sd_cache ./my_code.cpp 5"
+            echo "  $0 dataflow /opt/code_caches/nginx_cache c     # 追踪 connection (含字段级和跨函数流)"
+            echo "  $0 analyze /opt/stable-diffusion.cpp /opt/code_caches/sd_cache"
             echo ""
             echo "高级搜索选项（直接用 vector_search 工具）:"
             echo "  --model jina      使用 Jina v2 代码模型"

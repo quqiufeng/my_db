@@ -459,8 +459,8 @@ tokenizers_free(tok);
 
 // 自动检测 tokenizer 类型（BPE/WordPiece）
 onnx_embedder_t* embedder = onnx_embedder_init(
-    "models/codebert-base/model.onnx",   // ONNX 模型
-    "models/codebert-base/vocab.json",   // vocab.json（BPE）
+    "/opt/models/codebert-base/model.onnx",   // ONNX 模型
+    "/opt/models/codebert-base/vocab.json",   // vocab.json（BPE）
     512,                                 // max_seq_length
     768                                  // dim
 );

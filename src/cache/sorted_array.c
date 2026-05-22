@@ -128,7 +128,25 @@ int cache_sorted_remove(cache_t* cache, const char* key, size_t key_len) {
     cache_sorted_array_t* sorted = &cache->sorted;
     if (sorted->count == 0) return -1;
     
-    ensure_sorted(cache);  // 删除前需要先排序才能二分查找
+    // 优化：如果跳表已启用且规模足够，直接用跳表定位，避免全表排序
+    if (sorted->skiplist && sorted->count >= CACHE_SKIPLIST_THRESHOLD) {
+        cache_skiplist_node_t* node = cache_skiplist_find(sorted->skiplist, key, key_len);
+        if (node) {
+            // 在 sorted array 中查找对应 offset 并删除（O(n) 但 n 通常很小）
+            for (size_t i = 0; i < sorted->count; i++) {
+                if (sorted->offsets[i] == node->offset) {
+                    sorted->offsets[i] = sorted->offsets[sorted->count - 1];
+                    sorted->count--;
+                    sorted->dirty = 1;
+                    cache_skiplist_remove(sorted->skiplist, key, key_len);
+                    return 0;
+                }
+            }
+        }
+        return -1;  // 跳表中未找到
+    }
+    
+    ensure_sorted(cache);  // fallback：排序后二分查找
     
     // 二分查找
     size_t left = 0, right = sorted->count;

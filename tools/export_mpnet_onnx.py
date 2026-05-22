@@ -6,7 +6,7 @@ import torch
 from transformers import AutoModel, AutoTokenizer
 
 src_dir = "/opt/all-mpnet-base-v2"
-dst_dir = "models/all-mpnet-base-v2"
+dst_dir = "/opt/models/all-mpnet-base-v2"
 os.makedirs(dst_dir, exist_ok=True)
 
 print("Loading model...")

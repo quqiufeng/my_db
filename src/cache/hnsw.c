@@ -97,6 +97,10 @@ struct hnsw_index {
     size_t node_count;
     size_t node_capacity;
     
+    // 连续向量存储池（提升 cache locality，减少 malloc 碎片）
+    float* vector_pool;
+    size_t vector_pool_capacity;  // 按 float 计数
+    
     int max_level;
     size_t entry_point;
     
@@ -114,23 +118,43 @@ struct hnsw_index {
     uint32_t current_epoch;
 };
 
+// 确保 vector_pool 有足够容量，并更新所有 node 的 vector 指针
+static int ensure_vector_pool_capacity(hnsw_index_t* idx, size_t n) {
+    size_t need = n * idx->dim;
+    if (need <= idx->vector_pool_capacity) return CACHE_OK;
+    
+    size_t new_cap = need * 2;
+    if (new_cap < 64 * idx->dim) new_cap = 64 * idx->dim;
+    
+    float* new_pool = realloc(idx->vector_pool, sizeof(float) * new_cap);
+    if (!new_pool) return CACHE_ERR_NOMEM;
+    
+    idx->vector_pool = new_pool;
+    idx->vector_pool_capacity = new_cap;
+    
+    // realloc 后地址可能改变，更新所有有效 node 的 vector 指针
+    for (size_t i = 0; i < idx->node_count; i++) {
+        if (idx->nodes[i].valid) {
+            idx->nodes[i].vector = idx->vector_pool + i * idx->dim;
+        }
+    }
+    
+    return CACHE_OK;
+}
+
 // ====== 距离计算 ======
 
 // 余弦距离 = 1 - cosine_similarity
 // 输入向量已归一化，cosine_similarity = dot(a,b) / (|a||b|) = dot(a,b)
 // 返回距离（越小越近），用于 HNSW 构建和搜索
 static float hnsw_distance(const hnsw_index_t* idx, const float* a, const float* b) {
-    double dot = 0.0, norm_a = 0.0, norm_b = 0.0;
+    // 输入向量已归一化：cosine_similarity = dot(a,b) / (|a||b|) = dot(a,b)
+    // 直接返回 1 - dot_product 作为距离（越小越近）
+    float dot = 0.0f;
     for (size_t i = 0; i < idx->dim; i++) {
         dot += a[i] * b[i];
-        norm_a += a[i] * a[i];
-        norm_b += b[i] * b[i];
     }
-    double cosine = dot / sqrt(norm_a * norm_b);
-    // 映射到 [0, 1]（cosine范围[-1,1]，映射到[0,1]）
-    float sim = (float)((cosine + 1.0) / 2.0);
-    // 返回距离（HNSW 需要距离度量：越小越近）
-    return 1.0f - sim;
+    return 1.0f - dot;
 }
 
 // ====== 随机层数生成 ======
@@ -308,6 +332,15 @@ hnsw_index_t* hnsw_create(size_t dim) {
         return NULL;
     }
     
+    // 预分配连续向量池
+    idx->vector_pool_capacity = idx->node_capacity * dim;
+    idx->vector_pool = calloc(idx->vector_pool_capacity, sizeof(float));
+    if (!idx->vector_pool) {
+        free(idx->nodes);
+        free(idx);
+        return NULL;
+    }
+    
     idx->max_level = -1;
     idx->entry_point = (size_t)-1;
     idx->valid_count = 0;
@@ -323,7 +356,7 @@ void hnsw_destroy(hnsw_index_t* idx) {
     
     for (size_t i = 0; i < idx->node_count; i++) {
         hnsw_node_impl_t* node = &idx->nodes[i];
-        if (node->vector) free(node->vector);
+        // vector 由统一 pool 管理，不单独释放
         if (node->neighbors) {
             for (int l = 0; l <= node->level; l++) {
                 neighbor_list_destroy(&node->neighbors[l]);
@@ -332,6 +365,7 @@ void hnsw_destroy(hnsw_index_t* idx) {
         }
     }
     free(idx->nodes);
+    free(idx->vector_pool);  // 统一释放连续向量池
     free(idx->free_list);
     free(idx->visited_epochs);
     free(idx);
@@ -365,6 +399,10 @@ int hnsw_reserve(hnsw_index_t* idx, size_t n) {
     memset(&new_nodes[idx->node_capacity], 0, sizeof(hnsw_node_impl_t) * (n - idx->node_capacity));
     idx->nodes = new_nodes;
     idx->node_capacity = n;
+    
+    // 同步扩容连续向量池
+    int ret = ensure_vector_pool_capacity(idx, n);
+    if (ret != CACHE_OK) return ret;
     
     uint32_t* new_epochs = realloc(idx->visited_epochs, sizeof(uint32_t) * n);
     if (new_epochs) {
@@ -404,14 +442,18 @@ int hnsw_insert(hnsw_index_t* idx, size_t id, const float* vector) {
             idx->nodes = new_nodes;
             memset(&idx->nodes[idx->node_capacity], 0, sizeof(hnsw_node_impl_t) * (new_cap - idx->node_capacity));
             idx->node_capacity = new_cap;
+            
+            // 同步扩容连续向量池
+            int ret = ensure_vector_pool_capacity(idx, new_cap);
+            if (ret != CACHE_OK) return ret;
         }
         node_idx = idx->node_count++;
     }
     
     hnsw_node_impl_t* node = &idx->nodes[node_idx];
     node->id = id;
-    node->vector = malloc(sizeof(float) * idx->dim);
-    if (!node->vector) return CACHE_ERR_NOMEM;
+    // 从统一 pool 分配向量（提升 cache locality）
+    node->vector = idx->vector_pool + node_idx * idx->dim;
     memcpy(node->vector, vector, sizeof(float) * idx->dim);
     node->level = hnsw_random_level(idx);
     node->valid = 1;
@@ -420,8 +462,9 @@ int hnsw_insert(hnsw_index_t* idx, size_t id, const float* vector) {
     // 分配邻居列表
     node->neighbors = calloc(node->level + 1, sizeof(neighbor_list_t));
     if (!node->neighbors) {
-        free(node->vector);
-        node->vector = NULL;
+        // 不清空 vector，由 pool 统一管理
+        node->valid = 0;
+        idx->valid_count--;
         return CACHE_ERR_NOMEM;
     }
     
@@ -433,8 +476,9 @@ int hnsw_insert(hnsw_index_t* idx, size_t id, const float* vector) {
                 neighbor_list_destroy(&node->neighbors[j]);
             }
             free(node->neighbors);
-            free(node->vector);
-            node->vector = NULL;
+            node->neighbors = NULL;
+            node->valid = 0;
+            idx->valid_count--;
             return CACHE_ERR_NOMEM;
         }
     }

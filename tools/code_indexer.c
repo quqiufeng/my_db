@@ -627,12 +627,12 @@ int main(int argc, char** argv) {
         printf("High-performance code indexer (C + multiprocess)\n");
         printf("Usage: %s <repo_path> [cache_dir] [num_workers]\n", argv[0]);
         printf("\nExample:\n");
-        printf("  %s /opt/linux ./ai_code_memory 8\n", argv[0]);
+        printf("  %s /opt/linux /opt/ai_code_memory 8\n", argv[0]);
         return 1;
     }
     
     const char* repo_path = argv[1];
-    const char* cache_dir = (argc > 2) ? argv[2] : "./ai_code_memory";
+    const char* cache_dir = (argc > 2) ? argv[2] : "/opt/ai_code_memory";
     int num_workers = (argc > 3) ? atoi(argv[3]) : sysconf(_SC_NPROCESSORS_ONLN);
     if (num_workers <= 0) num_workers = 4;
     

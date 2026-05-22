@@ -806,9 +806,9 @@ int main(int argc, char** argv) {
         printf("  %s analyze <cache_dir>              # Analyze all variables\n", argv[0]);
         printf("  %s show <cache_dir> <var_name>     # Show data flow for variable\n", argv[0]);
         printf("\nExamples:\n");
-        printf("  %s analyze ./nginx_cache\n", argv[0]);
-        printf("  %s show ./nginx_cache c            # Shows c->fd, c->data, etc.\n", argv[0]);
-        printf("  %s show ./nginx_cache ngx_connection  # Cross-function flow\n", argv[0]);
+        printf("  %s analyze /opt/code_caches/nginx_cache\n", argv[0]);
+        printf("  %s show /opt/code_caches/nginx_cache c            # Shows c->fd, c->data, etc.\n", argv[0]);
+        printf("  %s show /opt/code_caches/nginx_cache ngx_connection  # Cross-function flow\n", argv[0]);
         return 1;
     }
     

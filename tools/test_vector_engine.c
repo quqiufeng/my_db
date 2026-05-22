@@ -3,7 +3,7 @@
 #include "vector_engine.h"
 
 int main(int argc, char** argv) {
-    const char* analysis_dir = argc > 1 ? argv[1] : "./nginx_cache";
+    const char* analysis_dir = argc > 1 ? argv[1] : "/opt/code_caches/nginx_cache";
     const char* query = argc > 2 ? argv[2] : "memory pool allocation";
     const char* repo = argc > 3 ? argv[3] : "/code/local/nginx";
     

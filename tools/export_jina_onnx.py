@@ -9,7 +9,7 @@ import torch
 from transformers import BertTokenizer, BertModel, BertConfig
 
 INPUT_DIR = "/opt/jina-embeddings-v2-base-code"
-OUTPUT_DIR = "/home/dministrator/my_db/models/jina-embeddings-v2-base-code"
+OUTPUT_DIR = "/opt/models/jina-embeddings-v2-base-code"
 
 def export():
     print("Loading Jina model from /opt/jina-embeddings-v2-base-code...")

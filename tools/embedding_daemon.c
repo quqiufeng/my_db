@@ -29,8 +29,8 @@ static int init_models() {
     // MPNet
     printf("Loading MPNet model...\n");
     models[0].embedder = onnx_embedder_init(
-        "models/all-mpnet-base-v2/model.onnx",
-        "models/all-mpnet-base-v2/vocab.txt",
+        "/opt/models/all-mpnet-base-v2/model.onnx",
+        "/opt/models/all-mpnet-base-v2/vocab.txt",
         128, 768
     );
     if (!models[0].embedder) {
@@ -44,8 +44,8 @@ static int init_models() {
     // Jina
     printf("Loading Jina model...\n");
     models[1].embedder = onnx_embedder_init(
-        "models/jina-embeddings-v2-base-code/model.onnx",
-        "models/jina-embeddings-v2-base-code/vocab.json",
+        "/opt/models/jina-embeddings-v2-base-code/model.onnx",
+        "/opt/models/jina-embeddings-v2-base-code/vocab.json",
         512, 768
     );
     if (!models[1].embedder) {
