@@ -12,6 +12,10 @@
 extern "C" {
 #include "mobi.h"
 #include "index.h"
+#include "parse_rawml.h"
+
+// Forward declaration of internal libmobi function
+MOBI_RET mobi_get_offset_by_posoff(uint32_t *file_number, size_t *offset, const MOBIRawml *rawml, const size_t pos_fid, const size_t pos_off);
 
 #define API __attribute__((visibility("default")))
 
@@ -143,6 +147,21 @@ API int mobi_extract_text(void* handle, char** out_text, size_t* out_len) {
         return 0;
     }
 
+    // 辅助函数：跳过 UTF-8 续字节，找到有效字符起始
+    auto skip_utf8_continuation = [](const char* data, size_t size) -> size_t {
+        size_t offset = 0;
+        while (offset < size) {
+            unsigned char c = (unsigned char)data[offset];
+            // 如果是续字节 (0x80-0xBF)，跳过
+            if ((c & 0xC0) == 0x80) {
+                offset++;
+            } else {
+                break;
+            }
+        }
+        return offset;
+    };
+    
     // 收集所有文本部分
     std::string raw_text;
     
@@ -151,7 +170,8 @@ API int mobi_extract_text(void* handle, char** out_text, size_t* out_len) {
     if (parts) {
         while (parts) {
             if (parts->data && parts->size > 0) {
-                extract_text_from_html((const char*)parts->data, parts->size, raw_text);
+                size_t skip = skip_utf8_continuation((const char*)parts->data, parts->size);
+                extract_text_from_html((const char*)parts->data + skip, parts->size - skip, raw_text);
             }
             parts = parts->next;
         }
@@ -162,37 +182,26 @@ API int mobi_extract_text(void* handle, char** out_text, size_t* out_len) {
         parts = h->rawml->flow;
         while (parts) {
             if (parts->data && parts->size > 0) {
-                extract_text_from_html((const char*)parts->data, parts->size, raw_text);
+                size_t skip = skip_utf8_continuation((const char*)parts->data, parts->size);
+                extract_text_from_html((const char*)parts->data + skip, parts->size - skip, raw_text);
             }
             parts = parts->next;
         }
     }
     
-    // 删除目录部分
+    // 保留完整文本（包括目录、推荐序等），由 import_book 自行识别章节边界
     std::string result = raw_text;
-    const char* text = raw_text.c_str();
-    
-    // 删除目录部分
-    // 方法：查找 "第一章" 的所有出现位置
-    // 目录中的章节标题间距很短，正文中的间距很长
-    const char* first = strstr(text, "第一章");
-    if (first) {
-        const char* second = strstr(first + 1, "第一章");
-        if (second) {
-            size_t dist = second - first;
-            if (dist > 10000) {
-                // 第一个在目录中，第二个在正文中
-                result = second;
-            }
-        }
-    }
 
-    // 分配并缓存结果
+    // 分配并缓存结果（支持中间包含 \0 的文本）
     h->text_cache_len = result.length();
     h->text_cache = (char*)malloc(h->text_cache_len + 1);
     if (!h->text_cache) return -1;
 
-    memcpy(h->text_cache, result.c_str(), h->text_cache_len + 1);
+    // 逐字节复制，避免 std::string::c_str() 在 \0 处截断
+    for (size_t i = 0; i < h->text_cache_len; i++) {
+        h->text_cache[i] = result[i];
+    }
+    h->text_cache[h->text_cache_len] = '\0';
     *out_text = h->text_cache;
     *out_len = h->text_cache_len;
     return 0;
@@ -289,14 +298,9 @@ API int mobi_get_chapters(void* handle, MobiChapter** out_chapters, int* out_cou
         // 获取位置偏移
         size_t offset = 0;
         if (mobi_is_rawml_kf8(h->rawml)) {
-            uint32_t posfid, posoff;
-            unsigned int tag_ncx_posfid[] = {6, 0};
-            unsigned int tag_ncx_posoff[] = {6, 1};
-            if (mobi_get_indxentry_tagvalue(&posfid, ncx_entry, tag_ncx_posfid) == MOBI_SUCCESS &&
-                mobi_get_indxentry_tagvalue(&posoff, ncx_entry, tag_ncx_posoff) == MOBI_SUCCESS) {
-                // 简化：使用 file 编号作为大致位置
-                offset = posfid * 10000 + posoff;
-            }
+            // KF8/AZW3: posfid/posoff 是 part 内部偏移，不是全文拼接后的字节偏移
+            // 在 full-text 模式下无法直接使用，设为 0 表示不可靠
+            offset = 0;
         } else {
             uint32_t filepos;
             unsigned int tag_ncx_filepos[] = {1, 0};
@@ -351,12 +355,28 @@ API int mobi_get_chapter_text(void* handle, int chapter_index, char** out_text, 
         mobi_get_indxentry_tagvalue(&posfid, ncx_entry, tag_ncx_posfid);
         mobi_get_indxentry_tagvalue(&posoff, ncx_entry, tag_ncx_posoff);
         
+        // KF8: 使用 libmobi 的 mobi_get_offset_by_posoff 获取实际的 part UID 和字节偏移
+        uint32_t file_nr = 0;
+        size_t actual_offset = 0;
+        if (mobi_get_offset_by_posoff(&file_nr, &actual_offset, h->rawml, posfid, posoff) == MOBI_SUCCESS) {
+            posfid = file_nr;
+            posoff = actual_offset;
+        }
+        
         // 获取下一章节的偏移作为结束位置
         if (chapter_index + 1 < h->chapter_count) {
             const MOBIIndexEntry* next_entry = &h->rawml->ncx->entries[chapter_index + 1];
             uint32_t next_fid = 0, next_off = 0;
             mobi_get_indxentry_tagvalue(&next_fid, next_entry, tag_ncx_posfid);
             mobi_get_indxentry_tagvalue(&next_off, next_entry, tag_ncx_posoff);
+            
+            // 同样转换 next_fid
+            uint32_t next_file_nr = 0;
+            size_t next_actual_offset = 0;
+            if (mobi_get_offset_by_posoff(&next_file_nr, &next_actual_offset, h->rawml, next_fid, next_off) == MOBI_SUCCESS) {
+                next_fid = next_file_nr;
+                next_off = next_actual_offset;
+            }
             
             if (next_fid == posfid) {
                 end_offset = next_off;
@@ -374,13 +394,22 @@ API int mobi_get_chapter_text(void* handle, int chapter_index, char** out_text, 
         }
     }
     
-    // 获取对应的 markup 部分（直接遍历 markup 链表）
+    // 获取对应的 markup 部分（直接遍历 markup 链表，如找不到则查找 flow 链表）
     MOBIPart* part = h->rawml->markup;
     while (part) {
         if (part->uid == posfid) {
             break;
         }
         part = part->next;
+    }
+    if (!part || !part->data || part->size == 0) {
+        part = h->rawml->flow;
+        while (part) {
+            if (part->uid == posfid) {
+                break;
+            }
+            part = part->next;
+        }
     }
     if (!part || !part->data || part->size == 0) {
         return -1;
@@ -395,7 +424,40 @@ API int mobi_get_chapter_text(void* handle, int chapter_index, char** out_text, 
         end_offset = data_size;
     }
     
+    // 修复：如果 posoff 落在 HTML 标签中间，跳到标签结束处
+    {
+        size_t i = posoff;
+        // 向前查找最近的 <
+        size_t tag_start = posoff;
+        while (tag_start > 0 && data[tag_start] != '<') tag_start--;
+        if (data[tag_start] == '<') {
+            // 向前查找 >
+            size_t tag_end = posoff;
+            while (tag_end < data_size && data[tag_end] != '>') tag_end++;
+            if (tag_end < data_size && data[tag_end] == '>' && posoff > tag_start && posoff < tag_end) {
+                // posoff 在 <...> 内部，跳到 > 之后
+                posoff = tag_end + 1;
+            }
+        }
+    }
+    
+    // 修复 UTF-8：确保 posoff 在有效的 UTF-8 字符起始位置
+    while (posoff < data_size && posoff < end_offset) {
+        unsigned char c = (unsigned char)data[posoff];
+        // 如果当前字节是 UTF-8 续字节 (0x80-0xBF)，向前移动到字符起始
+        if ((c & 0xC0) == 0x80) {
+            posoff++;
+        } else {
+            break;
+        }
+    }
+    
     size_t text_len = end_offset - posoff;
+    if (text_len == 0) {
+        *out_text = nullptr;
+        *out_len = 0;
+        return -1;
+    }
     
     // 转换为纯文本
     std::string result;
@@ -436,7 +498,11 @@ API int mobi_get_chapter_text(void* handle, int chapter_index, char** out_text, 
     *out_text = (char*)malloc(*out_len + 1);
     if (!*out_text) return -1;
     
-    memcpy(*out_text, result.c_str(), *out_len + 1);
+    // 逐字节复制，避免 std::string::c_str() 在 \0 处截断
+    for (size_t i = 0; i < *out_len; i++) {
+        (*out_text)[i] = result[i];
+    }
+    (*out_text)[*out_len] = '\0';
     return 0;
 }
 

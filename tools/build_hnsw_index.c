@@ -52,6 +52,23 @@ int main(int argc, char** argv) {
     }
     
     for (uint32_t i = 0; i < count; i++) {
+        // Read name length and skip name
+        uint32_t name_len;
+        if (fread(&name_len, 4, 1, fp) != 1) {
+            fprintf(stderr, "Failed to read name length for vector %u\n", i);
+            for (uint32_t j = 0; j < i; j++) free(vectors[j]);
+            free(vectors);
+            fclose(fp);
+            return 1;
+        }
+        if (fseek(fp, name_len, SEEK_CUR) != 0) {
+            fprintf(stderr, "Failed to skip name for vector %u\n", i);
+            for (uint32_t j = 0; j < i; j++) free(vectors[j]);
+            free(vectors);
+            fclose(fp);
+            return 1;
+        }
+        
         vectors[i] = malloc(dim * sizeof(float));
         if (!vectors[i]) {
             fprintf(stderr, "Failed to allocate vector %u\n", i);

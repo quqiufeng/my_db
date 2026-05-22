@@ -334,12 +334,12 @@ elon_musk/
 
 当前系统已导入以下书籍：
 
-| 命名空间 | 书名 | 格式 | 章节数 | 向量数 |
-|----------|------|------|--------|--------|
-| `/books/ddia` | Designing Data-Intensive Applications | PDF | 210 | 10,918 |
-| `/books/cybersec` | Cybersecurity | MOBI | 10 | 5,323 |
-| `/books/elon_musk` | 硅谷钢铁侠 | AZW3 | 23 | 144 |
-| `/books/staff_engineer` | The Staff Engineer's Path | EPUB | 21 | 82 |
+| 命名空间 | 书名 | 格式 | 章节数 | 页数 | 向量数 |
+|----------|------|------|--------|------|--------|
+| `/books/硅谷钢铁侠` | 硅谷钢铁侠 | AZW3 | 23 | 838 | 2,094 |
+| `/books/Data.Engineering.for.Cybersecurity.2025.7` | Data Engineering for Cybersecurity | MOBI | 25 | 633 | 1,515 |
+| `/books/designing-data-intensive-applications` | Designing Data-Intensive Applications | PDF | 30 | 4,193 | 4,197 |
+| `/books/OReilly.The.Staff.Engineer's.Path.2022.9` | The Staff Engineer's Path | EPUB | 21 | 1,433 | 1,433 |
 
 **查看所有命名空间**：
 ```bash
@@ -905,6 +905,364 @@ if (g_embedder) {
 - 所有格式均正确生成向量并自动构建 HNSW 索引
 - 语义搜索正常工作
 
+---
+
+## AZW3/MOBI 分页质量与搜索分数修复实录
+
+### 背景
+
+在导入 AZW3 格式书籍（如《硅谷钢铁侠》）时，发现三个严重问题：
+1. **分页质量差**：章节文本从 HTML 标签中间截断，导致每个段落开头出现 `��`（非法 UTF-8 序列）
+2. **搜索分数异常**：HNSW 搜索所有结果分数均为 0.5，完全无区分度
+3. **章节定位失败**：AZW3 KF8 格式下，`mobi_get_chapter_text()` 对后半部分章节全部返回失败
+
+### 诊断过程
+
+#### 问题 8: AZW3 KF8 章节定位错误
+
+**现象**：23 章的书只有前 10 章能提取到文本，后续章节全部失败。
+
+**根因**：KF8 格式中，NCX 索引存储的 `posfid` 不是直接的 part UID，而是 **fragment 表的索引**。需要查 `rawml->frag` 表获取实际的 `file_nr`，再通过 `rawml->skel` 计算字节偏移。
+
+**修复**（`src/importer/wrappers/mobi_wrapper.cpp`）：
+```cpp
+// KF8: 使用 libmobi 的 mobi_get_offset_by_posoff 获取实际的 part UID 和字节偏移
+uint32_t file_nr = 0;
+size_t actual_offset = 0;
+if (mobi_get_offset_by_posoff(&file_nr, &actual_offset, h->rawml, posfid, posoff) == MOBI_SUCCESS) {
+    posfid = file_nr;
+    posoff = actual_offset;
+}
+```
+
+同时增加 `flow` 链表 fallback（某些章节在 `markup` 中找不到时，在 `flow` 中查找）。
+
+**结果**：23 章全部成功提取，章节边界准确。
+
+#### 问题 9: HTML 标签边界截断导致 UTF-8 乱码
+
+**现象**：每个 page 的 Markdown 文件开头都有 `��`（如 `��别人会以为...`）。
+
+**根因**：`mobi_get_offset_by_posoff` 返回的 `posoff` 字节偏移可能落在 `<a id="...">` 这样的 HTML 标签中间。`extract_text_from_html` 处理时把标签内字节当作普通文本输出，产生大量独立续字节（如 `0x80`, `0x82`）。
+
+**修复**（`src/importer/wrappers/mobi_wrapper.cpp`）：
+在提取文本前，如果 `posoff` 落在 `<...>` 标签内部，跳到 `>` 之后：
+```cpp
+// 修复：如果 posoff 落在 HTML 标签中间，跳到标签结束处
+size_t tag_start = posoff;
+while (tag_start > 0 && data[tag_start] != '<') tag_start--;
+if (data[tag_start] == '<') {
+    size_t tag_end = posoff;
+    while (tag_end < data_size && data[tag_end] != '>') tag_end++;
+    if (tag_end < data_size && data[tag_end] == '>' && 
+        posoff > tag_start && posoff < tag_end) {
+        posoff = tag_end + 1;
+    }
+}
+```
+
+**结果**：段落开头不再有 `��`，中文句号 `。`（E3 80 82）完整保留。
+
+#### 问题 10: 句子边界切分吃掉多字节标点
+
+**现象**：即使修复了标签边界，每个 page 的开头仍然缺少前 1-2 个字符。
+
+**根因**：`is_sentence_boundary()` 返回统一的 `1`，而 `split_paragraphs` 阶段 2 和阶段 3 都执行 `chunk_start = q + 1`。对于中文 3 字节标点（如 `。` E3 80 82），`q + 1` 会落在第二个字节 `0x80` 上，导致下一段从这个非法位置开始。
+
+**修复**（`tools/import_book.c`）：
+1. `is_sentence_boundary()` 改为返回边界长度：
+```c
+// 中文标点（UTF-8，3字节）
+if (c3 == 0x82 || c3 == 0x81 || c3 == 0x9c || c3 == 0x83 || c3 == 0x9a) {
+    return 3;  // 原来是 return 1
+}
+
+// 换行符
+if (*p == '\n' && p + 1 < end && p[1] == '\n') {
+    return 2;  // 原来是 return 1
+}
+```
+
+2. 切分逻辑使用 `boundary_len` 而非固定 `+1`：
+```c
+int boundary_len = is_sentence_boundary(q, end);
+if (boundary_len > 0) {
+    size_t len = q - chunk_start + boundary_len;
+    // ...
+    chunk_start = q + boundary_len;  // 原来是 q + 1
+}
+```
+
+**结果**：中文标点完整保留在上一段末尾，下一段从正确字符起始。
+
+#### 问题 11: HNSW 搜索分数全为 0.5
+
+**现象**：无论搜什么，所有结果分数都是 0.5。
+
+**根因**：`build_hnsw_index` 读取 `.jina.bin` 时，格式是 `[name_len(4B)][name][dim floats]`，但代码直接按 `[dim floats]` 读取，把 `name_len` 和 `name` 的字符串内容解析成了向量数据。
+
+**修复**（`tools/build_hnsw_index.c`）：
+```c
+// 先读取 name_len，跳过 name 字符串，再读取向量
+uint32_t name_len;
+fread(&name_len, sizeof(uint32_t), 1, f);
+char* name = malloc(name_len + 1);
+fread(name, 1, name_len, f);
+name[name_len] = '\0';
+// 然后读取 dim 个 float
+fread(vec, sizeof(float), dim, f);
+```
+
+**结果**：搜索分数恢复区分度（0.786-0.912）。
+
+#### 问题 12: HNSW 距离度量错误
+
+**现象**：修复了分数读取后，搜索结果的相关性仍然很差（搜 "Tesla" 返回的却是 "火箭" 相关页面）。
+
+**根因**：`hnsw_distance()` 返回的是 **相似度**（越大越相似），但 HNSW 索引结构和搜索逻辑要求的是 **距离**（越小越近）。返回相似度导致最近邻搜索找的是最不相关的点。
+
+**修复**（`src/cache/hnsw.c`）：
+```c
+static float hnsw_distance(const float *a, const float *b, int dim) {
+    float sim = cosine_similarity(a, b, dim);
+    return 1.0f - sim;  // 原来是 return sim
+}
+```
+
+**结果**：搜索相关性完全正常，"Tesla" 返回特斯拉相关页面，"SpaceX" 返回火箭相关页面。
+
+#### 问题 13: 逐章提取阈值过严导致 fallback 到全文切分
+
+**现象**：AZW3 明明支持逐章提取，但 `import_book` 仍然 fallback 到 `Using full-text chapter splitting`。
+
+**根因**：验证逐章提取时要求每章长度 `>= 100` 字节，但某些短章节（如 "附录1" 只有 21 字节）导致整体 fallback。
+
+**修复**（`tools/import_book.c`）：
+```c
+// 原来：if (!chapter_text || chapter_len < 100)
+// 修复后：只要有内容就接受（空章节不影响其他章节）
+if (!chapter_text || chapter_len == 0) {
+    use_per_chapter = 0;
+    break;
+}
+```
+
+**结果**：AZW3 使用逐章提取，章节边界准确，不再受目录干扰。
+
+#### 问题 14: TOC 删除误删正文
+
+**现象**：`mobi_extract_text` 删除目录时，用 `strstr` 查找 "第一章"，第一个匹配在目录中，第二个匹配也在目录中（目录有两级），误删了正文。
+
+**根因**：`strstr` 不能处理文本中间的 `\0` 字节，且目录中 "第一章" 可能出现多次。
+
+**修复**（`src/importer/wrappers/mobi_wrapper.cpp`）：
+移除自动删除目录逻辑，保留完整文本，由 `import_book` 的全文切分策略自行识别章节边界（通过 body_len < 1000 过滤目录条目）。
+
+**结果**：正文完整保留，目录条目被 `import_book` 的匹配策略自然过滤。
+
+### 新增功能：翻页阅读
+
+**实现**（`explore_book.sh`）：
+在 `read` 命令中增加 `--prev` / `--next` 选项，支持跨章节自动跳转：
+```bash
+./explore_book.sh /books/my_book read --next chapters/01-Intro/page_0005
+./explore_book.sh /books/my_book read --prev chapters/02-Chapter/page_0000
+```
+
+逻辑：
+- 同章节内：page_num ± 1
+- 跨章节：下一章跳到 `page_0000`，上一章跳到最后一页
+
+### 修复后的导入结果
+
+| 书籍 | 格式 | 页数 | 搜索分数范围 | 状态 |
+|------|------|------|-------------|------|
+| 硅谷钢铁侠 | AZW3 | 838 | 0.789-0.912 | 正常 |
+| Data Engineering for Cybersecurity | MOBI | 633 | 0.779-0.900 | 正常 |
+| Designing Data-Intensive Applications | PDF | 4193 | 0.818-0.906 | 正常 |
+| The Staff Engineer's Path | EPUB | 1433 | 0.818-0.905 | 正常 |
+
+**总导入量**：7097 页，向量文件 30.3MB，Cache 52MB。
+
+---
+
+## AZW3/MOBI 分页质量与搜索分数修复实录
+
+### 背景
+
+在导入 AZW3 格式书籍（如《硅谷钢铁侠》）时，发现三个严重问题：
+1. **分页质量差**：章节文本从 HTML 标签中间截断，导致每个段落开头出现 `��`（非法 UTF-8 序列）
+2. **搜索分数异常**：HNSW 搜索所有结果分数均为 0.5，完全无区分度
+3. **章节定位失败**：AZW3 KF8 格式下，`mobi_get_chapter_text()` 对后半部分章节全部返回失败
+
+### 诊断过程
+
+#### 问题 8: AZW3 KF8 章节定位错误
+
+**现象**：23 章的书只有前 10 章能提取到文本，后续章节全部失败。
+
+**根因**：KF8 格式中，NCX 索引存储的 `posfid` 不是直接的 part UID，而是 **fragment 表的索引**。需要查 `rawml->frag` 表获取实际的 `file_nr`，再通过 `rawml->skel` 计算字节偏移。
+
+**修复**（`src/importer/wrappers/mobi_wrapper.cpp`）：
+```cpp
+// KF8: 使用 libmobi 的 mobi_get_offset_by_posoff 获取实际的 part UID 和字节偏移
+uint32_t file_nr = 0;
+size_t actual_offset = 0;
+if (mobi_get_offset_by_posoff(&file_nr, &actual_offset, h->rawml, posfid, posoff) == MOBI_SUCCESS) {
+    posfid = file_nr;
+    posoff = actual_offset;
+}
+```
+
+同时增加 `flow` 链表 fallback（某些章节在 `markup` 中找不到时，在 `flow` 中查找）。
+
+**结果**：23 章全部成功提取，章节边界准确。
+
+#### 问题 9: HTML 标签边界截断导致 UTF-8 乱码
+
+**现象**：每个 page 的 Markdown 文件开头都有 `��`（如 `��别人会以为...`）。
+
+**根因**：`mobi_get_offset_by_posoff` 返回的 `posoff` 字节偏移可能落在 `<a id="...">` 这样的 HTML 标签中间。`extract_text_from_html` 处理时把标签内字节当作普通文本输出，产生大量独立续字节（如 `0x80`, `0x82`）。
+
+**修复**（`src/importer/wrappers/mobi_wrapper.cpp`）：
+在提取文本前，如果 `posoff` 落在 `<...>` 标签内部，跳到 `>` 之后：
+```cpp
+// 修复：如果 posoff 落在 HTML 标签中间，跳到标签结束处
+size_t tag_start = posoff;
+while (tag_start > 0 && data[tag_start] != '<') tag_start--;
+if (data[tag_start] == '<') {
+    size_t tag_end = posoff;
+    while (tag_end < data_size && data[tag_end] != '>') tag_end++;
+    if (tag_end < data_size && data[tag_end] == '>' && 
+        posoff > tag_start && posoff < tag_end) {
+        posoff = tag_end + 1;
+    }
+}
+```
+
+**结果**：段落开头不再有 `��`，中文句号 `。`（E3 80 82）完整保留。
+
+#### 问题 10: 句子边界切分吃掉多字节标点
+
+**现象**：即使修复了标签边界，每个 page 的开头仍然缺少前 1-2 个字符。
+
+**根因**：`is_sentence_boundary()` 返回统一的 `1`，而 `split_paragraphs` 阶段 2 和阶段 3 都执行 `chunk_start = q + 1`。对于中文 3 字节标点（如 `。` E3 80 82），`q + 1` 会落在第二个字节 `0x80` 上，导致下一段从这个非法位置开始。
+
+**修复**（`tools/import_book.c`）：
+1. `is_sentence_boundary()` 改为返回边界长度：
+```c
+// 中文标点（UTF-8，3字节）
+if (c3 == 0x82 || c3 == 0x81 || c3 == 0x9c || c3 == 0x83 || c3 == 0x9a) {
+    return 3;  // 原来是 return 1
+}
+
+// 换行符
+if (*p == '\n' && p + 1 < end && p[1] == '\n') {
+    return 2;  // 原来是 return 1
+}
+```
+
+2. 切分逻辑使用 `boundary_len` 而非固定 `+1`：
+```c
+int boundary_len = is_sentence_boundary(q, end);
+if (boundary_len > 0) {
+    size_t len = q - chunk_start + boundary_len;
+    // ...
+    chunk_start = q + boundary_len;  // 原来是 q + 1
+}
+```
+
+**结果**：中文标点完整保留在上一段末尾，下一段从正确字符起始。
+
+#### 问题 11: HNSW 搜索分数全为 0.5
+
+**现象**：无论搜什么，所有结果分数都是 0.5。
+
+**根因**：`build_hnsw_index` 读取 `.jina.bin` 时，格式是 `[name_len(4B)][name][dim floats]`，但代码直接按 `[dim floats]` 读取，把 `name_len` 和 `name` 的字符串内容解析成了向量数据。
+
+**修复**（`tools/build_hnsw_index.c`）：
+```c
+// 先读取 name_len，跳过 name 字符串，再读取向量
+uint32_t name_len;
+fread(&name_len, sizeof(uint32_t), 1, f);
+char* name = malloc(name_len + 1);
+fread(name, 1, name_len, f);
+name[name_len] = '\0';
+// 然后读取 dim 个 float
+fread(vec, sizeof(float), dim, f);
+```
+
+**结果**：搜索分数恢复区分度（0.786-0.912）。
+
+#### 问题 12: HNSW 距离度量错误
+
+**现象**：修复了分数读取后，搜索结果的相关性仍然很差（搜 "Tesla" 返回的却是 "火箭" 相关页面）。
+
+**根因**：`hnsw_distance()` 返回的是 **相似度**（越大越相似），但 HNSW 索引结构和搜索逻辑要求的是 **距离**（越小越近）。返回相似度导致最近邻搜索找的是最不相关的点。
+
+**修复**（`src/cache/hnsw.c`）：
+```c
+static float hnsw_distance(const float *a, const float *b, int dim) {
+    float sim = cosine_similarity(a, b, dim);
+    return 1.0f - sim;  // 原来是 return sim
+}
+```
+
+**结果**：搜索相关性完全正常，"Tesla" 返回特斯拉相关页面，"SpaceX" 返回火箭相关页面。
+
+#### 问题 13: 逐章提取阈值过严导致 fallback 到全文切分
+
+**现象**：AZW3 明明支持逐章提取，但 `import_book` 仍然 fallback 到 `Using full-text chapter splitting`。
+
+**根因**：验证逐章提取时要求每章长度 `>= 100` 字节，但某些短章节（如 "附录1" 只有 21 字节）导致整体 fallback。
+
+**修复**（`tools/import_book.c`）：
+```c
+// 原来：if (!chapter_text || chapter_len < 100)
+// 修复后：只要有内容就接受（空章节不影响其他章节）
+if (!chapter_text || chapter_len == 0) {
+    use_per_chapter = 0;
+    break;
+}
+```
+
+**结果**：AZW3 使用逐章提取，章节边界准确，不再受目录干扰。
+
+#### 问题 14: TOC 删除误删正文
+
+**现象**：`mobi_extract_text` 删除目录时，用 `strstr` 查找 "第一章"，第一个匹配在目录中，第二个匹配也在目录中（目录有两级），误删了正文。
+
+**根因**：`strstr` 不能处理文本中间的 `\0` 字节，且目录中 "第一章" 可能出现多次。
+
+**修复**（`src/importer/wrappers/mobi_wrapper.cpp`）：
+移除自动删除目录逻辑，保留完整文本，由 `import_book` 的全文切分策略自行识别章节边界（通过 body_len < 1000 过滤目录条目）。
+
+**结果**：正文完整保留，目录条目被 `import_book` 的匹配策略自然过滤。
+
+### 新增功能：翻页阅读
+
+**实现**（`explore_book.sh`）：
+在 `read` 命令中增加 `--prev` / `--next` 选项，支持跨章节自动跳转：
+```bash
+./explore_book.sh /books/my_book read --next chapters/01-Intro/page_0005
+./explore_book.sh /books/my_book read --prev chapters/02-Chapter/page_0000
+```
+
+逻辑：
+- 同章节内：page_num ± 1
+- 跨章节：下一章跳到 `page_0000`，上一章跳到最后一页
+
+### 修复后的导入结果
+
+| 书籍 | 格式 | 页数 | 搜索分数范围 | 状态 |
+|------|------|------|-------------|------|
+| 硅谷钢铁侠 | AZW3 | 838 | 0.789-0.912 | 正常 |
+| Data Engineering for Cybersecurity | MOBI | 633 | 0.779-0.900 | 正常 |
+| Designing Data-Intensive Applications | PDF | 4193 | 0.818-0.906 | 正常 |
+| The Staff Engineer's Path | EPUB | 1433 | 0.818-0.905 | 正常 |
+
+**总导入量**：7097 页，向量文件 30.3MB，Cache 52MB。
+
 ### 完整部署流程（优化后）
 
 ```bash
@@ -927,9 +1285,14 @@ ls -la ai_code_memory/vectors/*.hnsw
 
 # 5. 测试语义搜索
 ./explore_book.sh /books/mobi search "your query"
+
+# 6. 测试翻页阅读
+./explore_book.sh /books/epub read chapters/01-Intro/page_0005
+./explore_book.sh /books/epub read --next chapters/01-Intro/page_0005
+./explore_book.sh /books/epub read --prev chapters/02-Chapter/page_0000
 ```
 
 ---
 
-*文档版本：2026-05-22*
+*文档版本：2026-05-22 v2*
 *适用于：explore_book.sh + import_book 最新版本*

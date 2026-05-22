@@ -69,13 +69,6 @@ static int pq_pop(min_pq_t* pq, size_t* out_id, float* out_dist) {
     return 1;
 }
 
-static int pq_peek(min_pq_t* pq, size_t* out_id, float* out_dist) {
-    if (pq->count == 0) return 0;
-    *out_id = pq->items[0].id;
-    *out_dist = pq->items[0].dist;
-    return 1;
-}
-
 // ====== HNSW 数据结构 ======
 
 typedef struct {
@@ -124,7 +117,8 @@ struct hnsw_index {
 // ====== 距离计算 ======
 
 // 余弦距离 = 1 - cosine_similarity
-// 值越小越相似
+// 输入向量已归一化，cosine_similarity = dot(a,b) / (|a||b|) = dot(a,b)
+// 返回距离（越小越近），用于 HNSW 构建和搜索
 static float hnsw_distance(const hnsw_index_t* idx, const float* a, const float* b) {
     double dot = 0.0, norm_a = 0.0, norm_b = 0.0;
     for (size_t i = 0; i < idx->dim; i++) {
@@ -132,11 +126,11 @@ static float hnsw_distance(const hnsw_index_t* idx, const float* a, const float*
         norm_a += a[i] * a[i];
         norm_b += b[i] * b[i];
     }
-    if (norm_a == 0.0 || norm_b == 0.0) return 1.0f;
     double cosine = dot / sqrt(norm_a * norm_b);
-    // 映射到 [0, 1]，1=完全相同
+    // 映射到 [0, 1]（cosine范围[-1,1]，映射到[0,1]）
     float sim = (float)((cosine + 1.0) / 2.0);
-    return 1.0f - sim;  // 距离越小越相似
+    // 返回距离（HNSW 需要距离度量：越小越近）
+    return 1.0f - sim;
 }
 
 // ====== 随机层数生成 ======
@@ -193,16 +187,6 @@ static int neighbor_list_add(neighbor_list_t* list, size_t id) {
     if (list->count >= list->capacity) return -1;
     list->ids[list->count++] = id;
     return 0;
-}
-
-static void neighbor_list_remove(neighbor_list_t* list, size_t id) {
-    size_t write = 0;
-    for (size_t i = 0; i < list->count; i++) {
-        if (list->ids[i] != id) {
-            list->ids[write++] = list->ids[i];
-        }
-    }
-    list->count = write;
 }
 
 // ====== 核心算法：单层贪心搜索 ======
@@ -783,7 +767,6 @@ size_t hnsw_search(hnsw_index_t* idx, const float* query, int top_k,
     // nearest_ids 已按距离升序
     for (size_t i = 0; i < result_count; i++) {
         (*out_ids)[i] = idx->nodes[nearest_ids[i]].id;
-        // 转换回相似度分数（1 - dist）
         (*out_scores)[i] = 1.0f - nearest_dists[i];
     }
     

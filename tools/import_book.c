@@ -196,6 +196,11 @@ static int is_noise(const char* text) {
  * 检测是否是句子结束边界（多格式支持）
  * 支持：英文 . ! ? + 空格，中文 。！？；：
  */
+/**
+ * 检测是否是句子结束边界（多格式支持）
+ * 返回边界字符的长度（0 表示不是边界）
+ * 支持：英文 . ! ? + 空格（长度1），中文 。！？；：（长度3），换行（长度2）
+ */
 static int is_sentence_boundary(const char* p, const char* end) {
     if (p >= end) return 0;
     
@@ -207,21 +212,21 @@ static int is_sentence_boundary(const char* p, const char* end) {
         }
     }
     
-    // 中文标点（UTF-8）
+    // 中文标点（UTF-8，3字节）
     if ((unsigned char)*p == 0xe3 && p + 2 < end) {
         unsigned char c2 = (unsigned char)p[1];
         unsigned char c3 = (unsigned char)p[2];
         if (c2 == 0x80) {
             // 。 ！ ？ ； ：
             if (c3 == 0x82 || c3 == 0x81 || c3 == 0x9c || c3 == 0x83 || c3 == 0x9a) {
-                return 1;
+                return 3;
             }
         }
     }
     
     // 换行符（某些格式用单行换行分隔段落）
     if (*p == '\n' && p + 1 < end && p[1] == '\n') {
-        return 1;
+        return 2;
     }
     
     return 0;
@@ -240,8 +245,9 @@ static const char* find_best_cut(const char* start, const char* end, size_t targ
     if (max_backtrack > 300) max_backtrack = 300;
     
     for (size_t i = 0; i < max_backtrack && p > start; i++, p--) {
-        if (is_sentence_boundary(p, end)) {
-            best = p + 1;
+        int boundary_len = is_sentence_boundary(p, end);
+        if (boundary_len > 0) {
+            best = p + boundary_len;
             break;
         }
     }
@@ -329,8 +335,9 @@ static int split_paragraphs(const char* text, size_t text_len,
         const char* q = text;
         
         while (q < end) {
-            if (is_sentence_boundary(q, end)) {
-                size_t len = q - chunk_start + 1;
+            int boundary_len = is_sentence_boundary(q, end);
+            if (boundary_len > 0) {
+                size_t len = q - chunk_start + boundary_len;
                 if (len >= TARGET_CHUNK_SIZE || (len >= MIN_PARA_LEN && q + 3 >= end)) {
                     if (count >= capacity) {
                         capacity *= 2;
@@ -344,7 +351,7 @@ static int split_paragraphs(const char* text, size_t text_len,
                         raw[count][len] = '\0';
                         count++;
                     }
-                    chunk_start = q + 1;
+                    chunk_start = q + boundary_len;
                 }
             }
             q++;
@@ -534,13 +541,49 @@ static int import_chapter(cache_t* cache, const char* namespace,
              chapter_title, chapter_md_dir);
     cache_set(cache, key, value, 0);
     
+    // 清理不完整的 UTF-8 序列（防止 wrapper 输出切断多字节字符）
+    char* clean_text = malloc(text_len + 1);
+    if (!clean_text) {
+        fprintf(stderr, "Failed to allocate clean text\n");
+        return 0;
+    }
+    size_t clean_len = 0;
+    int skipped_bytes = 0;
+    for (size_t i = 0; i < text_len; ) {
+        unsigned char c = (unsigned char)text[i];
+        int char_len = 1;
+        if ((c & 0x80) == 0) {
+            char_len = 1;
+        } else if ((c & 0xE0) == 0xC0 && i + 1 < text_len && ((unsigned char)text[i+1] & 0xC0) == 0x80) {
+            char_len = 2;
+        } else if ((c & 0xF0) == 0xE0 && i + 2 < text_len && ((unsigned char)text[i+1] & 0xC0) == 0x80 && ((unsigned char)text[i+2] & 0xC0) == 0x80) {
+            char_len = 3;
+        } else if ((c & 0xF8) == 0xF0 && i + 3 < text_len && ((unsigned char)text[i+1] & 0xC0) == 0x80 && ((unsigned char)text[i+2] & 0xC0) == 0x80 && ((unsigned char)text[i+3] & 0xC0) == 0x80) {
+            char_len = 4;
+        } else {
+            // 不完整的 UTF-8 序列，跳过
+            skipped_bytes++;
+            i++;
+            continue;
+        }
+        memcpy(clean_text + clean_len, text + i, char_len);
+        clean_len += char_len;
+        i += char_len;
+    }
+    clean_text[clean_len] = '\0';
+    if (skipped_bytes > 0) {
+        printf("  UTF-8 cleanup: skipped %d invalid bytes\n", skipped_bytes);
+    }
+    
     // 分块
     char** paragraphs = NULL;
     int para_count = 0;
-    if (split_paragraphs(text, text_len, &paragraphs, &para_count) != 0) {
+    if (split_paragraphs(clean_text, clean_len, &paragraphs, &para_count) != 0) {
         fprintf(stderr, "Failed to split paragraphs\n");
+        free(clean_text);
         return 0;
     }
+    free(clean_text);
     
     printf("  Chapter '%s': %d raw paragraphs\n", chapter_title, para_count);
     
@@ -705,6 +748,7 @@ static int import_book(cache_t* cache, const char* namespace,
         for (int i = 0; i < chapter_count; i++) {
             if (chapters[i].level < 2) main_chapter_count++;
         }
+        printf("Main chapter count: %d\n", main_chapter_count);
         
         int chapter_idx = 0;
         for (int i = 0; i < chapter_count; i++) {
@@ -727,6 +771,8 @@ static int import_book(cache_t* cache, const char* namespace,
             // 定位章节文本范围
             const char* chapter_text = text;
             size_t chapter_len = text_len;
+            const char* best_pos = NULL;
+            size_t best_len = 0;
             
             if (main_chapter_count > 1 && chapters[i].title && strlen(chapters[i].title) > 0) {
                 // 策略0: 优先使用MOBI wrapper提供的offset信息（最可靠）
@@ -752,8 +798,8 @@ static int import_book(cache_t* cache, const char* namespace,
                 }
                 
                 // 策略1: 行首标题匹配（只在行首匹配，避免目录匹配）
-                const char* best_pos = NULL;
-                size_t best_len = 0;
+                best_pos = NULL;
+                best_len = 0;
                 const char* search = text;
                 size_t max_chapter_len = text_len / 3;  // 最大为全书的33%
                 
@@ -774,8 +820,12 @@ static int import_book(cache_t* cache, const char* namespace,
                         }
                     }
                     
-                    // 优先使用行首匹配，跳过目录中的非行首匹配
+                    // 跳过目录中的非行首匹配，或章节长度过短的匹配（<1000 字节通常是目录条目）
                     if (!is_line_start && body_len > max_chapter_len) {
+                        search = found + 1;
+                        continue;
+                    }
+                    if (body_len < 1000) {
                         search = found + 1;
                         continue;
                     }
@@ -940,6 +990,28 @@ static int import_book(cache_t* cache, const char* namespace,
                     chapter_text = best_pos;
                     chapter_len = best_len;
                 }
+            }
+            
+            // Debug: print chapter title bytes and best_pos context
+            printf("  DEBUG checking chapter[%d] title='%s'\n", i, chapters[i].title);
+            printf("  DEBUG title bytes: ");
+            for (size_t k = 0; k < strlen(chapters[i].title) && k < 30; k++) {
+                printf("%02x ", (unsigned char)chapters[i].title[k]);
+            }
+            printf("\n");
+            if (chapter_text != text) {
+                printf("  DEBUG best_pos context (-5 to +20): ");
+                for (int k = -5; k < 20; k++) {
+                    if (chapter_text + k >= text && chapter_text + k < text + text_len) {
+                        printf("%02x ", (unsigned char)chapter_text[k]);
+                    }
+                }
+                printf("\n");
+            } else {
+                printf("  DEBUG chapter_text == text (using full text)\n");
+            }
+            if (best_pos) {
+                printf("  DEBUG best_pos offset=%ld from text start\n", (long)(best_pos - text));
             }
             
             chapter_ready:
@@ -1351,7 +1423,7 @@ int main(int argc, char* argv[]) {
                 size_t chapter_len = 0;
                 mobi_get_chapter_text(handle, i, &chapter_text, &chapter_len);
                 
-                if (!chapter_text || chapter_len < 100) {
+                if (!chapter_text || chapter_len == 0) {
                     use_per_chapter = 0;
                     break;
                 }
@@ -1377,6 +1449,14 @@ int main(int argc, char* argv[]) {
                 mobi_get_chapter_text(handle, i, &chapter_text, &chapter_len);
                 
                 if (chapter_text && chapter_len > 0) {
+                    // Debug: print first bytes right after extraction
+                    if (i < 2) {
+                        printf("  DEBUG raw chapter[%d] '%s': len=%zu, first 20 bytes=", i, chapters[i].title, chapter_len);
+                        for (size_t k = 0; k < 20 && k < chapter_len; k++) {
+                            printf("%02x ", (unsigned char)chapter_text[k]);
+                        }
+                        printf("\n");
+                    }
                     int pages = import_chapter(cache, namespace, md_dir, ch_dir,
                                                chapters[i].title, chapter_text, chapter_len);
                     total_pages += pages;

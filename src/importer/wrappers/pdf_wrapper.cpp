@@ -143,6 +143,8 @@ API int pdf_extract_text(void* handle, char** out_text, size_t* out_len) {
                         }
                         result += "\n";
                     }
+                    // 文本块之间插入段落分隔符，让 split_paragraphs 能正确切分
+                    result += "\n";
                 }
             }
             result += "\n--- Page Break ---\n\n";

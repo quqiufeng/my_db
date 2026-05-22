@@ -171,7 +171,7 @@ NC='\033[0m'
 
 log() { echo -e "${BLUE}[INFO]${NC} $1"; }
 warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
-error() { echo -e "${RED}[ERROR]${NC} $1" &&2; }
+error() { echo -e "${RED}[ERROR]${NC} $1" >&2; }
 ok() { echo -e "${GREEN}[OK]${NC} $1"; }
 
 # 检查工具
@@ -341,6 +341,104 @@ cmd_read() {
         exit 1
     fi
     
+    # 处理 --prev / --next 翻页选项
+    local direction=""
+    if [[ "$page_key" == "--prev" || "$page_key" == "-p" ]]; then
+        direction="prev"
+        page_key="${2:-}"
+        if [[ -z "$page_key" ]]; then
+            error "Usage: $0 $NAMESPACE read --prev <page_key>"
+            exit 1
+        fi
+    elif [[ "$page_key" == "--next" || "$page_key" == "-n" ]]; then
+        direction="next"
+        page_key="${2:-}"
+        if [[ -z "$page_key" ]]; then
+            error "Usage: $0 $NAMESPACE read --next <page_key>"
+            exit 1
+        fi
+    fi
+    
+    # 如果有翻页方向，计算目标页面
+    if [[ -n "$direction" ]]; then
+        local book_name=$(basename "$NAMESPACE")
+        local book_dir="/opt/books/${book_name}"
+        
+        # 解析当前 chapter 和 page 编号
+        local current_ch=""
+        local current_page=""
+        if [[ "$page_key" == chapters/* ]]; then
+            current_ch="$(dirname "${page_key#chapters/}")"
+            current_page="$(basename "$page_key")"
+        else
+            current_page="$page_key"
+            # 查找 page 属于哪个 chapter
+            local ch_dirs=()
+            while IFS= read -r -d '' line; do
+                ch_dirs+=("$line")
+            done < <(find "${book_dir}/chapters" -maxdepth 1 -mindepth 1 -type d -print0 2>/dev/null | sort -z)
+            for ch_path in "${ch_dirs[@]}"; do
+                if [[ -f "${ch_path}/${current_page}.md" ]]; then
+                    current_ch=$(basename "$ch_path")
+                    break
+                fi
+            done
+        fi
+        
+        # 提取数字编号
+        local page_num=$(echo "$current_page" | sed 's/page_//')
+        local page_num_int=$((10#$page_num))
+        
+        local target_page_num
+        local target_ch="$current_ch"
+        if [[ "$direction" == "next" ]]; then
+            target_page_num=$((page_num_int + 1))
+        else
+            target_page_num=$((page_num_int - 1))
+        fi
+        
+        local target_page=$(printf "page_%04d" $target_page_num)
+        local target_file="${book_dir}/chapters/${target_ch}/${target_page}.md"
+        
+        # 如果同章节没有目标页，尝试相邻章节
+        if [[ ! -f "$target_file" ]]; then
+            local ch_dirs=()
+            while IFS= read -r -d '' line; do
+                ch_dirs+=("$line")
+            done < <(find "${book_dir}/chapters" -maxdepth 1 -mindepth 1 -type d -print0 2>/dev/null | sort -z)
+            
+            local ch_idx=-1
+            local ch_count=${#ch_dirs[@]}
+            for i in "${!ch_dirs[@]}"; do
+                if [[ "$(basename "${ch_dirs[$i]}")" == "$current_ch" ]]; then
+                    ch_idx=$i
+                    break
+                fi
+            done
+            
+            if [[ $ch_idx -ge 0 ]]; then
+                if [[ "$direction" == "next" && $((ch_idx + 1)) -lt $ch_count ]]; then
+                    target_ch=$(basename "${ch_dirs[$((ch_idx + 1))]}")
+                    target_page="page_0000"
+                    target_file="${book_dir}/chapters/${target_ch}/${target_page}.md"
+                elif [[ "$direction" == "prev" && $((ch_idx - 1)) -ge 0 ]]; then
+                    target_ch=$(basename "${ch_dirs[$((ch_idx - 1))]}")
+                    # 找到上一章的最后一页
+                    local last_page=$(ls -1 "${book_dir}/chapters/${target_ch}"/page_*.md 2>/dev/null | sort | tail -1 | xargs basename 2>/dev/null)
+                    target_page="${last_page%.md}"
+                    target_file="${book_dir}/chapters/${target_ch}/${target_page}.md"
+                fi
+            fi
+        fi
+        
+        if [[ ! -f "$target_file" ]]; then
+            error "No $direction page from $page_key"
+            exit 1
+        fi
+        
+        page_key="chapters/${target_ch}/${target_page}"
+    fi
+    
     # 构建完整的 KV key
     local full_key
     if [[ "$page_key" == */* ]]; then
@@ -400,6 +498,13 @@ cmd_read() {
     
     # 输出 Markdown 内容
     cat "$md_file"
+    
+    # 输出翻页提示
+    echo ""
+    echo "---"
+    echo "Navigation:"
+    echo "  Prev: $0 $NAMESPACE read --prev $page_key"
+    echo "  Next: $0 $NAMESPACE read --next $page_key"
 }
 
 cmd_chapter() {
@@ -560,7 +665,7 @@ main() {
             cmd_search "$1"
             ;;
         read|r)
-            cmd_read "$1"
+            cmd_read "$@"
             ;;
         chapter|ch|c)
             cmd_chapter "${1:-}"
