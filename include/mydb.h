@@ -139,6 +139,12 @@ int db_rollback(db_t db);
         db_table_register(db, table_name_str, sizeof(struct struct_name), fields, sizeof(fields)/sizeof(fields[0])); \
     }
 
+// ====== 版本信息 ======
+const char* mydb_version(void);
+int         mydb_version_major(void);
+int         mydb_version_minor(void);
+int         mydb_version_patch(void);
+
 #ifdef __cplusplus
 }
 #endif

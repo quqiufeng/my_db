@@ -24,6 +24,7 @@
 
 #include "cache.h"
 #include "onnx_embedder.h"
+#include "metrics.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -35,6 +36,100 @@
 #include <errno.h>
 #include <math.h>
 #include <omp.h>  // OpenMP for parallel chapter processing
+
+// =============================================================================
+// 跨文件系统目录移动辅助函数（替代 system("mv ...")）
+// =============================================================================
+
+#include <dirent.h>
+#include <fcntl.h>
+
+static int copy_file(const char* src, const char* dst) {
+    int src_fd = open(src, O_RDONLY);
+    if (src_fd < 0) return -1;
+    int dst_fd = open(dst, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (dst_fd < 0) { close(src_fd); return -1; }
+    
+    char buf[65536];
+    ssize_t n;
+    while ((n = read(src_fd, buf, sizeof(buf))) > 0) {
+        if (write(dst_fd, buf, n) != n) {
+            close(src_fd); close(dst_fd); unlink(dst);
+            return -1;
+        }
+    }
+    close(src_fd);
+    close(dst_fd);
+    return (n < 0) ? -1 : 0;
+}
+
+static int rm_rf(const char* path);
+
+static int copy_dir_recursive(const char* src, const char* dst) {
+    struct stat st;
+    if (stat(src, &st) != 0) return -1;
+    
+    if (S_ISREG(st.st_mode)) {
+        return copy_file(src, dst);
+    }
+    if (!S_ISDIR(st.st_mode)) return -1;
+    
+    if (mkdir(dst, 0755) != 0 && errno != EEXIST) return -1;
+    
+    DIR* dir = opendir(src);
+    if (!dir) return -1;
+    
+    struct dirent* entry;
+    int ret = 0;
+    while ((entry = readdir(dir)) != NULL) {
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
+            continue;
+        char src_path[1024], dst_path[1024];
+        snprintf(src_path, sizeof(src_path), "%s/%s", src, entry->d_name);
+        snprintf(dst_path, sizeof(dst_path), "%s/%s", dst, entry->d_name);
+        struct stat entry_st;
+        if (stat(src_path, &entry_st) != 0) { ret = -1; break; }
+        if (S_ISDIR(entry_st.st_mode)) {
+            if (copy_dir_recursive(src_path, dst_path) != 0) { ret = -1; break; }
+        } else {
+            if (copy_file(src_path, dst_path) != 0) { ret = -1; break; }
+        }
+    }
+    closedir(dir);
+    return ret;
+}
+
+static int rm_rf(const char* path) {
+    struct stat st;
+    if (stat(path, &st) != 0) return (errno == ENOENT) ? 0 : -1;
+    
+    if (S_ISREG(st.st_mode) || S_ISLNK(st.st_mode)) {
+        return unlink(path);
+    }
+    if (!S_ISDIR(st.st_mode)) return -1;
+    
+    DIR* dir = opendir(path);
+    if (!dir) return -1;
+    
+    struct dirent* entry;
+    while ((entry = readdir(dir)) != NULL) {
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
+            continue;
+        char child[1024];
+        snprintf(child, sizeof(child), "%s/%s", path, entry->d_name);
+        rm_rf(child);
+    }
+    closedir(dir);
+    return rmdir(path);
+}
+
+static int move_dir(const char* src, const char* dst) {
+    // Try rename first (fast, O(1) if same filesystem)
+    if (rename(src, dst) == 0) return 0;
+    // Fallback: copy + delete (cross-filesystem)
+    if (copy_dir_recursive(src, dst) != 0) return -1;
+    return rm_rf(src);
+}
 
 // =============================================================================
 // 配置
@@ -826,6 +921,7 @@ static int import_book(cache_t* cache, const char* namespace,
                        const char* title, const char* author,
                        const char* text, size_t text_len,
                        ChapterInfo* chapters, int chapter_count) {
+    metric_timer_ctx_t import_timer = metric_timer_start("mydb_import_duration_seconds", "format=text");
     char key[1024];
     char value[4096];
     
@@ -1148,14 +1244,11 @@ static int import_book(cache_t* cache, const char* namespace,
             
             // 将 tmpfs 中的文件批量移动到最终目录
             printf("  Moving files from tmpfs to %s...\n", md_dir);
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wformat-truncation"
-            char cmd[4096];
-            snprintf(cmd, sizeof(cmd), "mv %s/chapters %s/chapters 2>/dev/null || cp -r %s/chapters %s/chapters && rm -rf %s/chapters",
-                     tmp_md_dir, md_dir, tmp_md_dir, md_dir, tmp_md_dir);
-#pragma GCC diagnostic pop
-            int ret = system(cmd);
-            if (ret != 0) {
+            char src_chapters[1024];
+            char dst_chapters[1024];
+            snprintf(src_chapters, sizeof(src_chapters), "%s/chapters", tmp_md_dir);
+            snprintf(dst_chapters, sizeof(dst_chapters), "%s/chapters", md_dir);
+            if (move_dir(src_chapters, dst_chapters) != 0) {
                 fprintf(stderr, "Warning: Failed to move files from tmpfs, fallback to direct write next time\n");
             }
             
@@ -1169,6 +1262,11 @@ static int import_book(cache_t* cache, const char* namespace,
              "{\"type\":\"book\",\"title\":\"%s\",\"author\":\"%s\",\"chapters\":%d,\"pages\":%d}",
              title, author, chapter_count, total_pages);
     cache_set(cache, key, value, 0);
+    
+    METRIC_COUNTER_INC("mydb_imports_total", "format=text");
+    METRIC_COUNTER_INC("mydb_import_pages_total", "format=text");
+    LOG_INFO("import.complete", "\"title\":\"%s\",\"pages\":%d", title, total_pages);
+    metric_timer_stop(&import_timer);
     
     return total_pages;
 }
@@ -1640,14 +1738,11 @@ int main(int argc, char* argv[]) {
             
             // 将 tmpfs 中的文件批量移动到最终目录
             printf("  Moving files from tmpfs to %s...\n", md_dir);
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wformat-truncation"
-            char cmd[4096];
-            snprintf(cmd, sizeof(cmd), "mv %s/chapters %s/chapters 2>/dev/null || cp -r %s/chapters %s/chapters && rm -rf %s/chapters",
-                     tmp_md_dir, md_dir, tmp_md_dir, md_dir, tmp_md_dir);
-#pragma GCC diagnostic pop
-            int mv_ret = system(cmd);
-            if (mv_ret != 0) {
+            char src_chapters2[1024];
+            char dst_chapters2[1024];
+            snprintf(src_chapters2, sizeof(src_chapters2), "%s/chapters", tmp_md_dir);
+            snprintf(dst_chapters2, sizeof(dst_chapters2), "%s/chapters", md_dir);
+            if (move_dir(src_chapters2, dst_chapters2) != 0) {
                 fprintf(stderr, "Warning: Failed to move files from tmpfs\n");
             }
             rmdir(tmp_md_dir);
@@ -1842,6 +1937,13 @@ int main(int argc, char* argv[]) {
     if (g_embedder) {
         onnx_embedder_free(g_embedder);
         g_embedder = NULL;
+    }
+    
+    // Export Prometheus metrics
+    char metrics_path[1024];
+    snprintf(metrics_path, sizeof(metrics_path), "%s/metrics.txt", cache_dir);
+    if (metrics_prometheus_write(metrics_path) == 0) {
+        printf("Metrics exported: %s\n", metrics_path);
     }
     
     return 0;

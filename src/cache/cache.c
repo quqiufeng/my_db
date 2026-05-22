@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include "cache_internal.h"
 #include "cache_index.h"
+#include "metrics.h"
 #include <string.h>
 #include <stdio.h>
 #include <time.h>
@@ -391,7 +392,11 @@ int cache_sync(cache_t* cache) {
 }
 
 int cache_set(cache_t* cache, const char* key, const char* value, uint64_t ttl_ms) {
-    if (!cache || !key || !value) return CACHE_ERR_INVAL;
+    metric_timer_ctx_t timer = metric_timer_start("mydb_cache_set_seconds", "");
+    if (!cache || !key || !value) {
+        METRIC_COUNTER_INC("mydb_cache_errors_total", "op=set,reason=invalid");
+        return CACHE_ERR_INVAL;
+    }
     
     size_t key_len = strlen(key);
     size_t value_len = strlen(value);
@@ -589,6 +594,8 @@ int cache_set(cache_t* cache, const char* key, const char* value, uint64_t ttl_m
     cache_ns_add(cache, key, offset);
     cache_tag_index_add(cache, offset, value, value_len);
     
+    METRIC_COUNTER_INC("mydb_cache_ops_total", "op=set");
+    metric_timer_stop(&timer);
     return CACHE_OK;
 }
 
@@ -773,7 +780,11 @@ int cache_batch_set(cache_t* cache, const cache_batch_item_t* items, size_t coun
 }
 
 const char* cache_get(cache_t* cache, const char* key) {
-    if (!cache || !key) return NULL;
+    metric_timer_ctx_t timer = metric_timer_start("mydb_cache_get_seconds", "");
+    if (!cache || !key) {
+        METRIC_COUNTER_INC("mydb_cache_errors_total", "op=get,reason=invalid");
+        return NULL;
+    }
     
     size_t key_len = strlen(key);
     
@@ -783,17 +794,29 @@ const char* cache_get(cache_t* cache, const char* key) {
     // 2. 查 Hash 索引
     if (!offset) {
         offset = cache_hash_lookup(cache, key, key_len);
-        if (!offset) return NULL;
+        if (!offset) {
+            METRIC_COUNTER_INC("mydb_cache_miss_total", "");
+            metric_timer_stop(&timer);
+            return NULL;
+        }
     }
     
     cache_entry_header_t* header = (cache_entry_header_t*)CACHE_PTR(cache, offset);
     
     // 检查是否已删除
-    if (header->flags & CACHE_ENTRY_DELETED) return NULL;
+    if (header->flags & CACHE_ENTRY_DELETED) {
+        METRIC_COUNTER_INC("mydb_cache_miss_total", "reason=deleted");
+        metric_timer_stop(&timer);
+        return NULL;
+    }
     
     // 检查是否过期
     uint64_t now = cache_now_ms();
-    if (header->expire_at > 0 && header->expire_at < now) return NULL;
+    if (header->expire_at > 0 && header->expire_at < now) {
+        METRIC_COUNTER_INC("mydb_cache_miss_total", "reason=expired");
+        metric_timer_stop(&timer);
+        return NULL;
+    }
     
     // 更新 access_time
     header->access_time = now;
@@ -801,6 +824,9 @@ const char* cache_get(cache_t* cache, const char* key) {
     // 更新 hot cache
     hot_cache_update(cache, key, key_len, offset);
     
+    METRIC_COUNTER_INC("mydb_cache_ops_total", "op=get");
+    METRIC_COUNTER_INC("mydb_cache_hit_total", "");
+    metric_timer_stop(&timer);
     return (const char*)CACHE_PTR(cache, offset + sizeof(cache_entry_header_t) + header->key_len + 1);
 }
 

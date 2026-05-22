@@ -374,3 +374,25 @@ int db_check(const char* db_dir) {
     
     return result;
 }
+
+// ====== 版本信息 ======
+#define MYDB_VERSION_MAJOR 1
+#define MYDB_VERSION_MINOR 0
+#define MYDB_VERSION_PATCH 0
+#define MYDB_VERSION_STRING "1.0.0"
+
+const char* mydb_version(void) {
+    return MYDB_VERSION_STRING;
+}
+
+int mydb_version_major(void) {
+    return MYDB_VERSION_MAJOR;
+}
+
+int mydb_version_minor(void) {
+    return MYDB_VERSION_MINOR;
+}
+
+int mydb_version_patch(void) {
+    return MYDB_VERSION_PATCH;
+}

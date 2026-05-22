@@ -46,6 +46,7 @@ TEST_CACHE = $(TEST_DIR)/test_cache
 TEST_CACHE_FULL = $(TEST_DIR)/test_cache_full
 TEST_HTTP_SERVER = $(TEST_DIR)/test_http_server
 TEST_HNSW = $(TEST_DIR)/test_hnsw
+TEST_FRAMEWORK = $(TEST_DIR)/test_framework
 
 EXAMPLE_DIR = examples
 EXAMPLE_C = $(EXAMPLE_DIR)/example_c
@@ -61,9 +62,9 @@ PREFIX ?= /usr/local
 LIBDIR = $(PREFIX)/lib
 INCLUDEDIR = $(PREFIX)/include
 
-.PHONY: all clean test test_join test_perf test_edge test_composite test_wal test_cache test_cache_full test_http test_hnsw example install
+.PHONY: all clean test test_join test_perf test_edge test_composite test_wal test_cache test_cache_full test_http test_hnsw test_framework example install
 
-all: $(LIB) $(ONNX_EMBEDDER_LIB) $(VECTOR_ENGINE_LIB) $(TEST_BASIC) $(TEST_JOIN) $(TEST_PERF) $(TEST_EDGE) $(TEST_COMPOSITE) $(TEST_WAL) $(TEST_CACHE) $(TEST_CACHE_FULL) $(TEST_HTTP_SERVER) $(TEST_HNSW) $(IMPORT_BOOK) $(CACHE_SERVER) $(CACHE_HTTP_SERVER) $(CACHE_SNAPSHOT) $(VECTOR_GENERATOR) $(VECTOR_SEARCH) $(BUILD_HNSW_INDEX) $(CODE_INDEXER) $(BATCH_EMBEDDER) $(CACHE_IMPORT) $(CACHE_QUERY) example
+all: $(LIB) $(ONNX_EMBEDDER_LIB) $(VECTOR_ENGINE_LIB) $(TEST_BASIC) $(TEST_JOIN) $(TEST_PERF) $(TEST_EDGE) $(TEST_COMPOSITE) $(TEST_WAL) $(TEST_CACHE) $(TEST_CACHE_FULL) $(TEST_HTTP_SERVER) $(TEST_HNSW) $(TEST_FRAMEWORK) $(IMPORT_BOOK) $(CACHE_SERVER) $(CACHE_HTTP_SERVER) $(CACHE_SNAPSHOT) $(VECTOR_GENERATOR) $(VECTOR_SEARCH) $(BUILD_HNSW_INDEX) $(CODE_INDEXER) $(BATCH_EMBEDDER) $(CACHE_IMPORT) $(CACHE_QUERY) example
 
 $(LIB): $(OBJECTS)
 	$(CC) -shared -fopenmp -o $@ $^ -lm
@@ -145,6 +146,9 @@ $(TEST_HTTP_SERVER): $(TEST_DIR)/test_http_server.c $(LIB)
 
 $(TEST_HNSW): $(TEST_DIR)/test_hnsw.c $(LIB)
 	$(CC) $(CFLAGS) -o $@ $< -L. -lmydb -lm -Wl,-rpath,.
+
+$(TEST_FRAMEWORK): $(TEST_DIR)/test_framework.c $(LIB)
+	$(CC) $(CFLAGS) -o $@ $< -L. -lmydb -Wl,-rpath,.
 
 $(IMPORT_BOOK): $(TOOLS_DIR)/import_book.c $(SRC_DIR)/embedding/onnx_embedder.c $(LIB)
 	$(CC) $(CFLAGS) $(ONNX_CFLAGS) -fopenmp -I./include/tokenizers-cpp -o $@ $(TOOLS_DIR)/import_book.c $(SRC_DIR)/embedding/onnx_embedder.c $(TOKENIZERS_CPP_LIBS) -L. -lmydb $(ONNX_LDFLAGS) -lm -lstdc++ -Wl,-rpath,.
@@ -228,5 +232,9 @@ install: $(LIB)
 	@echo "Library: $(LIBDIR)/$(LIB)"
 	@echo "Header:  $(INCLUDEDIR)/mydb.h"
 
+test_framework: $(TEST_FRAMEWORK)
+	@rm -rf /tmp/test_framework_*
+	LD_LIBRARY_PATH=. ./$(TEST_FRAMEWORK)
+
 clean:
-	rm -rf $(OBJ_DIR) $(LIB) $(ONNX_EMBEDDER_LIB) $(VECTOR_ENGINE_LIB) $(TEST_BASIC) $(TEST_JOIN) $(TEST_PERF) $(TEST_EDGE) $(TEST_COMPOSITE) $(TEST_WAL) $(TEST_CACHE) $(TEST_CACHE_FULL) $(TEST_HTTP_SERVER) $(TEST_HNSW) $(IMPORT_BOOK) $(CACHE_HTTP_SERVER) $(CACHE_SNAPSHOT) $(VECTOR_GENERATOR) $(VECTOR_SEARCH) $(BUILD_HNSW_INDEX) $(CODE_INDEXER) $(BATCH_EMBEDDER) $(CACHE_IMPORT) $(CACHE_QUERY) $(EXAMPLE_C) tests/test_codebert_embedder tests/bench_codebert *.bin *.index test_cache_dir test_cache_lru
+	rm -rf $(OBJ_DIR) $(LIB) $(ONNX_EMBEDDER_LIB) $(VECTOR_ENGINE_LIB) $(TEST_BASIC) $(TEST_JOIN) $(TEST_PERF) $(TEST_EDGE) $(TEST_COMPOSITE) $(TEST_WAL) $(TEST_CACHE) $(TEST_CACHE_FULL) $(TEST_HTTP_SERVER) $(TEST_HNSW) $(TEST_FRAMEWORK) $(IMPORT_BOOK) $(CACHE_HTTP_SERVER) $(CACHE_SNAPSHOT) $(VECTOR_GENERATOR) $(VECTOR_SEARCH) $(BUILD_HNSW_INDEX) $(CODE_INDEXER) $(BATCH_EMBEDDER) $(CACHE_IMPORT) $(CACHE_QUERY) $(EXAMPLE_C) tests/test_codebert_embedder tests/bench_codebert *.bin *.index test_cache_dir test_cache_lru
