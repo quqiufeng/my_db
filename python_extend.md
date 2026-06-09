@@ -293,7 +293,173 @@ cache_query "torch forward tensor" --repo /code/python --type search
     (void* string) int))
 ```
 
-### 5.4 编译 + 链接流程
+### 5.4 FFI 不是运行时桥接——是编译时指令生成
+
+这是整个方案最关键的工程决策：**不自己写运行时。**
+
+```
+传统 AOT 方案的做法:
+  Python 代码 → 自己写 IR → 自己写优化 → 自己写代码生成 → 机器码
+                            ↑                      ↑
+                         2 年写完                 到处是 bug
+                         还没开始处理 PyTorch
+
+我们的方案:
+  Python 代码 → Scheme S-expr → Chez 的 foreign-procedure → CALL 指令
+                                  ↑
+                             45 年验证过的编译器
+                             一行声明，自动生成正确的调用指令
+```
+
+`foreign-procedure` 不是"运行时桥接层"——它只是一次**编译时声明**：
+
+```scheme
+;; 你声明:
+(define torch-forward
+  (foreign-procedure "torch_forward" 
+    (void* void*) void*))
+;;     ↑ 参数类型    ↑ 返回类型
+
+;; Chez 编译器看到这个声明，在编译时就知道:
+;;   "torch_forward" = 一个 C 函数，地址在 .a  里
+;;   参数: 两个 64 位指针
+;;   返回: 一个 64 位指针
+;;   调用方式: System V AMD64 ABI
+
+;; 你调用:
+(torch-forward model input)
+
+;; 编译后就是:
+;;   mov  rdi, [model]
+;;   mov  rsi, [input]
+;;   call [torch_forward]      ← 一条 CALL 指令，零开销
+;;   mov  [result], rax
+```
+
+和 C 的 `extern` 声明完全一样：
+
+```c
+// C 声明:
+extern void torch_forward(void* model, void* input);
+
+// C 调用:
+torch_forward(m, i);
+
+// 编译后:
+//   mov  rdi, [m]
+//   mov  rsi, [i]
+//   call torch_forward
+```
+
+**没有中间层。没有胶水代码。没有运行时类型检查。** C 的 CALL 和 Chez 的 CALL 在机器码层面没有区别。
+
+这就是"运行时不自己写"的真正含义：
+- 不需要写 JIT 编译器               → Chez 的 AOT 编译器替你做了
+- 不需要写 FFI 桥接层               → foreign-procedure 替你声明
+- 不需要写寄存器分配/指令选择        → Chez 45 年积累替你做了
+- 不需要写 Python 运行时            → CPython 的 C 代码直接链接
+
+你只写 2500 行翻译器。剩下的——Chez 的编译器、CPython 的运行时、libtorch 的计算库——全是现成的、验证过的、高效的。
+
+**不是"写不出来所以不写"，是"有的用所以不写"。**
+
+### 5.5 编译 + 链接流程
+
+```bash
+# 1. 声明依赖
+cat > aot.json << EOF
+{
+  "dependencies": {
+    "torch":    {"version": "2.1.0", "cuda": "12"},
+    "numpy":    {"version": "1.26.0"},
+    "opencv":   {"version": "4.9.0", "optional": true}
+  }
+}
+EOF
+
+# 2. 下载预编译静态库
+aot-get install
+# → 下载 torch-2.1.0-cuda12.a 到 ./deps/
+# → 下载 numpy-1.26.0.a 到 ./deps/
+
+# 3. 编译 Python 代码
+chez --script python-to-scheme.ss < train.py > train.sls
+chez --compile train.sls --optimize-level 3 -o train.o
+
+# 4. 静态链接所有依赖
+g++ -static -o llm     train.o     deps/torch-2.1.0-cuda12.a     deps/numpy-1.26.0.a     -lchezscheme -lpthread -ldl -lm -lstdc++
+
+# 5. 产物
+./llm --model llama.pt
+```
+
+这是整个方案最关键的工程决策：**不自己写运行时。**
+
+```
+传统 AOT 方案的做法:
+  Python 代码 → 自己写 IR → 自己写优化 → 自己写代码生成 → 机器码
+                            ↑                      ↑
+                         2 年写完                 到处是 bug
+                         还没开始处理 PyTorch
+
+我们的方案:
+  Python 代码 → Scheme S-expr → Chez 的 foreign-procedure → CALL 指令
+                                  ↑
+                             45 年验证过的编译器
+                             一行声明，自动生成正确的调用指令
+```
+
+`foreign-procedure` 不是"运行时桥接层"——它只是一次**编译时声明**：
+
+```scheme
+;; 你声明:
+(define torch-forward
+  (foreign-procedure "torch_forward" 
+    (void* void*) void*))
+;;     ↑ 参数类型    ↑ 返回类型
+
+;; Chez 编译器看到这个声明，在编译时就知道:
+;;   "torch_forward" = 一个 C 函数，地址在 .a  里
+;;   参数: 两个 64 位指针
+;;   返回: 一个 64 位指针
+;;   调用方式: System V AMD64 ABI
+
+;; 你调用:
+(torch-forward model input)
+
+;; 编译后就是:
+;;   mov  rdi, [model]
+;;   mov  rsi, [input]
+;;   call [torch_forward]      ← 一条 CALL 指令，零开销
+;;   mov  [result], rax
+```
+
+和 C 的 `extern` 声明完全一样：
+
+```c
+// C 声明:
+extern void torch_forward(void* model, void* input);
+
+// C 调用:
+torch_forward(m, i);
+
+// 编译后:
+//   mov  rdi, [m]
+//   mov  rsi, [i]
+//   call torch_forward
+```
+
+**没有中间层。没有胶水代码。没有运行时类型检查。** C 的 CALL 和 Chez 的 CALL 在机器码层面没有区别。
+
+这就是"运行时不自己写"的真正含义：
+- 不需要写 JIT 编译器               → Chez 的 AOT 编译器替你做了
+- 不需要写 FFI 桥接层               → foreign-procedure 替你声明
+- 不需要写寄存器分配/指令选择        → Chez 45 年积累替你做了
+- 不需要写 Python 运行时            → CPython 的 C 代码直接链接
+
+你只写 2500 行翻译器。剩下的——Chez 的编译器、CPython 的运行时、libtorch 的计算库——全是现成的、验证过的、高效的。
+
+**不是"写不出来所以不写"，是"有的用所以不写"。**
 
 ```bash
 # 1. 声明依赖
