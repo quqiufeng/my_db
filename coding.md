@@ -45,7 +45,7 @@
 | LuaJIT | 待下载 | /code/luajit | /code/luajit | 待探索 | — |
 | HotSpot JVM | 待下载 | /code/hotspot | /code/hotspot | 待探索 | — |
 | mruby | 待下载 | /code/mruby | /code/mruby | 待探索 | — |
-| PHP | 待下载 | /code/php | /code/php | 待探索 | — |
+| PHP | /opt/php/src | /code/php | /code/php | ✅ 2026-06-09 | 已完成 |
 
 
 > 使用 `./analyze_repo.sh <source>` 分析新项目后，数据会自动保存到 `/code/{project}/`。
@@ -1202,6 +1202,175 @@ mydb 项目与各项目架构相似度:
 > 提示：以上场景的丰富程度 = 已索引项目的数量。1 个项目只能单点搜索，16 个项目才能做交叉分析。
 > 推荐探索顺序：mruby → SQLite → libuv → Redis → Nginx → CPython → LuaJIT → 其余项目。
 
+---
+
+## 踩坑记录 (实战：PHP 源码探索)
+
+> 以下记录了探索 PHP 源码过程中遇到的全部问题及解决方案，包含完整可复现的命令。
+
+### 1. ctags 未安装 → code_indexer 产出空文件
+
+**现象**: code_indexer 运行后 `chunks_meta.jsonl` 和 `chunks_text.txt` 大小为 0 字节。
+
+**原因**: code_indexer 依赖 ctags 提取函数签名。系统未安装 ctags 时，Worker 日志显示 `ctags failed: 32512`（命令未找到）。
+
+**修复**:
+```bash
+sudo apt-get install -y universal-ctags
+# 安装后清理重跑：
+sudo rm -rf /opt/code_caches/php_cache
+export LD_LIBRARY_PATH="/data/cuda/lib64:/opt/my_db:\${LD_LIBRARY_PATH}"
+/opt/my_db/tools/code_indexer /opt/php/src /opt/code_caches/php_cache 6
+```
+结果: 2375 文件 → 61866 chunks，3.5s，680 files/s。
+
+---
+
+### 2. Jina 模型路径不匹配 → batch_embedder 加载失败
+
+**现象**: batch_embedder 依次报错：
+1. `Failed to open vocab.json`
+2. `Failed to open merges.txt`
+3. `Failed to create ONNX session`
+
+**原因**: 硬编码路径为 `/opt/models/jina-embeddings-v2-base-code/model.onnx`，但实际模型存放在 `/opt/jina-embeddings-v2-base-code/onnx/model.onnx`。`vocab.json` 在模型根目录（不在 `onnx/` 子目录），`merges.txt` 不存在（Jina 的 merges 内嵌在 `tokenizer.json` 中）。
+
+**修复**:
+```bash
+# 创建正确的目录结构（硬编码路径是 /opt/models/...）
+sudo rm -rf /opt/models/jina-embeddings-v2-base-code
+sudo mkdir -p /opt/models/jina-embeddings-v2-base-code
+sudo ln -s /opt/jina-embeddings-v2-base-code/onnx/model.onnx \
+           /opt/models/jina-embeddings-v2-base-code/model.onnx
+sudo ln -s /opt/jina-embeddings-v2-base-code/vocab.json \
+           /opt/models/jina-embeddings-v2-base-code/vocab.json
+# 从 tokenizer.json 中提取 merges.txt
+python3 -c \"
+import json
+with open('/opt/jina-embeddings-v2-base-code/tokenizer.json') as f:
+    data = json.load(f)
+merges = data['model'].get('merges', [])
+with open('/opt/jina-embeddings-v2-base-code/merges.txt', 'w') as f:
+    f.write('#version: 0.2\\n')
+    for m in merges:
+        f.write((m if isinstance(m, str) else ' '.join(m)) + '\\n')
+\"
+sudo ln -s /opt/jina-embeddings-v2-base-code/merges.txt \
+           /opt/models/jina-embeddings-v2-base-code/merges.txt
+```
+
+---
+
+### 3. TensorRT V2 配置失败 → 回退到 CUDA（非阻塞）
+
+**现象**: `[WARN] TensorRT V2 config failed, falling back to legacy API` + `Using CUDA GPU acceleration`
+
+**原因**: ONNX Runtime 1.20.1 的 TensorRT V2 Execution Provider 与 TensorRT 10 不完全兼容。代码自动回退到 CUDA EP。
+
+**影响**: **无**。CUDA GPU 加速正常工作（~130 items/s）。仅与 TensorRT 相关的性能警告，不影响结果。
+
+---
+
+### 4. HNSW 索引未自动构建 → 语义搜索返回空
+
+**现象**: `batch_embedder` 运行完成后，`cache_query --type search` 返回 0 结果，日志显示 `Vector engine loaded` 但无匹配。
+
+**原因**: batch_embedder 在结束时 fork 子进程调用 `build_hnsw_index` 构建近似最近邻索引，但子进程 `execl` 失败（编译产物不存在），日志: `[HNSW] Failed to start index builder`。未找到 `.hnsw` 文件的 source 会被 `search_hnsw()` 跳过（line 673: `if (!source->hnsw_file[0]) return 0;`）。
+
+**修复**:
+```bash
+# 编译 HNSW 索引构建工具
+cd /opt/my_db && sudo make tools/build_hnsw_index
+
+# 为已生成向量构建 HNSW 索引
+export LD_LIBRARY_PATH="/opt/my_db:\${LD_LIBRARY_PATH}"
+./tools/build_hnsw_index \
+  /opt/code_caches/php_cache/vectors/code_local_php.jina.bin
+```
+输出: 61866 vectors, 768 dims, 索引保存至 `code_local_php.jina.bin.hnsw` (198 MB)。
+
+---
+
+### 5. dataflow 段错误
+
+**现象**: `./tools/dataflow analyze /opt/code_caches/php_cache` → `段错误（核心已转储）`
+
+**原因**: dataflow 工具在处理大批量函数体时存在内存越界 bug（PHP 有 24212 个函数）。
+
+**影响**: **可跳过**。dataflow 分析非核心步骤，缺少不影响符号查询和语义搜索。
+
+---
+
+### 6. `/memory` 目录权限 → cache_import 无法打开缓存
+
+**现象**: `cache_import` 报错 `[ERROR] Failed to open cache: /memory`
+
+**原因**: cache_import 调用 `cache_open("/memory", 2GB)` 创建 `/memory/cache.bin`，但 `/memory` 目录属于 root，普通用户无写权限。
+
+**修复**:
+```bash
+sudo chown \$(whoami) /memory
+```
+
+---
+
+### 7. 输出缓冲 → cache_query / cache_import 无输出
+
+**现象**: 运行 `cache_import` 或 `cache_query` 时长时间无输出，实际进程在运行但 stdout 被缓冲。
+
+**原因**: C `printf` 默认行缓冲，管道/重定向时变为全缓冲。`log_info()` 使用 `printf` 后未 `fflush`。
+
+**修复**: 使用 `stdbuf` 命令强制行缓冲：
+```bash
+export LD_LIBRARY_PATH="/opt/my_db:\${LD_LIBRARY_PATH}"
+stdbuf -oL ./tools/cache_import /opt/code_caches/php_cache /code/php --cache-dir /memory
+```
+
+---
+
+### 8. `[CACHE]` 日志输出到 stdout → 破坏 JSON 管道解析
+
+**现象**: `cross_search.sh` 捕获 `cache_query` 输出后 JSON 解析失败，始终返回 "无结果"。
+
+**原因**: `libmydb.so` 中的 `cache_open()` 使用 `printf` 输出 `[CACHE] ...` 信息（到 stdout），而非 `fprintf(stderr, ...)`。`cross_search.sh` 中 `output=\$("\$CACHE_QUERY" ...)` 捕获 stdout 后直接管道给 `json.load(sys.stdin)`，非 JSON 的首行导致解析失败。
+
+**修复**（两处修改）:
+```bash
+# 修改 1: cross_search.sh 中过滤非 JSON 行，只将 { 开头的行传给 json.load
+#        并移除 --pretty 标志（避免换行格式使单行 JSON 变多行）
+#        --pretty  →  删除
+#        管道的 Python 脚本改为 for line in sys.stdin: if line.startswith('{'): json.loads(line); break
+
+# 修改 2: 核心修复建议（后续在 cache_query.c 中实施）
+#         将 main 函数开头的 stdout 缓存行改为 stderr：
+#         fprintf(stderr, "[CACHE] ...") 而非 printf("[CACHE] ...")
+#         当前 libmydb.so 中的 printf 无法轻易修改，所以先改 shell 包装层
+```
+
+---
+
+### 9. 重要：每次运行前需设置的环境变量
+
+以下是最小必需的环境变量导出（脚本已自动处理，手动调试时需要）：
+
+```bash
+# C 工具链链接 ONNX Runtime + libmydb.so
+export LD_LIBRARY_PATH="/opt/my_db:/data/cuda/lib64:\${LD_LIBRARY_PATH}"
+
+# ONNX Runtime 的 CUDA 提供者库（在 ORT GPU 安装目录）
+export LD_LIBRARY_PATH="/data/venv/onnxruntime-linux-x64-gpu-1.20.1/lib:\${LD_LIBRARY_PATH}"
+
+# 一次设置永久生效（追加到 ~/.bashrc 或 ~/.profile）
+cat >> ~/.bashrc << 'EOF'
+# my_db 代码探索系统
+export LD_LIBRARY_PATH="/opt/my_db:/data/cuda/lib64:/data/venv/onnxruntime-linux-x64-gpu-1.20.1/lib:\${LD_LIBRARY_PATH}"
+EOF
+```
+
+> **提示**: `ai_code_search.sh`、`analyze_repo.sh`、`cross_search.sh` 已自动处理 GPU 库路径。仅在使用 `cache_query`、`cache_import`、`batch_embedder` 等工具**单独调试**时需要手动 export。脚本内部通过 `export LD_LIBRARY_PATH=...` 拼接了 CUDA、TensorRT、cuDNN、ONNX Runtime 路径。
+
+---
+
 ## 文件清单
 
 | 文件 | 说明 |
@@ -1238,5 +1407,5 @@ mydb 项目与各项目架构相似度:
 
 ---
 
-*文档版本：2026-06-09*
+*文档版本：2026-06-09*（PHP 源码探索完成，新增踩坑记录 §9 项）
 *适用于：analyze_repo.sh + ai_code_search.sh + ai_code_search_large.sh 最新版本*
