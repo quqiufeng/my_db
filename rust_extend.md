@@ -402,6 +402,67 @@ Rust 在你的体系中的定位:
      真正需要的不是 "Rust 集成"，是 "C 图形库集成"。
 ```
 
+## 七、Rust 的真正价值：C API 索引目录
+
+### 7.1 Rust 不是目标语言，是索引
+
+```
+Rust crate 的作用不是让你用它——是告诉你底层有什么 C 库。
+
+你想找一个 GUI 库:
+  → 搜 "rust gui framework" → 找到 GPUI
+  → 看 GPUI 源码 → 发现它调了 vulkan、X11、freetype、harfbuzz
+  → 不写 Rust，直接 foreign-procedure 调这些 C 库
+
+没有 Rust，你需要:
+  自己去 Vulkan 文档里找 vkCreateInstance
+  自己去 X11 文档里找 XOpenDisplay
+  自己去 freetype 文档里找 FT_New_Face
+  花 3 个月才能凑齐一个 GUI 栈
+
+有 Rust:
+  Rust 社区已经帮你踩过坑了
+  GPUI 的 Cargo.toml 已经声明了所有依赖
+  你知道"要做 GUI，需要这些 C 库"
+  花 3 天就能凑齐
+```
+
+### 7.2 Rust 生态帮你省掉的时间
+
+```
+没有 Rust 的索引:                  有 Rust 的索引:
+  找 GUI 库: 2 周                    找 GPUI: 10 分钟
+  找渲染库: 2 周                    看 Cargo.toml: 10 分钟
+  找文本库: 1 周                    知道要 freetype + harfbuzz
+  找窗口库: 1 周                    知道要 X11 + Wayland
+  组合调试: 4 周                    自己的坑自己踩，但大方向有了
+  ──────────────────                ──────────────────
+  总计: 10 周                        总计: 1 周
+```
+
+Rust 社区花了 10 年把 GUI 栈踩平了。你用 Rust 的查到的每个 Cargo.toml，都是那个 crate 的作者替你走完的路。
+
+**你不是"用 Rust"，你是"用 Rust 社区帮你画好的 C 库藏宝图"。**
+
+### 7.3 这就是最后一块拼图
+
+```
+你写的:      Python / PHP 业务逻辑    → 控制流翻译
+你调的:      GPT 告诉你的 / Rust 索引到的 C 库  → foreign-procedure
+你产出的:    ./app                    → 单文件 ELF
+
+Python 写业务逻辑没有问题。
+PyTorch 的 C++ 后端直接调没有问题。
+GPUI 底层的 Vulkan/X11 直接调没有问题。
+
+唯一的问题——"我怎么知道有哪些 C 库可用？"
+Google 搜 3 天，GPT 问 1 天，Rust crates.io 搜 10 分钟。
+
+不是因为 Rust 好，是因为 Rust 社区替你走了一遍路。
+```
+
+---
+
 > **文档版本**: 2026-06-09
 > **相关文件**: php_extend.md, python_extend.md, cpython_analysis_report.md
 > **搜索命令示例**: 本文档中所有 cache_query 命令均可直接复制执行
