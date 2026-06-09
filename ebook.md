@@ -95,7 +95,7 @@
 **参数说明**：
 | 参数 | 必需 | 说明 |
 |------|------|------|
-| `cache_dir` | 是 | KV Cache 目录，如 `/opt/ai_code_memory` |
+| `cache_dir` | 是 | KV Cache 目录，如 `/memory` |
 | `book_file` | 是 | 电子书文件路径 |
 | `namespace` | 否 | 命名空间，如 `/books/ddia`。默认从文件名生成 |
 | `output_dir` | 否 | Markdown 输出目录，默认 `/opt/books` |
@@ -103,18 +103,18 @@
 **示例**：
 ```bash
 # 基本导入
-./tools/import_book /opt/ai_code_memory ~/book.mobi
+./tools/import_book /memory ~/book.mobi
 
 # 指定命名空间
-./tools/import_book /opt/ai_code_memory ~/book.mobi /books/my_book
+./tools/import_book /memory ~/book.mobi /books/my_book
 
 # 指定输出目录
-./tools/import_book /opt/ai_code_memory ~/paper.pdf /books/paper /data/books
+./tools/import_book /memory ~/paper.pdf /books/paper /data/books
 
 # 完整示例：导入 Elon Musk 传记
 LD_LIBRARY_PATH=$(pwd):/opt/TensorRT-10/lib:$LD_LIBRARY_PATH \
   ./tools/import_book \
-  /opt/ai_code_memory \
+  /memory \
   "/home/dministrator/硅谷钢铁侠.azw3" \
   /books/elon_musk \
   /opt/books
@@ -133,7 +133,7 @@ LD_LIBRARY_PATH=$(pwd):/opt/TensorRT-10/lib:$LD_LIBRARY_PATH \
 
 **KV Cache 存储结构**：
 ```
-/opt/ai_code_memory/
+/memory/
 ├── cache.bin                    # 原始数据
 ├── index.bin                    # 索引文件
 └── vectors/
@@ -324,7 +324,7 @@ elon_musk/
 ```bash
 ./tools/cache_query "concurrency" \
   --type search \
-  --analysis-dir /opt/ai_code_memory \
+  --analysis-dir /memory \
   --max-results 10
 ```
 
@@ -343,7 +343,7 @@ elon_musk/
 
 **查看所有命名空间**：
 ```bash
-strings /opt/ai_code_memory/cache.bin | grep "^/books/" | sort -u
+strings /memory/cache.bin | grep "^/books/" | sort -u
 ```
 
 ---
@@ -548,10 +548,10 @@ strings /opt/ai_code_memory/cache.bin | grep "^/books/" | sort -u
 **排查命令**：
 ```bash
 # 检查向量文件是否存在
-ls -la /opt/ai_code_memory/vectors/*.hnsw
+ls -la /memory/vectors/*.hnsw
 
 # 检查 GPU 是否可用
-./tools/cache_query "test" --type search --analysis-dir /opt/ai_code_memory
+./tools/cache_query "test" --type search --analysis-dir /memory
 # 如果看到 "CUDA not available, falling back to CPU"，说明 GPU 未配置
 ```
 
@@ -602,7 +602,7 @@ ls -la libmydb.so
 | `src/vector_engine.c` | 语义搜索引擎 |
 | `src/cache/cache.c` | KV Cache 实现 |
 | `/opt/models/jina-embeddings-v2-base-code/` | Jina v2 嵌入模型 |
-| `/opt/ai_code_memory/` | KV Cache 数据目录 |
+| `/memory/` | KV Cache 数据目录 |
 | `/opt/books/` | Markdown 输出目录 |
 
 ---
@@ -785,11 +785,11 @@ ldd tools/import_book | grep onnx
 
 # 3. 验证 TensorRT 可用
 export LD_LIBRARY_PATH=/opt/TensorRT-10/lib:$(pwd):$LD_LIBRARY_PATH
-./tools/import_book /opt/ai_code_memory ~/test.epub /books/test
+./tools/import_book /memory ~/test.epub /books/test
 # 应看到："Using TensorRT GPU acceleration (FP32 for Jina)"
 
 # 4. 验证 HNSW 索引生成
-ls -la /opt/ai_code_memory/vectors/*.hnsw
+ls -la /memory/vectors/*.hnsw
 # 应存在 .hnsw 文件
 
 # 5. 验证语义搜索
@@ -818,7 +818,7 @@ make clean && make tools/import_book
 
 # 3. 验证 V2 API 生效（导入时观察日志）
 export LD_LIBRARY_PATH=/opt/TensorRT-10/lib:$(pwd):$LD_LIBRARY_PATH
-./import_book.sh /opt/ai_code_memory ~/test.epub /books/test
+./import_book.sh /memory ~/test.epub /books/test
 
 # 期望输出（首次编译 engine，耗时较长）：
 #   [INFO] Building TensorRT engine...
@@ -826,8 +826,8 @@ export LD_LIBRARY_PATH=/opt/TensorRT-10/lib:$(pwd):$LD_LIBRARY_PATH
 #   Batch embedding: N batches of 32 pages each
 
 # 4. 验证 batch 生效（engine 缓存后再次导入，应更快）
-rm -rf /opt/ai_code_memory/vectors/* /opt/books/test
-time ./import_book.sh /opt/ai_code_memory ~/test.epub /books/test
+rm -rf /memory/vectors/* /opt/books/test
+time ./import_book.sh /memory ~/test.epub /books/test
 # 第二次导入应看到：
 #   Batch embedding: X batches of 32 pages each
 #   real ~11s（AZW3 838页）
@@ -1530,13 +1530,13 @@ cd src/importer/wrappers && make
 export LD_LIBRARY_PATH=/opt/TensorRT-10/lib:$(pwd):$LD_LIBRARY_PATH
 
 # 3. 导入四本测试书
-./tools/import_book /opt/ai_code_memory ~/book.epub /books/epub
-./tools/import_book /opt/ai_code_memory ~/book.azw3 /books/azw3
-./tools/import_book /opt/ai_code_memory ~/book.mobi /books/mobi
-./tools/import_book /opt/ai_code_memory ~/book.pdf /books/pdf
+./tools/import_book /memory ~/book.epub /books/epub
+./tools/import_book /memory ~/book.azw3 /books/azw3
+./tools/import_book /memory ~/book.mobi /books/mobi
+./tools/import_book /memory ~/book.pdf /books/pdf
 
 # 4. 验证向量文件
-ls -la /opt/ai_code_memory/vectors/*.hnsw
+ls -la /memory/vectors/*.hnsw
 
 # 5. 测试语义搜索
 ./explore_book.sh /books/mobi search "your query"

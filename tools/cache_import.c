@@ -489,7 +489,7 @@ int main(int argc, char** argv) {
     
     const char* analysis_dir = argv[1];
     const char* namespace = argv[2];
-    const char* cache_dir = "/opt/ai_code_memory";
+    const char* cache_dir = "/memory";
     
     for (int i = 3; i < argc; i++) {
         if (strcmp(argv[i], "--cache-dir") == 0 && i + 1 < argc) {

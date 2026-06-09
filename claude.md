@@ -2,6 +2,8 @@
 
 > 基于 my_db 项目所有 git 提交中的 bug 修复和性能优化经验总结
 > 项目: https://github.com/quqiufeng/my_db
+>
+> **Python 依赖环境**: `/data/venv` — 项目中的所有 Python 脚本（如模型导出、训练数据生成等）均使用此虚拟环境；运行前请执行 `source /data/venv/bin/activate` 激活。
 
 ---
 

@@ -325,7 +325,7 @@ static void print_usage(const char* prog) {
     printf("\nOptions:\n");
     printf("  --repo <namespace>       Repository namespace (e.g., /code/nginx)\n");
     printf("  --type <type>            Query type: exact, symbol, context, search, auto\n");
-    printf("  --cache-dir <dir>        KV Cache directory (default: /opt/ai_code_memory)\n");
+    printf("  --cache-dir <dir>        KV Cache directory (default: /memory)\n");
     printf("  --analysis-dir <dir>     Analysis directory for semantic search (required for search type)\n");
     printf("  --kind <kind>            Filter by symbol kind: function, struct, macro, typedef\n");
     printf("  --lang <lang>            Filter by language: c, cpp, python, javascript, go, rust\n");
@@ -352,7 +352,7 @@ int main(int argc, char** argv) {
     const char* query = argv[1];
     const char* repo = NULL;
     const char* type = "auto";
-    const char* cache_dir = "/opt/ai_code_memory";
+    const char* cache_dir = "/memory";
     const char* analysis_dir = NULL;
     const char* model_type = "jina";
     int pretty = 0;

@@ -16,7 +16,7 @@
 #   5. 兼容新旧导入格式（有/无 chapters/ 子目录）
 #
 # 依赖：
-#   - KV Cache 记忆系统（/opt/ai_code_memory/）
+#   - KV Cache 记忆系统（/memory/）
 #   - tools/cache_query （C 实现，支持向量搜索）
 #   - 电子书 Markdown 文件（由 import_book 生成）
 #
@@ -104,7 +104,7 @@
 #   ./explore_book.sh /books/elon_musk read chapters/12-SpaceX/page_0000
 #
 # 示例 3: 跨书搜索（不指定 --repo）
-#   ./tools/cache_query "concurrency" --type search --analysis-dir /opt/ai_code_memory --max-results 10
+#   ./tools/cache_query "concurrency" --type search --analysis-dir /memory --max-results 10
 #   → 同时在所有已导入书籍中搜索
 #
 # 示例 4: 浏览章节
@@ -119,7 +119,7 @@
 #
 # 1. 命名空间获取：
 #    如果不确定 namespace，可以查看已导入的书籍：
-#    strings /opt/ai_code_memory/cache.bin | grep "^/books/" | sort -u
+#    strings /memory/cache.bin | grep "^/books/" | sort -u
 #
 # 2. 搜索依赖向量缓存：
 #    语义搜索需要 import_book 成功生成向量文件（vectors/*.jina.bin.hnsw）。
@@ -140,8 +140,8 @@
 #    如果看到 "CUDA not available, falling back to CPU"，搜索会变慢但仍可用。
 #
 # 6. 向量文件位置：
-#    向量索引文件位于 /opt/ai_code_memory/vectors/books_{name}.jina.bin.hnsw
-#    搜索时 --analysis-dir 指向 /opt/ai_code_memory/ 目录
+#    向量索引文件位于 /memory/vectors/books_{name}.jina.bin.hnsw
+#    搜索时 --analysis-dir 指向 /memory/ 目录
 #
 # =============================================================================
 
@@ -284,9 +284,9 @@ cmd_search() {
         exit 1
     fi
     
-    # 执行语义搜索（向量索引在 /opt/ai_code_memory/vectors/ 中）
+    # 执行语义搜索（向量索引在 /memory/vectors/ 中）
     local search_result
-    search_result=$("$CACHE_QUERY" "$query" --repo "$NAMESPACE" --type search --analysis-dir /opt/ai_code_memory --max-results "$max_results" --pretty 2>&1 | extract_json)
+    search_result=$("$CACHE_QUERY" "$query" --repo "$NAMESPACE" --type search --analysis-dir /memory --max-results "$max_results" --pretty 2>&1 | extract_json)
     
     echo "$search_result" | python3 -c "
 import sys, json

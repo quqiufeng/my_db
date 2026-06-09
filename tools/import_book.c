@@ -18,8 +18,8 @@
  *   ./import_book <cache_dir> <book_file> [namespace]
  * 
  * 示例：
- *   ./import_book /opt/ai_code_memory ~/book.mobi /books/my_book
- *   ./import_book /opt/ai_code_memory ~/paper.pdf
+ *   ./import_book /memory ~/book.mobi /books/my_book
+ *   ./import_book /memory ~/paper.pdf
  */
 
 #include "cache.h"
@@ -1466,15 +1466,15 @@ int main(int argc, char* argv[]) {
         printf("Usage: %s <cache_dir> <book_file> [namespace] [output_dir]\n", argv[0]);
         printf("\n");
         printf("Arguments:\n");
-        printf("  cache_dir   KV Cache 目录 (如 /opt/ai_code_memory)\n");
+        printf("  cache_dir   KV Cache 目录 (如 /memory)\n");
         printf("  book_file   电子书文件 (.mobi, .azw, .azw3, .pdf, .epub)\n");
         printf("  namespace   命名空间 (可选，默认从文件名生成)\n");
         printf("  output_dir  Markdown 输出目录 (可选，默认 /opt/books)\n");
         printf("\n");
         printf("Examples:\n");
-        printf("  %s /opt/ai_code_memory ~/book.mobi /books/my_book\n", argv[0]);
-        printf("  %s /opt/ai_code_memory ~/paper.pdf\n", argv[0]);
-        printf("  %s /opt/ai_code_memory ~/paper.pdf /books/paper /data/books\n", argv[0]);
+        printf("  %s /memory ~/book.mobi /books/my_book\n", argv[0]);
+        printf("  %s /memory ~/paper.pdf\n", argv[0]);
+        printf("  %s /memory ~/paper.pdf /books/paper /data/books\n", argv[0]);
         printf("\n");
         printf("Output structure:\n");
         printf("  /opt/books/{book_name}/\n");

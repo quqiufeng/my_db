@@ -2,6 +2,56 @@
 
 > [← 返回项目总览](README.md)
 
+---
+
+## 项目文件存储目录
+
+所有探索开源项目生成的数据文件统一保存在 **`/code/`** 目录下，按项目名组织：
+
+```
+/code/
+├── {project}/                    # 项目分析输出
+│   ├── chunks_text.txt           # 代码内容（一行一个 chunk）
+│   ├── chunks_meta.jsonl         # 元数据（函数名/文件/行号/签名）
+│   ├── call_graph.json           # 调用关系图
+│   ├── dataflow.json             # 变量数据流
+│   ├── word_freq.json            # 词频统计
+│   └── vectors/                  # 语义向量
+│       ├── {project}.jina.bin
+│       ├── {project}.jina.idx
+│       └── {project}.jina.bin.hnsw
+├── explore_repo.sh               # 项目探索脚本（软链接到项目根目录）
+└── analyze_repo.sh               # 项目分析脚本（软链接到项目根目录）
+```
+
+> **注意**: KV Cache 二进制数据（`cache.bin` + `index.bin` + `vectors/`）保存在 `/memory/` 目录下；`/code/{project}/` 下存放的是可读的分析产出（文本、JSON、向量等临时文件）。
+
+### 待探索项目列表
+
+| 项目 | 源码路径 | 分析输出 | 命名空间 | 状态 | 计划导入时间 |
+|------|----------|----------|----------|------|-------------|
+| Linux Kernel | /opt/linux/src/linux-7.0.11 | /code/linux | /code/linux | 待探索 | — |
+| Nginx | 待下载 | /code/nginx | /code/nginx | 待探索 | — |
+| Redis | 待下载 | /code/redis | /code/redis | 待探索 | — |
+| stable-diffusion.cpp | https://github.com/leejet/stable-diffusion.cpp | /code/stable-diffusion.cpp | /code/stable-diffusion.cpp | 待探索 | — |
+| llama.cpp | 待下载 | /code/llama.cpp | /code/llama.cpp | 待探索 | — |
+| PostgreSQL | 待下载 | /code/postgresql | /code/postgresql | 待探索 | — |
+| SQLite | 待下载 | /code/sqlite | /code/sqlite | 待探索 | — |
+| RocksDB | 待下载 | /code/rocksdb | /code/rocksdb | 待探索 | — |
+| HAProxy | 待下载 | /code/haproxy | /code/haproxy | 待探索 | — |
+| libuv | 待下载 | /code/libuv | /code/libuv | 待探索 | — |
+| whisper.cpp | 待下载 | /code/whisper.cpp | /code/whisper.cpp | 待探索 | — |
+| CPython | 待下载 | /code/cpython | /code/cpython | 待探索 | — |
+| LuaJIT | 待下载 | /code/luajit | /code/luajit | 待探索 | — |
+| HotSpot JVM | 待下载 | /code/hotspot | /code/hotspot | 待探索 | — |
+| mruby | 待下载 | /code/mruby | /code/mruby | 待探索 | — |
+| PHP | 待下载 | /code/php | /code/php | 待探索 | — |
+
+
+> 使用 `./analyze_repo.sh <source>` 分析新项目后，数据会自动保存到 `/code/{project}/`。
+
+---
+
 ## 系统概述
 
 本项目实现了一套**本地代码语义搜索与记忆系统**，能够将任意代码仓库（从几百文件的小项目到 Linux 内核级别的超大项目）转换为可自然语言查询的智能记忆库。系统基于 C 语言实现核心引擎，使用 GPU 加速语义向量生成，通过 mmap 持久化存储确保知识永不丢失。
@@ -101,7 +151,7 @@
 | `--skip-vectors` | 否 | 跳过向量生成（更快，但无语义搜索） |
 | `--skip-callgraph` | 否 | 跳过调用图分析 |
 | `--skip-dataflow` | 否 | 跳过数据流分析 |
-| `--cache-dir <dir>` | 否 | KV Cache 目录（默认: /opt/ai_code_memory） |
+| `--cache-dir <dir>` | 否 | KV Cache 目录（默认: /memory） |
 | `--jobs <n>` | 否 | 并行工作进程数（默认: CPU 核心数） |
 | `--name <name>` | 否 | 项目名（用于目录命名） |
 
@@ -127,7 +177,7 @@
 ./analyze_repo.sh /opt/sqlite --skip-vectors --skip-dataflow
 
 # 指定并行度和缓存目录
-./analyze_repo.sh /opt/linux /code/linux --jobs 8 --cache-dir /data/cache
+./analyze_repo.sh /opt/linux/src/linux-7.0.11 /code/linux --jobs 8 --cache-dir /data/cache
 ```
 
 **6 步流水线详解**：
@@ -153,7 +203,7 @@
     ├── code_local_{project}.jina.idx       # 名称→偏移索引
     └── code_local_{project}.jina.bin.hnsw  # HNSW 近似索引
 
-/opt/ai_code_memory/                     # KV Cache（持久化存储）
+/memory/                     # KV Cache（持久化存储）
 ├── cache.bin                         # mmap 数据文件
 └── index.bin                         # 索引文件（Hash + Skip List）
 ```
@@ -204,6 +254,7 @@
 | `search` | `s` | **语义搜索** | 用自然语言找代码 |
 | `snippet` | `snip` | **代码片段搜索** | 找相似实现 |
 | `dataflow` | `df` | **变量数据流追踪** | 追踪变量生命周期 |
+| `cross-search` | `cross` / `xs` | **跨项目搜索** | 一次在所有已索引项目中搜索 |
 | `callgraph` | `c` | 构建调用图 | 分析函数依赖 |
 | `analyze` | `a` | **一键完整分析** | 快速开始 |
 | `demo` | `d` | 演示系统能力 | 了解系统功能 |
@@ -380,7 +431,7 @@
 
 **示例**：
 ```bash
-./ai_code_search_large.sh init /opt/linux
+./ai_code_search_large.sh init /opt/linux/src/linux-7.0.11
 ```
 
 **自动检测结果**（Linux 内核示例）：
@@ -487,7 +538,7 @@ arch/    → arch_x86, arch_arm 等 17 子系统
 ```
 ╔══════════════════════════════════════════════════════════════════╗
 ║ 项目: linux                                                      ║
-║ 路径: /opt/linux                                                 ║
+║ 路径: /opt/linux/src/linux-7.0.11                                                 ║
 ╚══════════════════════════════════════════════════════════════════╝
 
 子系统                      Chunks        向量         调用图
@@ -638,11 +689,11 @@ Cache 目录: ./linux_subsystems
 # → 被 alloc_pages, __get_free_pages 调用
 
 # 3. 修改代码（编辑器）
-vim /opt/linux/mm/page_alloc.c
+vim /opt/linux/src/linux-7.0.11/mm/page_alloc.c
 # 在 __alloc_pages_slowpath 中添加 printk 或 tracepoint
 
 # 4. 编译内核
-cd /opt/linux
+cd /opt/linux/src/linux-7.0.11
 make oldconfig
 make -j$(nproc)
 
@@ -667,7 +718,7 @@ qemu-system-x86_64 \
 ### KV Cache 存储结构
 
 ```
-/opt/ai_code_memory/
+/memory/
 ├── cache.bin                    # mmap 数据文件（零拷贝持久化）
 │   ├── 实时落盘：每次写入后 msync(MS_SYNC)
 │   ├── 断电不丢：操作系统保证 mmap 数据落盘
@@ -778,7 +829,7 @@ head -5 {cache_dir}/chunks_meta.jsonl
 **解决**：
 ```bash
 # 使用分治脚本
-./ai_code_search_large.sh init /opt/linux
+./ai_code_search_large.sh init /opt/linux/src/linux-7.0.11
 ./ai_code_search_large.sh index 4
 ./ai_code_search_large.sh vector 1  # 串行，避免 GPU OOM
 ```
@@ -801,43 +852,355 @@ head -5 {cache_dir}/chunks_meta.jsonl
 
 ---
 
-## 可以做的应用方向
+## 查询类型能力对照表
 
-基于这套代码探索基础设施，可以构建：
+系统提供 4 种核心查询类型，每种对应不同的底层机制和 AI Agent 使用场景：
 
-### 1. AI 代码审查助手
-- 自动找潜在 bug、性能问题、安全漏洞的相似模式
-- "这段代码是否有内存泄漏风险？" → 搜索相似模式的已知问题
+| 查询类型 | 触发条件 | 底层引擎 | 需要向量？ | 响应速度 | 返回数据 | AI Agent 最适合用在哪 |
+|---------|---------|---------|-----------|---------|---------|---------------------|
+| `exact` | query 以 `/code/` 开头 | KV Cache 直接查 key | ❌ 不需要 | 微秒级 | 任意 key 的原始 JSON 值 | 确认索引是否完整、调试 |
+| `symbol` | query 是单个标识符且有 `--repo` | KV Cache `/code/{repo}/symbols/` | ❌ 不需要 | 毫秒级 | 符号名/文件/行号/kind | 确认函数名是否正确、初步定位 |
+| `context` | query 是单个标识符 + `--type context` | symbol + callers + callees + 递归调用链展开 + dataflow | ❌ 不需要 | 毫秒~秒级 | 完整上下文：符号元数据 + caller列表 + callee列表 + 调用路径树 + 变量数据流 | **理解一个函数在项目中的完整角色** |
+| `search` | query 包含空格或 `--type search` | vector_engine (HNSW 近似搜索 + TF-IDF 关键词 boost + caller count boost) + 过滤 | ✅ 必须有 | 秒级 | 语义相似代码块 + name/file/line/kind/score + signature + content | **用自然语言描述功能找代码** |
 
-### 2. 跨项目代码迁移
-- 搜 "how to implement thread pool" → 找到多个高质量参考实现
-- 比较不同项目的实现差异，选择最佳方案
+### 4 种查询的 AI Agent 使用策略
 
-### 3. 遗留代码理解
-- 给 20 年前的 C 代码库做语义索引
-- 新人用自然语言提问，无需阅读全部代码
+```
+ search（语义搜索）←─── 不知道具体函数名时的第一入口
+    │  "找到相关函数名"
+    ▼
+ context（上下文查询）←─── 已知函数名后的深度分析
+    │  "生成 caller/callee/调用链/数据流报告"
+    ▼
+ AI Agent 获得完整的函数角色理解 → 写代码/改代码
+```
 
-### 4. API 使用示例搜索
-- 搜 "how to use libcurl multi interface" → 找到真实代码中的使用方式
-- 比文档更贴近实际使用场景
+**典型链路举例**：
+```
+Agent 收到用户需求: "帮我优化 Nginx 的内存使用"
+  → search "memory pool allocation"           # 找到相关函数
+  → context ngx_palloc --repo /code/nginx --depth 2  # 深度分析
+  → Agent 写出优化代码 + 标注参考来源
+```
 
-### 5. 漏洞分析
-- 追踪危险函数（如 `strcpy`）的数据流
-- 找到所有调用点，评估影响范围
+### 搜索过滤选项
 
-### 6. 架构可视化
-- 基于调用图自动生成架构图
-- 可对接 Graphviz、D3.js 做交互式展示
+所有 search/context 查询都支持以下过滤器：
 
-### 7. 代码推荐系统
-- 输入功能描述，推荐最佳实现文件
-- "我想加一个连接池，应该改哪些文件？"
+| 选项 | 作用 | 示例 |
+|------|------|------|
+| `--kind function` | 只返回函数，过滤结构体/宏/变量 | `search "event loop" --kind function` |
+| `--kind struct` | 只返回结构体定义 | `search "connection" --kind struct` |
+| `--lang c` | 只搜索 C 语言代码 | `search "allocator" --lang c` |
+| `--lang cpp` | 只搜索 C++ 代码 | `search "tensor" --lang cpp` |
+| `--file cuda` | 只搜索文件名含 cuda 的文件 | `search "kernel" --file cuda` |
+| `--no-boost` | 关闭 TF-IDF 和 caller count 加权 | 已知函数名时的精确搜索 |
+| `--max-results N` | 控制返回数量（默认 10，最大 100） | `search "memory" --max-results 20` |
+| `--depth N` | context 查询的调用链展开深度（0-5） | `context zmalloc --depth 3` |
 
-### 8. 知识沉淀
-- 团队代码库索引后，新成员可快速查询
-- "为什么这里要用红黑树而不是哈希表？" → 找到设计决策的上下文
+### 常见查询技巧快查
+
+| 你想做什么 | 应该用的查询 | 为什么 |
+|-----------|------------|--------|
+| 第一次接触一个新项目 | `search "main entry point"` | 找到 main() 或初始化入口 |
+| 理解一个子系统的全貌 | `explore "connection handling"` | 自动语义搜索 + 深度分析 Top-1 函数 |
+| 已知函数名想深入了解 | `symbol zmalloc --depth 2` | 完整的 caller/callee/调用链 |
+| 写了一段代码想找参考 | `snippet my_code.c` | 语义相似度匹配找最接近的工业实现 |
+| 对比两个项目的实现 | `compare /code/redis /code/nginx "memory pool"` | 同时搜索两个命名空间，对比输出 |
+| 一次搜完所有项目 | `cross-search "slab allocator"` | 自动发现所有已索引项目，并行搜索聚合 |
+
+
+
+## AI Agent 实战场景：16 个项目的知识网络
+
+以下场景全部基于 16 个待探索项目的**组合效应**——项目越多，每个场景的输出越丰富。每个场景展示了 AI Agent 如何利用代码探索系统完成具体的编码任务。
 
 ---
+
+### 场景 1：写一个内存池（跨项目参考）
+
+**用户说**："帮我写一个内存池"
+
+**AI Agent 执行**：
+```bash
+# 1. 跨项目搜索所有内存池实现
+cross-search "memory pool allocator"
+# → 返回:
+#   Nginx    ngx_pool_t / ngx_palloc     score=0.92  [请求级别, 栈式分配]
+#   Redis    zmalloc                      score=0.88  [简单封装 malloc]
+#   CPython  PyMem_Malloc / arenas        score=0.85  [对象池 + arena]
+#   Linux    kmem_cache / SLUB allocator  score=0.83  [per-CPU 三级缓存]
+#   mruby    mrb_mem_pool / mrb_gc_alloc  score=0.80  [GC 配套分配]
+#   Postgres MemoryContext / AllocSet     score=0.79  [树形内存上下文]
+
+# 2. 对得分最高的实现做深度分析
+context ngx_pool_t --repo /code/nginx --depth 2
+# → 返回: 结构体定义 + 创建/分配/销毁函数 + 调用链路
+```
+
+**Agent 得到的知识**：
+- Nginx 的 `ngx_pool_t` 是**栈式内存池**：create → 批量 palloc → destroy 一次性释放，零碎片
+- Redis 的 `zmalloc` 是**malloc 封装**：加前缀存大小，支持 OOM handler、原子操作统计
+- Linux 的 **SLUB** 是 per-CPU 对象缓存：三级缓存（cpu_slab → node partial → allocate_slab）减少锁竞争
+- CPython 使用 **arena + 池化**：大块内存预先 mmap，小对象在池内分配，配合 GC 释放
+
+**用户得到的输出**：Agent 综合各家优点，写出内存池代码，每行都带设计注释："参考 Nginx 一次性释放策略 + SLUB per-CPU 缓存思想 + zmalloc OOM handler"
+
+---
+
+### 场景 2："这个 epoll 循环写得对吗？"（代码审查）
+
+**用户说**：贴了一段自定义的 epoll 事件循环代码
+
+**AI Agent 执行**：
+```bash
+# 跨项目搜索相似模式
+snippet /opt/code_caches/nginx_cache ./my_epoll.c 5
+snippet /opt/code_caches/redis_cache ./my_epoll.c 5  
+snippet /opt/code_caches/libuv_cache ./my_epoll.c 5
+```
+
+**Agent 发现的差异**：
+| 检查项 | 用户代码 | Nginx | Redis | libuv |
+|--------|---------|-------|-------|-------|
+| EINTR 重入 | ❌ 未处理 | ✅ 检查 | ✅ 检查 | ✅ 检查 |
+| ET 模式 + 非阻塞 | ⚠️ 设了但不完整 | ✅ 完整 | ✅ 完整 | ✅ 完整 |
+| accept 限流 | ❌ 无限制 | ✅ 每次最多 8 个 | ✅ 每次最多 8 个 | ✅ 内置 backoff |
+| EAGAIN 处理 | ❌ 缺少 | ✅ 重置 events | ✅ 继续等待 | ✅ 重新注册 |
+| OOM 保护 | ❌ 无 | ✅ pool 分配失败回退 | ✅ zmalloc_oom | ✅ uv__malloc_oom |
+
+**用户得到的输出**：Agent 标记 5 个潜在问题，每个附带工业级参考代码 + 来源标注 + 修复建议。
+
+---
+
+### 场景 3：设计字节码虚拟机（5 个运行时综合参考）
+
+**用户说**："设计一个 Scheme 字节码 VM"
+
+**AI Agent 执行**：
+```bash
+# 跨项目搜索字节码执行引擎
+cross-search "bytecode interpreter main loop"
+# → CPython:   _PyEval_EvalFrameDefault  [stack VM, 跳转表 dispatch]
+# → LuaJIT:    lj_vm_asm_interpret       [register VM + trace JIT]
+# → mruby:     mrb_vm_exec               [register VM, 直接线程化]
+# → PHP:       zend_vm_execute            [多级 dispatch: 标签指针/跳转表]  
+# → HotSpot:   TemplateInterpreter        [C++ 解释器 + C1/C2 JIT]
+
+# 深入分析关键函数
+context mrb_vm_exec --repo /code/mruby --depth 2
+context _PyEval_EvalFrameDefault --repo /code/cpython --depth 2
+
+# 搜索 GC 实现
+cross-search "garbage collection mark sweep"
+```
+
+**Agent 自动生成的架构对比表**：
+| 维度 | CPython | mruby | LuaJIT | HotSpot JVM | PHP |
+|------|---------|-------|--------|-------------|-----|
+| VM 类型 | Stack | Register | Register | Stack | Stack→Register |
+| Dispatch | 跳转表 goto | 直接线程化 | 手写 asm | 模板解释器 | 标签指针 |
+| 指令格式 | 变长(1-3B) | 定长(32位) | 定长(32位) | 变长 | 变长 |
+| 局部变量 | stack slot | register R(i) | IR 变量 | local var table | CV 变量表 |
+| GC | 引用计数+分代 | 标记-清除 | 增量 GC | G1/Parallel/ZGC | 引用计数 |
+| JIT | 无 | 无 | Trace JIT | C1/C2 编译器 | 无 |
+| 代码量 | ~500K 行 | ~20K 行 | ~70K 行 | ~2000K 行 | ~1000K 行 |
+
+**用户得到的输出**：架构设计文档 + C 骨架代码 + 每项设计决策参考来源（"dispatch 方式参考 CPython 的跳转表，GC 参考 mruby 的标记-清除做简化"）。
+
+---
+
+### 场景 4：理解函数的完整角色（上下文分析）
+
+**用户说**："我要改 ngx_event_accept，影响范围有多大？"
+
+**AI Agent 执行**：
+```bash
+symbol ngx_event_accept --repo /code/nginx --depth 3
+```
+
+**返回的结构化数据**：
+```
+Symbol: ngx_event_accept  File: src/event/ngx_event_accept.c:30
+  Kind: function  Signature: void ngx_event_accept(ngx_event_t *ev)
+
+Callers (3):
+  ngx_epoll_process_events → 从 epoll_wait 返回后调用
+  ngx_kqueue_process_events → 从 kevent 返回后调用
+  ngx_event_process_changes → 事件变化通知
+
+Callees (8):
+  ngx_get_connection → ngx_set_connection_log → ngx_ssl_create_connection
+  → ngx_add_conn_to_event → ngx_http_init_connection → ...
+
+Call Paths:
+  epoll_wait → ngx_epoll_process_events → ngx_event_accept
+    → ngx_get_connection → ngx_http_init_connection → HTTP 处理管线
+  kevent → ngx_kqueue_process_events → ngx_event_accept → ...
+
+Dataflow (变量: ls):
+  Definition: ngx_listening_t *ls = ev->data
+  Field usage: ls->addr_text, ls->handler, ls->fd, ls->pool
+```
+
+**Agent 的结论**：
+- 该函数是 TCP accept 的核心入口，被 epoll 和 kqueue 两种事件驱动共用
+- 修改它直接影响：所有新连接建立、SSL 握手、HTTP 初始化
+- 影响范围涉及 3 个模块、8 个子函数、最终到 HTTP 请求处理管线
+- 关键变量 `ls` 是全局监听套接字上下文，多 worker 间修改需互斥
+
+---
+
+### 场景 5：安全审计——追踪危险函数
+
+**用户说**："检查项目里 unsafe 函数的使用情况"
+
+**AI Agent 执行**：
+```bash
+cross-search "strcpy" --max-results 50 --kind function
+cross-search "sprintf" --max-results 50
+```
+
+**Agent 发现**：
+| 项目 | strcpy 用法 | 安全措施 | 推荐替代方案 |
+|------|------------|---------|------------|
+| Linux Kernel | ❌ 基本不用 | 用 `strscpy()` + GCC 沙箱检测 | `strscpy()` |
+| Redis | ✅ 少量(命令行工具) | 调用前检查长度 | `sds` 动态字符串 |
+| Nginx | ✅ 有使用 | 封装在 `ngx_sprintf` 内做长度控制 | `ngx_sprintf` |
+| PostgreSQL | ❌ 禁止 | 静态分析强制检查 | `pg_strcpy` 封装 |
+| SQLite | ❌ 几乎不用 | 使用 `sqlite3_snprintf` | `sqlite3_snprintf` |
+
+**用户得到的输出**：安全审计报告，每个危险函数精确位置 + 调用路径 + 建议替代方案。SQLite 被标注为"最佳安全实践参考项目"。
+
+---
+
+### 场景 6：为 mydb 设计 B-tree 索引（数据库综合参考）
+
+**用户说**："给我的 KV 存储加一个 B-tree 索引"
+
+**AI Agent 执行**：
+```bash
+cross-search "b-tree node split insert" --kind function
+context sqlite3BtreeInsert --repo /code/sqlite --depth 2
+context btree_insert --repo /code/postgresql --depth 2
+```
+
+**Agent 生成的参考矩阵**：
+| 特性 | SQLite | PostgreSQL | RocksDB |
+|------|--------|------------|---------|
+| B-tree 变体 | B+tree | B-tree | LSM-Tree |
+| 页面管理 | 固定 4KB | 固定 8KB | 可变 block |
+| 并发控制 | 单写者锁 | 行级锁+MVCC | 无锁 skip list |
+| 分裂策略 | 提前分裂 | 先满再分裂 | compaction 合并 |
+| 崩溃恢复 | journal/WAL | WAL | WAL |
+
+**用户得到的输出**："建议参考 SQLite 的 B+tree（代码最清晰）做基础结构 + RocksDB 的 LSM 思想做写入优化"，附带关键数据结构的 C 代码骨架。
+
+---
+
+### 场景 7：跨项目 API 用法挖掘（libuv 最佳实践）
+
+**用户说**："我想知道 libuv 在工业项目中怎么用的"
+
+**AI Agent 执行**：
+```bash
+# 1. 找出哪些项目用了 libuv（搜索 libuv API 函数）
+cross-search "uv_tcp_init uv_read_start uv_write uv_run"
+# → 从 libuv 自身以及使用 libuv 的项目中返回
+
+# 2. 统计 API 使用频率
+search "uv_tcp_bind uv_listen" --kind function
+```
+
+**Agent 输出的统计**：
+```
+libuv API 使用热度排行（跨项目统计）:
+1. uv_tcp_init        ―― 100% 项目使用 (必经初始化)
+2. uv_read_start      ―― 100% 项目使用
+3. uv_write           ―― 100% 项目使用
+4. uv_tcp_bind        ―― 85% 项目使用
+5. uv_close           ―― 100% 项目使用 (handle 生命周期管理)
+6. uv_loop_init       ―― 70% 项目使用 (自定义 loop)
+7. uv_timer_start     ―― 60% 项目使用 (超时管理)
+8. uv_signal_start    ―― 30% 项目使用 (信号处理)
+9. uv_getaddrinfo     ―― 20% 项目使用 (DNS 解析)
+10. uv_poll_init      ―― 15% 项目使用 (自定义 fd 监听)
+```
+
+**常见用法模式**（Agent 自动提取）：
+- Handle 生命周期：`uv_xxx_init → uv_xxx_start → ... → uv_close → free`（所有项目一致）
+- Buffer 管理：`uv_buf_init` 栈上分配 vs 池化分配（不同项目有不同策略）
+- 错误处理：所有项目都检查 `uv_*` 返回值，但详细程度不同
+
+---
+
+### 场景 8：实时 bug 模式挖掘——从已有项目中验证设计
+
+**用户说**："这段加锁代码会不会死锁？"
+
+**AI Agent 执行**：
+```bash
+# 在所有已索引项目中搜索嵌套锁的使用模式
+cross-search "mutex lock nested" --kind function
+cross-search "pthread_mutex_lock" --file ".c"
+```
+
+**Agent 分析**：对比用户代码与 Linux 内核、Nginx、PostgreSQL 中的锁使用模式，检查：
+- 加锁顺序是否一致（所有加锁点按相同顺序？）
+- 是否存在递归锁（`pthread_mutex_t` 默认不是递归的）
+- 是否在信号处理函数中加锁（可能导致死锁）
+
+**输出**：基于工业项目经验的死锁风险评估 + 具体使用建议。
+
+---
+
+### 场景 9：新项目架构风格匹配
+
+**用户说**："我写的项目跟哪个已索引项目架构最像？"
+
+**AI Agent 自动分析**新项目目录结构 + 命名风格 + 模块划分，与 16 个项目对比：
+
+```
+mydb 项目与各项目架构相似度:
+┌────────────┬──────────┬──────────────────────────┐
+│ 项目       │ 相似度   │ 原因                    │
+├────────────┼──────────┼──────────────────────────┤
+│ SQLite     │ 87%      │ 嵌入式、单进程、B-tree、C│
+│ Redis      │ 72%      │ KV 存储、事件驱动       │
+│ RocksDB    │ 68%      │ LSM-Tree、存储引擎      │
+│ PostgreSQL │ 45%      │ 全功能 RDBMS、多进程    │
+│ Nginx      │ 32%      │ 完全不同领域            │
+│ Linux      │ 25%      │ 系统级、非应用          │
+└────────────┴──────────┴──────────────────────────┘
+```
+
+**效果**：AI Agent 写代码时自动以 SQLite 为主要参考、Redis/RocksDB 为次要参考，不相关项目权重自动降低。
+
+---
+
+### 场景快查表
+
+| 你在做的事 | 首选查询 | 最有参考价值的项目 |
+|-----------|---------|------------------|
+| 写内存分配器 | `cross-search "memory pool"` | Nginx, Linux, CPython, mruby |
+| 设计事件循环 | `cross-search "event loop epoll"` | Nginx, Redis, libuv, HAProxy |
+| 实现 GC | `cross-search "gc mark sweep"` | mruby, CPython, LuaJIT, HotSpot |
+| 写 HTTP 解析器 | `search "parser state machine"` | Nginx, PHP |
+| 设计字节码 VM | `cross-search "interpreter main loop"` | CPython, mruby, LuaJIT, HotSpot, PHP |
+| 写 B-tree 索引 | `cross-search "btree insert"` | SQLite, PostgreSQL |
+| 设计线程池 | `cross-search "thread pool worker"` | Linux, Nginx, libuv |
+| 实现哈希表 | `cross-search "hash table"` | Redis(dict), CPython(PyDict), mruby(ht) |
+| 检查安全风险 | `cross-search "strcpy sprintf"` | 全部项目（对比安全做法） |
+| 理解一个函数 | `context <func> --depth 3` | 单个项目（调用链展开） |
+| 写配置文件解析 | `cross-search "config parser"` | Nginx, Redis, PHP |
+| 实现网络协议 | `cross-search "protocol parser"` | Nginx, Redis, HAProxy |
+| 设计日志系统 | `cross-search "log write"` | Nginx, PostgreSQL, Linux |
+| 实现模块系统 | `cross-search "module register"` | Nginx, HAProxy, LuaJIT |
+
+---
+
+> 提示：以上场景的丰富程度 = 已索引项目的数量。1 个项目只能单点搜索，16 个项目才能做交叉分析。
+> 推荐探索顺序：mruby → SQLite → libuv → Redis → Nginx → CPython → LuaJIT → 其余项目。
 
 ## 文件清单
 
@@ -849,13 +1212,14 @@ head -5 {cache_dir}/chunks_meta.jsonl
 | `tools/code_indexer` | C 多进程代码索引器 |
 | `tools/batch_embedder` | C 批量向量生成器 |
 | `tools/vector_search` | C 语义搜索引擎 |
+| `tools/cross_search.sh` | Shell 跨项目搜索聚合脚本（自动发现 + 并行搜索 + 去重排序） |
 | `tools/call_graph` | C 调用关系分析器 |
 | `tools/dataflow` | C 变量数据流追踪器 |
 | `tools/word_freq` | C 词频统计器 |
 | `tools/cache_import` | C KV Cache 导入工具 |
 | `tools/cache_query` | C KV Cache 查询工具 |
 | `/opt/models/jina-embeddings-v2-base-code/` | Jina v2 嵌入模型 |
-| `/opt/ai_code_memory/` | KV Cache 数据目录 |
+| `/memory/` | KV Cache 数据目录 |
 
 ---
 
@@ -874,5 +1238,5 @@ head -5 {cache_dir}/chunks_meta.jsonl
 
 ---
 
-*文档版本：2025-05-21*
+*文档版本：2026-06-09*
 *适用于：analyze_repo.sh + ai_code_search.sh + ai_code_search_large.sh 最新版本*

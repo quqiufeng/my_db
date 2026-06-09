@@ -129,7 +129,7 @@ const char* json = db_select_by_pk_json(users, id);
 
 ```bash
 # 导入电子书
-./tools/import_book /opt/ai_code_memory ~/book.epub /books/my_book
+./tools/import_book /memory ~/book.epub /books/my_book
 
 # 语义搜索
 ./explore_book.sh /books/my_book search "distributed consensus"
@@ -184,7 +184,7 @@ make
 
 ```bash
 # 导入
-./tools/import_book /opt/ai_code_memory ~/ddia.epub /books/ddia
+./tools/import_book /memory ~/ddia.epub /books/ddia
 
 # 搜索并阅读
 ./explore_book.sh /books/ddia search "consensus algorithm"

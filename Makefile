@@ -4,22 +4,23 @@ LDFLAGS = -shared
 
 
 # ONNX Runtime 路径检测（兼容本地和远程）
-# 头文件路径（优先标准安装路径）
-ONNX_BASE := $(wildcard /opt/onnxruntime-linux-x64-1.20.1)
-ifeq ($(ONNX_BASE),)
-    ONNX_BASE := $(wildcard /usr/local/onnxruntime)
-endif
+# 按优先级尝试多个可能的安装路径
+ONNX_CANDIDATES :=     /data/venv/onnxruntime-linux-x64-gpu-1.20.1     /opt/onnxruntime-linux-x64-1.20.1     /usr/local/onnxruntime     /opt/onnxruntime
+
+ONNX_BASE := $(firstword $(foreach dir,$(ONNX_CANDIDATES),$(wildcard $(dir))))
 ifneq ($(ONNX_BASE),)
+    $(info [ONNX] Found at: $(ONNX_BASE))
     ONNX_CFLAGS = -I$(ONNX_BASE)/include
     ONNX_LIB = $(ONNX_BASE)/lib
 else
+    $(warning [ONNX] No ONNX Runtime directory found, using default paths)
     ONNX_CFLAGS = -I./include
     ONNX_LIB = .
 endif
 
 # 库链接路径：优先项目目录（可能包含更新版本的GPU库），再搜索标准路径
 # RUNPATH 顺序：项目目录优先，避免加载系统旧版本 ONNX Runtime
-ONNX_LDFLAGS = -L. -L$(ONNX_LIB) -lonnxruntime_gpu -Wl,-rpath,'$$ORIGIN/..' -Wl,-rpath,'$$ORIGIN' -Wl,-rpath,$(ONNX_LIB)
+ONNX_LDFLAGS = -L. -L$(ONNX_LIB) -lonnxruntime -Wl,-rpath,'$$ORIGIN/..' -Wl,-rpath,'$$ORIGIN' -Wl,-rpath,$(ONNX_LIB)
 
 SRC_DIR = src
 OBJ_DIR = obj

@@ -36,8 +36,8 @@ static void print_usage(const char* prog) {
     printf("  --model <type>   Model type: mpnet (default) or jina\n");
     printf("  --help, -h      Show this help\n");
     printf("\nExamples:\n");
-    printf("  %s /opt/ai_code_memory\n", prog);
-    printf("  %s --model jina /opt/ai_code_memory /code/local/my-project\n", prog);
+    printf("  %s /memory\n", prog);
+    printf("  %s --model jina /memory /code/local/my-project\n", prog);
     printf("\nModels:\n");
     printf("  mpnet - all-mpnet-base-v2 (general text, fast C tokenizer)\n");
     printf("  jina  - jina-embeddings-v2-base-code (code retrieval, BPE tokenizer)\n");

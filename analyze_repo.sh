@@ -17,7 +17,7 @@
 #   - 编译好的 C 工具链：code_indexer、batch_embedder、cache_import
 #   - GPU 环境：TensorRT + cuDNN + CUDA（ONNX Runtime GPU 推理）
 #   - 系统命令：git、wc、nproc
-#   - KV Cache 目录：/opt/ai_code_memory/（自动创建）
+#   - KV Cache 目录：/memory/（自动创建）
 #
 # =============================================================================
 # 使用方法
@@ -38,7 +38,7 @@
 #   --skip-vectors        跳过向量生成（更快，但无语义搜索能力）
 #   --skip-callgraph      跳过调用图分析
 #   --skip-dataflow       跳过数据流分析
-#   --cache-dir <dir>     KV Cache 目录（默认: /opt/ai_code_memory）
+#   --cache-dir <dir>     KV Cache 目录（默认: /memory）
 #   --jobs <n>            并行工作进程数（默认: CPU 核心数）
 #   --name <name>         项目名（默认: 从命名空间提取）
 #
@@ -114,7 +114,7 @@
 #       ├── code_local_{project}.jina.idx       # 向量索引
 #       └── code_local_{project}.jina.bin.hnsw  # HNSW 近似索引
 #
-# KV Cache 目录: /opt/ai_code_memory/
+# KV Cache 目录: /memory/
 #   ├── cache.bin    # mmap 数据文件（零拷贝持久化）
 #   └── index.bin    # 索引文件（Hash + Skip List）
 #
@@ -203,7 +203,7 @@ NAMESPACE=""                        # 命名空间（可选，自动检测）
 SKIP_VECTORS=false                  # 是否跳过向量生成
 SKIP_CALLGRAPH=false                # 是否跳过调用图
 SKIP_DATAFLOW=false                 # 是否跳过数据流
-CACHE_DIR="/opt/ai_code_memory"        # KV Cache 目录
+CACHE_DIR="/memory"        # KV Cache 目录
 JOBS=""                             # 并行进程数（默认 auto）
 PROJECT_NAME=""                     # 项目名（用于目录命名）
 

@@ -12,9 +12,9 @@
 #   ./import_book.sh <cache_dir> <book_file> [namespace] [output_dir]
 #
 # 示例：
-#   ./import_book.sh /opt/ai_code_memory ~/book.epub
-#   ./import_book.sh /opt/ai_code_memory ~/book.epub /books/ddia
-#   ./import_book.sh /opt/ai_code_memory ~/book.epub /books/ddia /data/books
+#   ./import_book.sh /memory ~/book.epub
+#   ./import_book.sh /memory ~/book.epub /books/ddia
+#   ./import_book.sh /memory ~/book.epub /books/ddia /data/books
 #
 # =============================================================================
 
@@ -89,16 +89,16 @@ $(basename "$0") — 导入电子书到记忆系统
   $(basename "$0") <cache_dir> <book_file> [namespace] [output_dir]
 
 参数:
-  cache_dir    KV Cache 目录 (如 /opt/ai_code_memory)
+  cache_dir    KV Cache 目录 (如 /memory)
   book_file    电子书文件 (.epub, .mobi, .azw3, .pdf)
   namespace    命名空间 (可选，默认 /books/{book_name})
   output_dir   Markdown 输出目录 (可选，默认 /opt/books)
 
 示例:
   # 使用默认设置
-  $(basename "$0") /opt/ai_code_memory ~/book.epub
-  $(basename "$0") /opt/ai_code_memory ~/book.epub /books/ddia
-  $(basename "$0") /opt/ai_code_memory ~/book.epub /books/ddia /data/books
+  $(basename "$0") /memory ~/book.epub
+  $(basename "$0") /memory ~/book.epub /books/ddia
+  $(basename "$0") /memory ~/book.epub /books/ddia /data/books
 
 输出结构:
   {output_dir}/{book_name}/

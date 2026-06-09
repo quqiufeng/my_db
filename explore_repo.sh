@@ -31,7 +31,7 @@
 #   这是项目在 KV Cache 中的命名空间路径。导入时由 analyze_repo.sh 自动生成：
 #   - GitHub 项目：https://github.com/redis/redis → /code/redis/redis
 #   - 本地项目：/opt/redis → /code/local/redis
-#   - 查看当前有哪些项目：ls /opt/ai_code_memory/ 或直接查询 /code 前缀
+#   - 查看当前有哪些项目：ls /memory/ 或直接查询 /code 前缀
 #
 # =============================================================================
 # 命令详解
@@ -129,7 +129,7 @@
 #
 # 1. 命名空间获取：
 #    如果不确定 namespace，可以用以下命令查看已导入的项目：
-#    strings /opt/ai_code_memory/cache.bin | grep "^/code/" | sort -u | head -20
+#    strings /memory/cache.bin | grep "^/code/" | sort -u | head -20
 #
 # 2. 向量缓存：
 #    explore/search/compare 命令需要向量缓存（/opt/code_caches/{project}_cache/vectors/）
@@ -373,7 +373,7 @@ cmd_explore() {
         echo ""
         
         # Try to find symbols by searching the cache keys
-        strings /opt/ai_code_memory/cache.bin 2>/dev/null | \
+        strings /memory/cache.bin 2>/dev/null | \
             grep "^${NAMESPACE}/symbols/" | \
             sed "s|^${NAMESPACE}/symbols/||" | \
             grep -i "$(echo "$query" | tr ' ' '|')" | head -20 | \
@@ -567,7 +567,7 @@ cmd_top() {
     echo ""
     
     # 从 cache.bin 中提取 callers/callees 统计
-    strings /opt/ai_code_memory/cache.bin 2>/dev/null | \
+    strings /memory/cache.bin 2>/dev/null | \
         grep -E "^${NAMESPACE}/(callers|callees)/" | \
         sed "s|^${NAMESPACE}/callers/||; s|^${NAMESPACE}/callees/||" | \
         sort | uniq -c | sort -rn | head -n "$n" | \

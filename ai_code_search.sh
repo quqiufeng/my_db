@@ -168,6 +168,7 @@ VECTOR_SEARCH="${SCRIPT_DIR}/tools/vector_search"
 CALL_GRAPH="${SCRIPT_DIR}/tools/call_graph"
 WORD_FREQ="${SCRIPT_DIR}/tools/word_freq"
 DATAFLOW="${SCRIPT_DIR}/tools/dataflow"
+CROSS_SEARCH="${SCRIPT_DIR}/tools/cross_search.sh"
 
 # ============================================
 # 颜色输出
@@ -205,13 +206,13 @@ check_tools() {
 # ============================================
 cmd_index() {
     local repo_path="${1:-}"
-    local cache_dir="${2:-/opt/ai_code_memory}"
+    local cache_dir="${2:-/memory}"
     local workers="${3:-$(nproc)}"
 
     if [[ -z "$repo_path" ]]; then
         echo "用法: $0 index <repo_path> [cache_dir] [workers]"
         echo "  repo_path:  源码目录路径"
-        echo "  cache_dir:  输出缓存目录 (默认: /opt/ai_code_memory)"
+        echo "  cache_dir:  输出缓存目录 (默认: /memory)"
         echo "  workers:    并行工作进程数 (默认: CPU 核心数)"
         echo ""
         echo "示例: $0 index /opt/stable-diffusion.cpp /opt/code_caches/sd_cache 4"
@@ -387,12 +388,12 @@ cmd_snippet() {
 # ============================================
 cmd_analyze() {
     local repo_path="${1:-}"
-    local cache_dir="${2:-/opt/ai_code_memory}"
+    local cache_dir="${2:-/memory}"
 
     if [[ -z "$repo_path" ]]; then
         echo "用法: $0 analyze <repo_path> [cache_dir]"
         echo "  repo_path:  源码目录路径"
-        echo "  cache_dir:  缓存目录 (默认: /opt/ai_code_memory)"
+        echo "  cache_dir:  缓存目录 (默认: /memory)"
         echo ""
         echo "示例: $0 analyze /opt/stable-diffusion.cpp /opt/code_caches/sd_cache"
         exit 1
@@ -500,6 +501,32 @@ cmd_dataflow() {
 }
 
 # ============================================
+# ============================================
+# 子命令: cross-search - 跨项目搜索
+# ============================================
+cmd_cross_search() {
+    local query="${1:-}"
+    local max_results="${2:-15}"
+
+    if [[ -z "$query" ]]; then
+        echo "Usage: $0 cross-search <query> [max_results] [project1 project2 ...]"
+        echo ""
+        echo "如果没有指定项目，自动扫描所有已索引项目"
+        echo ""
+        echo "Examples:"
+        echo "  $0 cross-search \"memory pool\" 10"
+        echo "  $0 cross-search \"event loop\" 5 nginx redis libuv"
+        exit 1
+    fi
+
+    if [[ ! -x "$CROSS_SEARCH" ]]; then
+        error "cross_search.sh not found: $CROSS_SEARCH"
+        exit 1
+    fi
+
+    "$CROSS_SEARCH" "$query" "$max_results" "${@:3}"
+}
+
 # 主程序
 # ============================================
 main() {
@@ -521,6 +548,10 @@ main() {
         search|s)
             cmd_search "$@"
             ;;
+        cross-search|cross|xs)
+            cmd_cross_search "$@"
+            ;;
+
         snippet|snip)
             cmd_snippet "$@"
             ;;
@@ -543,6 +574,7 @@ main() {
             echo "  callgraph <cache>               - 构建调用关系图"
             echo "  search <cache> <query> [n]      - 语义搜索"
             echo "  snippet <cache> <file> [n]      - 代码片段搜索"
+            echo "  cross-search <query> [n] [proj...] - 跨项目搜索（所有已索引项目）"
             echo "  dataflow <cache> <var>          - 变量数据流追踪 (字段级+跨函数)"
             echo "  analyze <repo> [cache]          - 一键完整分析"
             echo "  demo [cache]                    - 演示系统能力"
