@@ -92,17 +92,25 @@ search_project() {
         --type search \
         --analysis-dir "$cache_dir" \
         --max-results "$max_per_project" \
-        --pretty 2>/dev/null) || true
+        2>/dev/null) || true
 
     if [[ -z "$output" ]]; then
         return 0
     fi
 
-    echo "$output" | python3 -c "
-import sys, json
-try:
-    data = json.load(sys.stdin)
-except:
+    # Filter out [CACHE] log lines from libmydb.so
+    echo "$output" | python3 -c "import sys, json
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    if line.startswith('{'):
+        try:
+            data = json.loads(line)
+            break
+        except:
+            continue
+else:
     sys.exit(0)
 results = data.get('results', [])
 project_name = '$project'
