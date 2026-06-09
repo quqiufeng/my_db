@@ -1400,28 +1400,44 @@ EOF
 
 ---
 
-### 10. cache_import 耗时过长 & `--only-dataflow` 增量导入
+### 10. cache_import 耗时过长 & 增量导入优化
 
-**现象**: PHP（61866 chunks, 24212 函数）的 `cache_import` 耗时 > 30 分钟。每次重新导入（如前一次未完成）需要全量重新处理 chunks + call graph + dataflow。
+**现象**: PHP（61866 chunks, 24212 函数）的 `cache_import` 耗时 > 30 分钟。每次重新导入需要全量重处理。
 
-**原因**: cache_import 是单线程串行处理，每 5000 个 key 执行一次 `cache_sync()`（全量序列化 hash 表到 `index.bin`）。随着 cache 增大，`cache_sync` 耗时从几毫秒增长到数秒。61866 个 chunk 中约 42251 个有意义（function/method/class 等），加上 26258 个符号索引 + 12000 调用关系 + 2000 dataflow = ~83000 个 key，每次 sync 处理 5000 keys 需约 16 次 sync。
+**原因分析**:
+1. **`SYNC_INTERVAL=5000` 过大**: 每 5000 个 key 执行一次 `cache_sync()`（全量序列化 hash 表到 `index.bin`）。随着 cache 增大（从 0 到 80000+ keys），每次 sync 耗时从几毫秒增长到数秒，共需 ~16 次 sync。
+2. **无阶段跳过**: 即使只更新了 dataflow，也必须重跑 chunks（27 分钟）和 callgraph（2 分钟）。
+3. **速度衰减**: `cache_set` 在大 cache 上插入速度下降 16 倍（0.4ms/key → 6.6ms/key）。
 
-**修复**: 为 `cache_import` 添加 `--only-dataflow` 参数，支持仅导入 dataflow.json（无需重跑全量）：
+**优化措施**:
+
+| 优化 | 之前 | 之后 | 效果 |
+|------|------|------|------|
+| SYNC_INTERVAL | 5000 | 25000 | sync 次数从 ~16 降为 ~3 |
+| `--skip-chunks` | ❌ 无 | ✅ 新增 | 跳过 27 分钟 chunks 阶段 |
+| `--skip-callgraph` | ❌ 无 | ✅ 新增 | 跳过 2 分钟 callgraph 阶段 |
+| `--skip-dataflow` | ❌ 无 | ✅ 新增 | 跳过 8 分钟 dataflow 阶段 |
+| `--only-dataflow` | 已有 | 增强 | 等价于 `--skip-chunks --skip-callgraph` |
+| 进度 ETA | ❌ 无 | ✅ 有 | 每阶段显示完成百分比 + 预估剩余时间 |
+| 同步耗时统计 | ❌ 无 | ✅ 有 | `Synced at N keys (elapsed Ts, N keys/s)` |
+
+**推荐策略**:
 ```bash
-# 首次全量导入需要等待（~10-30 分钟）
+# 场景 A: 首次全量导入
 export LD_LIBRARY_PATH="/opt/my_db:\${LD_LIBRARY_PATH}"
 stdbuf -oL ./tools/cache_import /opt/code_caches/php_cache /code/php --cache-dir /memory
 
-# 后续 dataflow 变更只需增量导入（~2 分钟）
+# 场景 B: dataflow 增量导入（分析完成后单独导入）
 stdbuf -oL ./tools/cache_import /opt/code_caches/php_cache /code/php --cache-dir /memory --only-dataflow
+
+# 场景 C: 仅注册/检查缓存（什么都不做，快速验证）
+stdbuf -oL ./tools/cache_import /opt/code_caches/php_cache /code/php --cache-dir /memory --skip-chunks --skip-callgraph --skip-dataflow
+
+# 场景 D: 只导入 callgraph + dataflow（跳过 chunks）
+stdbuf -oL ./tools/cache_import /opt/code_caches/php_cache /code/php --cache-dir /memory --skip-chunks
 ```
 
-**优化建议**: 如果全量导入仍超时，可以分批执行：
-1. 先运行 `cache_import`（带 chunks + callgraph，可接受较长等待）
-2. dataflow 分析完成后单独用 `--only-dataflow` 增量导入
-3. 之后如果更新了 chunks（重新索引），只需重复 step 1
-
-> 注意: 缓存文件 `/memory/cache.bin` 和 `/memory/index.bin` 不会因重复导入而损坏（`cache_set` 覆盖已有 key）。如要重置，需手动删除这两文件。
+> 注意: 缓存文件 `/memory/cache.bin` 和 `/memory/index.bin` 不会因重复导入而损坏（`cache_set` 覆盖已有 key）。如要重置，需手动删除这两文件。阶段跳过标志适合只更新了部分数据时的增量导入。
 
 ---
 

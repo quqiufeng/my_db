@@ -16,7 +16,7 @@
 #include <jansson.h>
 
 #define MAX_LINE (1024 * 1024)
-#define SYNC_INTERVAL 5000
+#define SYNC_INTERVAL 25000  /* 减少 sync 频率: 5000→25000，大缓存时每次 sync 成本高 */
 #define MAX_VALUE_LEN (1024 * 1024)
 
 // Cache API from libmydb.so
@@ -41,6 +41,22 @@ static void log_warn(const char* msg) {
     fprintf(stderr, "[WARN] %s\n", msg);
 }
 
+// Elapsed time since start (for progress estimates)
+static time_t g_start_time = 0;
+
+static void log_progress(const char* phase, int done, int total) {
+    if (total <= 0) return;
+    time_t now = time(NULL);
+    double elapsed = difftime(now, g_start_time);
+    int pct = done * 100 / total;
+    double rate = elapsed > 0 ? done / elapsed : 0;
+    double eta = rate > 0 ? (total - done) / rate : 0;
+    char msg[128];
+    snprintf(msg, sizeof(msg), "%s: %d/%d (%d%%) %.0f keys/s ETA %.0fs",
+             phase, done, total, pct, rate, eta);
+    log_info(msg);
+}
+
 // Safe cache set with size check and periodic sync
 static int safe_set_json(const char* key, const char* value) {
     size_t len = strlen(value);
@@ -53,8 +69,11 @@ static int safe_set_json(const char* key, const char* value) {
         g_total_keys++;
         if (g_total_keys % SYNC_INTERVAL == 0) {
             cache_sync(g_cache);
-            char msg[64];
-            snprintf(msg, sizeof(msg), "Synced at %d keys", g_total_keys);
+            char msg[128];
+            time_t now = time(NULL);
+            double elapsed = difftime(now, g_start_time);
+            snprintf(msg, sizeof(msg), "Synced at %d keys (elapsed %.0fs, %.0f keys/s)",
+                     g_total_keys, elapsed, elapsed > 0 ? g_total_keys / elapsed : 0);
             log_info(msg);
         }
     }
@@ -177,6 +196,9 @@ static void import_chunks(const char* analysis_dir, const char* namespace) {
     
     while (fgets(line, MAX_LINE, fp)) {
         line_count++;
+        if (line_count % 10000 == 0) {
+            log_progress("Phase 1: chunks", line_count, 100000);
+        }
         json_error_t error;
         json_t* chunk = json_loads(line, 0, &error);
         if (!chunk) continue;
@@ -255,7 +277,13 @@ static void import_callgraph(const char* analysis_dir, const char* namespace) {
     int stored_callers = 0;
     int stored_callees = 0;
     
+    int callgraph_total = json_object_size(root);
+    int callgraph_idx = 0;
     json_object_foreach(root, func_name, func_data) {
+        callgraph_idx++;
+        if (callgraph_idx % 1000 == 0) {
+            log_progress("Phase 2: call graph", callgraph_idx, callgraph_total);
+        }
         json_t* calls = json_object_get(func_data, "calls");
         if (!calls || !json_is_array(calls)) continue;
         
@@ -350,7 +378,13 @@ static void import_dataflow(const char* analysis_dir, const char* namespace) {
     json_t* var_data;
     int stored_vars = 0;
     
+    int dataflow_total = json_object_size(root);
+    int dataflow_idx = 0;
     json_object_foreach(root, var_name, var_data) {
+        dataflow_idx++;
+        if (dataflow_idx % 200 == 0) {
+            log_progress("Phase 3: dataflow", dataflow_idx, dataflow_total);
+        }
         json_t* occurrences = json_object_get(var_data, "occurrences");
         if (!occurrences || !json_is_array(occurrences)) continue;
         
@@ -480,32 +514,51 @@ static void store_metadata(const char* namespace, const char* source_dir) {
 
 int main(int argc, char** argv) {
     if (argc < 3) {
-        printf("Usage: %s <analysis_dir> <namespace> [--cache-dir <dir>]\n", argv[0]);
+        printf("Usage: %s <analysis_dir> <namespace> [options]\n", argv[0]);
+        printf("\nOptions:\n");
+        printf("  --cache-dir <dir>      KV Cache directory (default: /memory)\n");
+        printf("  --skip-chunks          Skip chunk/symbol import\n");
+        printf("  --skip-callgraph       Skip call graph import\n");
+        printf("  --skip-dataflow        Skip dataflow import\n");
+        printf("  --only-dataflow        Alias for --skip-chunks --skip-callgraph\n");
         printf("\nExamples:\n");
         printf("  %s /opt/code_caches/nginx_cache /code/nginx\n", argv[0]);
         printf("  %s ./linux_subsystems/mm_cache /code/linux/mm --cache-dir ./ai_memory\n", argv[0]);
+        printf("  %s /opt/code_caches/php_cache /code/php --only-dataflow\n", argv[0]);
+        printf("  %s /opt/code_caches/php_cache /code/php --skip-chunks --skip-callgraph\n", argv[0]);
         return 1;
     }
     
     const char* analysis_dir = argv[1];
     const char* namespace = argv[2];
     const char* cache_dir = "/memory";
-    int only_dataflow = 0;
+    int skip_chunks = 0, skip_callgraph = 0, skip_dataflow = 0;
     
     for (int i = 3; i < argc; i++) {
         if (strcmp(argv[i], "--cache-dir") == 0 && i + 1 < argc) {
             cache_dir = argv[i + 1];
             i++;
         } else if (strcmp(argv[i], "--only-dataflow") == 0) {
-            only_dataflow = 1;
+            skip_chunks = 1;
+            skip_callgraph = 1;
+        } else if (strcmp(argv[i], "--skip-chunks") == 0) {
+            skip_chunks = 1;
+        } else if (strcmp(argv[i], "--skip-callgraph") == 0) {
+            skip_callgraph = 1;
+        } else if (strcmp(argv[i], "--skip-dataflow") == 0) {
+            skip_dataflow = 1;
         }
     }
     
+    g_start_time = time(NULL);
     log_info("Importing analysis into KV Cache");
     printf("  Namespace: %s\n", namespace);
     printf("  Source: %s\n", analysis_dir);
     printf("  Cache: %s\n", cache_dir);
-    if (only_dataflow) printf("  Mode: dataflow only\n");
+    printf("  Mode: %s\n",
+           skip_chunks && skip_callgraph && !skip_dataflow ? "dataflow only" :
+           skip_chunks && skip_callgraph && skip_dataflow ? "register only" :
+           "full import");
     
     g_cache = cache_open(cache_dir, 2ULL * 1024 * 1024 * 1024);
     if (!g_cache) {
@@ -513,12 +566,16 @@ int main(int argc, char** argv) {
         return 1;
     }
     
-    if (!only_dataflow) {
+    if (!skip_chunks) {
         import_chunks(analysis_dir, namespace);
+    }
+    if (!skip_callgraph) {
         import_callgraph(analysis_dir, namespace);
     }
-    import_dataflow(analysis_dir, namespace);
-    if (!only_dataflow) {
+    if (!skip_dataflow) {
+        import_dataflow(analysis_dir, namespace);
+    }
+    if (!skip_chunks || !skip_callgraph) {
         register_vectors(analysis_dir, namespace);
         store_metadata(namespace, analysis_dir);
     }
