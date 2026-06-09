@@ -203,6 +203,10 @@ ONNX_EMBEDDER_LIB = libonnx_embedder.so
 $(CODE_INDEXER): $(TOOLS_DIR)/code_indexer.c
 	$(CC) $(CFLAGS) -o $@ $< -lm
 
+TOOLS_DATAFLOW = $(TOOLS_DIR)/dataflow
+$(TOOLS_DATAFLOW): $(TOOLS_DIR)/dataflow.c
+	$(CC) $(CFLAGS) -o $@ $< -lm -ljansson -L. -lmydb -Wl,-rpath,. -lpthread
+
 $(BATCH_EMBEDDER): $(TOOLS_DIR)/batch_embedder.c $(ONNX_EMBEDDER_LIB)
 	$(CC) $(CFLAGS) $(ONNX_CFLAGS) -o $@ $(TOOLS_DIR)/batch_embedder.c -L. -lonnx_embedder $(ONNX_LDFLAGS) -lm -ldl -Wl,-rpath,'$$ORIGIN/..'
 

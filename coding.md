@@ -1291,13 +1291,42 @@ export LD_LIBRARY_PATH="/opt/my_db:\${LD_LIBRARY_PATH}"
 
 ---
 
-### 5. dataflow 段错误
+### 5. dataflow 段错误（Makefile 全局 `-shared` 污染）
 
 **现象**: `./tools/dataflow analyze /opt/code_caches/php_cache` → `段错误（核心已转储）`
 
-**原因**: dataflow 工具在处理大批量函数体时存在内存越界 bug（PHP 有 24212 个函数）。
+**原因**: Makefile 第 3 行 `LDFLAGS = -shared` 是全局变量。`dataflow` 没有显式构建规则，GCC 隐式规则将 `$(LDFLAGS)` 传入链接步骤，误将 dataflow 编译为**共享库**（.so）而非可执行文件，导致运行时入口点初始化错误 → 段错误。
 
-**影响**: **可跳过**。dataflow 分析非核心步骤，缺少不影响符号查询和语义搜索。
+```makefile
+# Makefile L3 — 错误根源
+LDFLAGS = -shared    # ← 全局，用于 libmydb.so 是正确的，但污染了所有无规则的工具
+```
+
+**修复**: 在 Makefile 中为 dataflow 添加显式构建规则，避免使用全局 `LDFLAGS`：
+
+```makefile
+TOOLS_DATAFLOW = $(TOOLS_DIR)/dataflow
+$(TOOLS_DATAFLOW): $(TOOLS_DIR)/dataflow.c
+	$(CC) $(CFLAGS) -o $@ $< -lm -ljansson -L. -lmydb -Wl,-rpath,. -lpthread
+```
+
+然后重新编译 & 运行：
+```bash
+cd /opt/my_db && sudo make tools/dataflow
+
+export LD_LIBRARY_PATH="/opt/my_db:\${LD_LIBRARY_PATH}"
+./tools/dataflow analyze /opt/code_caches/php_cache
+```
+结果: 40127 个函数 → 2000 个唯一变量 → 14MB dataflow.json，无段错误。
+
+**验证**: 编译产物应为 PIE executable 而非 shared library：
+```bash
+file tools/dataflow
+# → ELF 64-bit LSB pie executable ... (正确)
+#   而非 ELF 64-bit LSB shared object ... (错误，会 segfault)
+```
+
+> **影响其他工具**: 检查了所有有显式规则的工具（code_indexer, cache_query, cache_import 等），它们都指定了 `$(CC) $(CFLAGS) -o $@ ...` 不使用 `$(LDFLAGS)`，因此不受影响。只有靠隐式规则fallthrough的工具会中招。
 
 ---
 
@@ -1371,6 +1400,32 @@ EOF
 
 ---
 
+### 10. cache_import 耗时过长 & `--only-dataflow` 增量导入
+
+**现象**: PHP（61866 chunks, 24212 函数）的 `cache_import` 耗时 > 30 分钟。每次重新导入（如前一次未完成）需要全量重新处理 chunks + call graph + dataflow。
+
+**原因**: cache_import 是单线程串行处理，每 5000 个 key 执行一次 `cache_sync()`（全量序列化 hash 表到 `index.bin`）。随着 cache 增大，`cache_sync` 耗时从几毫秒增长到数秒。61866 个 chunk 中约 42251 个有意义（function/method/class 等），加上 26258 个符号索引 + 12000 调用关系 + 2000 dataflow = ~83000 个 key，每次 sync 处理 5000 keys 需约 16 次 sync。
+
+**修复**: 为 `cache_import` 添加 `--only-dataflow` 参数，支持仅导入 dataflow.json（无需重跑全量）：
+```bash
+# 首次全量导入需要等待（~10-30 分钟）
+export LD_LIBRARY_PATH="/opt/my_db:\${LD_LIBRARY_PATH}"
+stdbuf -oL ./tools/cache_import /opt/code_caches/php_cache /code/php --cache-dir /memory
+
+# 后续 dataflow 变更只需增量导入（~2 分钟）
+stdbuf -oL ./tools/cache_import /opt/code_caches/php_cache /code/php --cache-dir /memory --only-dataflow
+```
+
+**优化建议**: 如果全量导入仍超时，可以分批执行：
+1. 先运行 `cache_import`（带 chunks + callgraph，可接受较长等待）
+2. dataflow 分析完成后单独用 `--only-dataflow` 增量导入
+3. 之后如果更新了 chunks（重新索引），只需重复 step 1
+
+> 注意: 缓存文件 `/memory/cache.bin` 和 `/memory/index.bin` 不会因重复导入而损坏（`cache_set` 覆盖已有 key）。如要重置，需手动删除这两文件。
+
+---
+
+
 ## 文件清单
 
 | 文件 | 说明 |
@@ -1407,5 +1462,5 @@ EOF
 
 ---
 
-*文档版本：2026-06-09*（PHP 源码探索完成，新增踩坑记录 §9 项）
+*文档版本：2026-06-09*（PHP 源码探索完成，新增踩坑记录 10 项（含 dataflow 修复 + 增量导入））
 *适用于：analyze_repo.sh + ai_code_search.sh + ai_code_search_large.sh 最新版本*

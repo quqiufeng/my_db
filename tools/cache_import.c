@@ -490,11 +490,14 @@ int main(int argc, char** argv) {
     const char* analysis_dir = argv[1];
     const char* namespace = argv[2];
     const char* cache_dir = "/memory";
+    int only_dataflow = 0;
     
     for (int i = 3; i < argc; i++) {
         if (strcmp(argv[i], "--cache-dir") == 0 && i + 1 < argc) {
             cache_dir = argv[i + 1];
             i++;
+        } else if (strcmp(argv[i], "--only-dataflow") == 0) {
+            only_dataflow = 1;
         }
     }
     
@@ -502,6 +505,7 @@ int main(int argc, char** argv) {
     printf("  Namespace: %s\n", namespace);
     printf("  Source: %s\n", analysis_dir);
     printf("  Cache: %s\n", cache_dir);
+    if (only_dataflow) printf("  Mode: dataflow only\n");
     
     g_cache = cache_open(cache_dir, 2ULL * 1024 * 1024 * 1024);
     if (!g_cache) {
@@ -509,11 +513,15 @@ int main(int argc, char** argv) {
         return 1;
     }
     
-    import_chunks(analysis_dir, namespace);
-    import_callgraph(analysis_dir, namespace);
+    if (!only_dataflow) {
+        import_chunks(analysis_dir, namespace);
+        import_callgraph(analysis_dir, namespace);
+    }
     import_dataflow(analysis_dir, namespace);
-    register_vectors(analysis_dir, namespace);
-    store_metadata(namespace, analysis_dir);
+    if (!only_dataflow) {
+        register_vectors(analysis_dir, namespace);
+        store_metadata(namespace, analysis_dir);
+    }
     
     cache_sync(g_cache);
     
