@@ -93,6 +93,9 @@ static json_t* do_symbol(const char* name, const char* repo) {
         const char* file = json_string_value(json_object_get(sym, "file"));
         if (!file) continue;
         
+        // Skip leading '/' to match trim_slash() in cache_import.c
+        while (*file == '/') file++;
+        
         char ckey[1024];
         snprintf(ckey, sizeof(ckey), "%s/chunks/%s/%s", repo, file, name);
         const char* cvalue = cache_get(g_cache, ckey);
