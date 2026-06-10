@@ -308,11 +308,69 @@ sortData (app.js:42)    sortData (app.js:42)    sortData (app.js:42)
 
 **核心结论**：容器和虚拟化不改变运行时感知的本质——映射表一直在进程的堆内存里，结构体布局不因容器而改变。需要解决的是从宿主机访问目标进程内存的权限问题。
 
+### 5.6 tracec extract — 运行时映射表提取器
+
+`tracec extract` 实现了运行时感知的核心：从目标进程堆内存中读取运行时内部结构体，提取 **"机器码地址 → 源码位置"** 的映射表。
+
+```
+tracec extract luajit <pid>
+    ↓ 生成 GDB Python 脚本
+    ↓ GDB 附加到目标进程（只读，不修改）
+    ↓ 遍历运行时内部结构体（如 LuaJIT 的 jit_State->trace[]）
+    ↓ 提取每个已编译 trace 的 mcode 地址范围
+    ↓ 安全分离（整个过程不修改目标进程）
+    ↓ 输出 JSON 映射表
+```
+
+LuaJIT 的映射表提取路径：
+
+```
+jit_State (lj_jit.h)
+    ↓ trace[] 数组，最大 10000 条
+GCtrace (lj_jit.h)
+    ├── mcode       → 机器码起始地址
+    ├── szmcode     → 机器码大小
+    ├── traceno     → 追踪编号
+    └── startpc     → 字节码 PC → lj_debug_line() → 行号
+```
+
+输出 JSON 格式：
+
+```json
+{
+  "runtime": "luajit",
+  "pid": 12345,
+  "trace_count": 427,
+  "mappings": [
+    {"start": 0x7f3a8c1b2000, "end": 0x7f3a8c1b4000, "traceno": 5, "source": "luajit_jit"},
+    {"start": 0x7f3a8c1b4000, "end": 0x7f3a8c1b8000, "traceno": 12, "source": "luajit_jit"}
+  ]
+}
+```
+
+与 code_search 打通后，perf 采到的地址可以精确映射到源码：
+
+```
+perf 采到 0x7f3a8c1b2408
+    ↓ 查 extract 输出的映射表
+traceno: 5, 属于 lj_trace.c 的 trace_stop
+    ↓ cache_query "trace_stop" --repo /code/LuaJIT/LuaJIT --type context
+lj_trace.c:499, 调用者: ..., 被调用者: ...
+```
+
+每个运行时需要独立实现提取器：
+
+| 运行时 | 命令 | 映射表位置 | 状态 |
+|--------|------|-----------|------|
+| LuaJIT | `tracec extract luajit <pid>` | `jit_State->trace[].mcode` | ✅ 已实现 |
+| V8/Node.js | `tracec extract v8 <pid>` | `Isolate->code_cache` | ⬜ 待实现 |
+| CPython | `tracec extract cpython <pid>` | `PyThreadState->frame->f_code` | ⬜ 待实现 |
+| PHP | `tracec extract php <pid>` | `zend_executor_globals->opline` | ⬜ 待实现 |
+| JVM | `tracec extract jvm <pid>` | `Klass->vtable` | ⬜ 待实现 |
+
 ---
 
 ## 六、火焰图
-cache_query "lj_gc_step" --repo /code/LuaJIT/LuaJIT --type context
-```
 
 由 Brendan Gregg 发明，是给软件系统拍的 X 光照片。它将时间和空间两个维度的信息融合在一张图上，直观反映性能方面的定量统计规律。
 
