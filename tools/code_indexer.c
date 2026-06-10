@@ -47,6 +47,9 @@ static int is_source_file(const char* filename) {
 }
 
 // Noise 目录
+static const char** g_exclude_dirs = NULL;
+static int g_exclude_count = 0;
+
 static int is_noise_dir(const char* name) {
     static const char* noise[] = {
         "thirdparty", "3rdparty", "third_party", "third-party",
@@ -77,6 +80,18 @@ static void scan_directory(const char* base_path, const char* current_path,
             continue;
         
         if (is_noise_dir(entry->d_name)) continue;
+        
+        // Also check runtime exclude list
+        int excluded = 0;
+        if (g_exclude_dirs) {
+            for (int e = 0; e < g_exclude_count; e++) {
+                if (strcmp(entry->d_name, g_exclude_dirs[e]) == 0) {
+                    excluded = 1;
+                    break;
+                }
+            }
+        }
+        if (excluded) continue;
         
         char fullpath[MAX_PATH_LEN];
         snprintf(fullpath, sizeof(fullpath), "%s/%s", current_path, entry->d_name);
@@ -634,16 +649,47 @@ static int worker_process(worker_t* worker, int worker_id) {
 int main(int argc, char** argv) {
     if (argc < 2) {
         printf("High-performance code indexer (C + multiprocess)\n");
-        printf("Usage: %s <repo_path> [cache_dir] [num_workers]\n", argv[0]);
-        printf("\nExample:\n");
+        printf("Usage: %s <repo_path> [cache_dir] [num_workers] [--exclude-dir dir1,dir2,...]\n", argv[0]);
+        printf("\n--exclude-dir  Comma-separated list of directories to skip (e.g. drivers,Documentation)\n  Example:\n");
         printf("  %s /opt/linux /memory 8\n", argv[0]);
         return 1;
     }
     
     const char* repo_path = argv[1];
-    const char* cache_dir = (argc > 2) ? argv[2] : "/memory";
-    int num_workers = (argc > 3) ? atoi(argv[3]) : sysconf(_SC_NPROCESSORS_ONLN);
+    const char* cache_dir = "/memory";
+    int num_workers = sysconf(_SC_NPROCESSORS_ONLN);
+    
+    // Parse optional args
+    for (int i = 2; i < argc; i++) {
+        if (strcmp(argv[i], "--exclude-dir") == 0 && i + 1 < argc) {
+            // Allocate and store excluded dirs
+            static const char* exclude_list[64];
+            int count = 0;
+            i++;
+            char* token = strtok(argv[i], ",");
+            while (token && count < 64) {
+                exclude_list[count++] = token;
+                token = strtok(NULL, ",");
+            }
+            g_exclude_dirs = exclude_list;
+            g_exclude_count = count;
+        } else if (i + 1 < argc && argv[i+1][0] != '-') {
+            cache_dir = argv[i];
+            num_workers = atoi(argv[++i]);
+        } else {
+            cache_dir = argv[i];
+        }
+    }
     if (num_workers <= 0) num_workers = 4;
+    
+    // Add excluded dirs to noise list
+    if (g_exclude_count > 0) {
+        printf("  Excluding dirs: ");
+        for (int i = 0; i < g_exclude_count; i++) {
+            printf("%s ", g_exclude_dirs[i]);
+        }
+        printf("\n");
+    }
     
     printf("Code Indexer v1.0\n");
     printf("==================\n");

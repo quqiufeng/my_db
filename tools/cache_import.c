@@ -80,98 +80,35 @@ static int safe_set_json(const char* key, const char* value) {
     return ret == 0;
 }
 
-// Trim leading '/' from filepath
-static void trim_slash(char* s) {
-    if (s && s[0] == '/') {
-        memmove(s, s + 1, strlen(s));
-    }
-}
+// Import a single chunk into KV Cache (raw JSON, no re-parse)
+static int import_chunk_raw(const char* namespace, const char* line) {
+    // Extract "name" from raw JSON
+    const char* name_p = strstr(line, "\"name\":\"");
+    if (!name_p) return 0;
+    name_p += 8;
+    const char* name_end = strchr(name_p, '"');
+    if (!name_end || name_end - name_p > 255) return 0;
 
-// Build chunk JSON value from jansson object
-static int import_chunk(const char* namespace, json_t* chunk) {
-    const char* name = json_string_value(json_object_get(chunk, "name"));
-    const char* file = json_string_value(json_object_get(chunk, "file"));
-    const char* kind = json_string_value(json_object_get(chunk, "kind"));
-    
-    if (!name || !file) return 0;
-    if (kind && (strcmp(kind, "header") == 0 || strcmp(kind, "file") == 0)) return 0;
-    
-    // Skip non-meaningful kinds
-    const char* meaningful[] = {"function", "method", "class", "struct", 
-        "namespace", "macro", "typedef", "enum", "interface", "prototype"};
-    int is_meaningful = 0;
-    if (kind) {
-        for (size_t i = 0; i < sizeof(meaningful)/sizeof(meaningful[0]); i++) {
-            if (strcmp(kind, meaningful[i]) == 0) { is_meaningful = 1; break; }
-        }
-    }
-    if (!is_meaningful) return 0;
-    
-    char filepath[512];
-    strncpy(filepath, file, sizeof(filepath) - 1);
-    filepath[sizeof(filepath) - 1] = '\0';
-    trim_slash(filepath);
-    
-    json_int_t line_start = json_integer_value(json_object_get(chunk, "line_start"));
-    json_int_t line_end = json_integer_value(json_object_get(chunk, "line_end"));
-    const char* language = json_string_value(json_object_get(chunk, "language"));
-    const char* signature = json_string_value(json_object_get(chunk, "signature"));
-    const char* docstring = json_string_value(json_object_get(chunk, "docstring"));
-    const char* content = json_string_value(json_object_get(chunk, "content"));
-    
-    if (content && strlen(content) == 0) return 0;  // Skip empty content
-    
-    // Truncate content to first 50 lines / 16KB
-    char content_trunc[16384] = {0};
-    if (content) {
-        int line_count = 0;
-        size_t j = 0;
-        for (size_t i = 0; content[i] && j < sizeof(content_trunc) - 1; i++) {
-            if (content[i] == '\n') line_count++;
-            if (line_count >= 50) break;
-            content_trunc[j++] = content[i];
-        }
-        content_trunc[j] = '\0';
-    }
-    
-    // Build key
-    char key[1024];
+    // Extract "file" from raw JSON
+    const char* file_p = strstr(line, "\"file\":\"");
+    if (!file_p) return 0;
+    file_p += 7;
+    const char* file_end = strchr(file_p, '"');
+    if (!file_end) return 0;
+
+    int name_len = name_end - name_p;
+    int file_len = file_end - file_p;
+
+    char name[256], filepath[1024];
+    memcpy(name, name_p, name_len); name[name_len] = '\0';
+    memcpy(filepath, file_p, file_len); filepath[file_len] = '\0';
+
+    if (!name[0] || !filepath[0]) return 0;
+
+    char key[2048];
     snprintf(key, sizeof(key), "%s/chunks/%s/%s", namespace, filepath, name);
-    
-    // Build JSON value using jansson
-    char id_buf[1024];
-    snprintf(id_buf, sizeof(id_buf), "%s:%s:%s", namespace, filepath, name);
-    
-    json_t* value = json_object();
-    json_object_set_new(value, "id", json_string(id_buf));
-    json_object_set_new(value, "name", json_string(name));
-    json_object_set_new(value, "file", json_string(filepath));
-    json_object_set_new(value, "kind", json_string(kind ? kind : ""));
-    json_object_set_new(value, "line_start", json_integer(line_start));
-    json_object_set_new(value, "line_end", json_integer(line_end));
-    json_object_set_new(value, "language", json_string(language ? language : ""));
-    json_object_set_new(value, "signature", json_string(signature ? signature : ""));
-    json_object_set_new(value, "docstring", json_string(docstring ? docstring : ""));
-    json_object_set_new(value, "content", json_string(content_trunc));
-    
-    // Tags array
-    json_t* tags = json_array();
-    if (signature) json_array_append_new(tags, json_string(signature));
-    if (language) json_array_append_new(tags, json_string(language));
-    if (kind) json_array_append_new(tags, json_string(kind));
-    json_object_set_new(value, "tags", tags);
-    
-    char* json_str = json_dumps(value, JSON_COMPACT);
-    json_decref(value);
-    
-    if (!json_str) {
-        fprintf(stderr, "DEBUG: json_dumps failed for %s\n", name);
-        return 0;
-    }
-    
-    int ret = safe_set_json(key, json_str);
-    free(json_str);
-    return ret;
+
+    return safe_set_json(key, line);
 }
 
 // Import chunks_meta.jsonl
@@ -192,70 +129,29 @@ static void import_chunks(const char* analysis_dir, const char* namespace) {
     int stored = 0;
     
     // Build symbol index while importing chunks
-    json_t* symbol_map = json_object();  // name -> array of symbol info
-    
     while (fgets(line, MAX_LINE, fp)) {
         line_count++;
         if (line_count % 10000 == 0) {
             log_progress("Phase 1: chunks", line_count, 100000);
         }
-        json_error_t error;
-        json_t* chunk = json_loads(line, 0, &error);
-        if (!chunk) continue;
-        
+
+        // Strip trailing newline
+        size_t llen = strlen(line);
+        if (llen > 0 && line[llen-1] == '\n') line[--llen] = '\0';
+        if (llen > 0 && line[llen-1] == '\r') line[--llen] = '\0';
+
         valid++;
-        if (import_chunk(namespace, chunk)) {
+        if (import_chunk_raw(namespace, line)) {
             stored++;
-            
-            // Build symbol index
-            const char* name = json_string_value(json_object_get(chunk, "name"));
-            const char* file = json_string_value(json_object_get(chunk, "file"));
-            const char* kind = json_string_value(json_object_get(chunk, "kind"));
-            json_int_t line_start = json_integer_value(json_object_get(chunk, "line_start"));
-            const char* signature = json_string_value(json_object_get(chunk, "signature"));
-            const char* language = json_string_value(json_object_get(chunk, "language"));
-            
-            if (name && file) {
-                json_t* sym_arr = json_object_get(symbol_map, name);
-                if (!sym_arr) {
-                    sym_arr = json_array();
-                    json_object_set_new(symbol_map, name, sym_arr);
-                }
-                json_t* sym = json_object();
-                json_object_set_new(sym, "name", json_string(name));
-                json_object_set_new(sym, "kind", json_string(kind ? kind : ""));
-                json_object_set_new(sym, "file", json_string(file));
-                json_object_set_new(sym, "line", json_integer(line_start));
-                json_object_set_new(sym, "signature", json_string(signature ? signature : ""));
-                json_object_set_new(sym, "language", json_string(language ? language : ""));
-                json_array_append_new(sym_arr, sym);
-            }
         }
-        json_decref(chunk);
     }
-    
+
     free(line);
     fclose(fp);
-    
-    // Store symbol index
-    const char* sym_name;
-    json_t* sym_arr;
-    int symbols_stored = 0;
-    json_object_foreach(symbol_map, sym_name, sym_arr) {
-        char key[1024];
-        snprintf(key, sizeof(key), "%s/symbols/%s", namespace, sym_name);
-        char* str = json_dumps(sym_arr, JSON_COMPACT);
-        if (str) {
-            safe_set_json(key, str);
-            free(str);
-            symbols_stored++;
-        }
-    }
-    json_decref(symbol_map);
-    
+
+    // Symbol index: built on-demand during queries (skip bulk import for speed)
     char msg[256];
-    snprintf(msg, sizeof(msg), "Stored %d chunks, %d symbols out of %d valid", stored, symbols_stored, valid);
-    log_info(msg);
+    snprintf(msg, sizeof(msg), "Stored %d chunks out of %d", stored, valid);
 }
 
 // Import call_graph.json
