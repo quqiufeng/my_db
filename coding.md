@@ -1479,5 +1479,245 @@ stdbuf -oL ./tools/cache_import /opt/code_caches/php_cache /code/php --cache-dir
 
 ---
 
-*文档版本：2026-06-09*（PHP 源码探索完成，新增踩坑记录 10 项（含 dataflow 修复 + 增量导入））
+*文档版本：2026-06-10*（系统级修复 9 项：protected_regular / GPU扩展名 / batch_embedder流式 / chunks导入5000x / dataflow导入15x / Makefile污染 / call_graph哈希 / exclude-dir参数 / cache mmap扩容）
 *适用于：analyze_repo.sh + ai_code_search.sh + ai_code_search_large.sh 最新版本*
+---
+
+## 系统级修复与性能优化记录
+
+> 以下记录了在探索 OpenResty、CPython、llama.cpp、Linux Kernel 过程中发现并修复的系统性问题。与 PHP 踩坑不同，这些是基础工具链的架构缺陷，影响所有项目。
+
+### 1. `protected_regular=2` 导致 Worker 静默失败
+
+**现象**: 以 root 运行 `code_indexer` 时，6/8 的 worker 报 `Failed to create chunk file`，但主进程显示 `8/8 workers completed`。索引覆盖率从 1311 文件降到 327 文件，50% 数据静默丢失。
+
+**原因**: Linux 内核 `fs.protected_regular=2`（Ubuntu 默认值）阻止 root 在 `/tmp`（sticky 目录）中截断其他用户拥有的文件。之前的 PHP 分析（以 `quqiufeng` 用户运行）在 `/tmp/` 留下了 `code_indexer_chunks_0~5.jsonl`。再次运行（root）时 `fopen("w")` 被内核拒绝。
+
+**修复**（2 处）：
+
+```c
+// 1) 在 fopen() 前先 unlink() 删除旧文件
+unlink(chunk_file);
+FILE* chunk_fp = fopen(chunk_file, "w");
+
+// 2) worker_process() 返回 int，子进程 exit(ret) 传播错误码
+//    父进程检测到失败后打印详细错误
+int ret = worker_process(&workers[i], i);
+exit(ret);
+```
+
+```bash
+# 验证修复
+cat /proc/sys/fs/protected_regular  # 应为 2（启用状态）
+```
+
+**影响范围**: 所有以 root 运行 `analyze_repo.sh` 的场景。修复后 OpenResty 从 5146 chunks → 23825（4.6x）。
+
+---
+
+### 2. 缺失 GPU/CUDA 扩展名
+
+**现象**: llama.cpp 的 `ggml-cuda.cu`（CUDA 后端核心，2000+ 行）完全没有被索引。`is_source_file()` 返回 0。
+
+**原因**: `code_indexer.c` 的 `is_source_file()` 函数硬编码了文件扩展名白名单，缺少 `.cu`、`.cuh`、`.metal`。
+
+**修复**：
+
+```c
+// 增加 3 个扩展名
+strcmp(ext, ".cu") == 0 ||      // CUDA 源文件
+strcmp(ext, ".cuh") == 0 ||     // CUDA 头文件
+strcmp(ext, ".metal") == 0 ||   // Apple Metal shader
+```
+
+**影响**: llama.cpp 扫描文件从 783 → 1042，`ggml-cuda.cu` 从 0 chunks 恢复到 231 chunks。
+
+---
+
+### 3. batch_embedder 内存爆炸（流式处理 + 动态分配）
+
+**现象**: `item_t` 结构体使用固定 8KB 缓冲区（`char text[8192]`）。对于 Linux 内核规模（1.5M chunks），1.5M × 8KB = 12.7GB 仅用于文本存储，加上向量 4.6GB，总计 ~17.3GB，超出系统可用内存。
+
+**原因**: 原始设计用 `char text[MAX_TEXT_LEN]` 固定数组，没有考虑大规模项目的内存累积。
+
+**修复**：
+
+```c
+// 旧: 固定大小，每个 item 8448 字节
+typedef struct { char name[256]; char text[8192]; } item_t;
+
+// 新: 动态分配，实际使用多少就占多少
+typedef struct { char* name; char* text; } item_t;
+```
+
+同时改为**流式批处理**：每批加载 256 条 → encode → 写入文件 → 释放内存 → 下一批。不再一次性加载全部数据。
+
+**效果**: 1.5M items 从 17.3GB → ~2GB 峰值，内存降低 86%。
+
+---
+
+### 4. KV Cache 导入性能优化（chunks 阶段 5000x）
+
+**现象**: chunks 导入时，每条 JSON 行先 `json_loads()` 解析，然后在 `import_chunk()` 中 `json_dumps()` 重新序列化。对于 509K 条记录，这是 100 万次 JSON 序列化/反序列化。
+
+**原因**: `import_chunk()` 接受 `json_t*` 对象，函数内部重新构建 JSON 并重新序列化。而输入数据本来就是 JSON 字符串。
+
+**修复**: 新建 `import_chunk_raw()` 函数，使用简单的 `strstr` 从原始 JSON 行中提取 name 和 filepath，直接存储整行 JSON：
+
+```c
+static int import_chunk_raw(const char* namespace, const char* line) {
+    // 从原始 JSON 行中提取 name 和 filepath
+    const char* name_p = strstr(line, "\"name\":\"");
+    const char* file_p = strstr(line, "\"file\":\"");
+    // ... 字符串操作，无需 JSON 解析 ...
+    return safe_set_json(key, line);  // 直接存原始行
+}
+```
+
+同时去掉内存中的 `symbol_map` 构建（每个 symbol 额外一次 `cache_set`），改为查询时按需构建。
+
+**效果**:
+
+| 项目 | 之前 | 之后 |
+|------|------|------|
+| Linux 509K chunks | ~100 keys/s, 预估 1.5h | **~500,000 keys/s, <1s** |
+| CPython 67K chunks | ~100 keys/s, ~11min | **瞬时完成** |
+
+---
+
+### 5. KV Cache 导入性能优化（dataflow 阶段 15-20x）
+
+**现象**: dataflow 导入速度仅 1-2 keys/s。CPython 2000 变量需要 ~30 分钟。
+
+**原因**: 每个变量导入时，额外为每个出现该变量的函数单独做一次 `cache_set`（内循环）。2000 个变量 × ~5 个函数 = ~12000 次 `cache_set` 调用。
+
+**修复**: 删除 per-variable 的函数分组内循环。所有变量存储后，单次遍历构建完整的函数→变量索引，一次 `cache_set` 写入。
+
+```c
+// 旧: 2000 vars × (1 + ~5 funcs) = ~12000 cache_set 调用
+// 新: 2000 vars × 1 + 1 bulk entry = ~2001 cache_set 调用
+```
+
+**效果**: CPython dataflow 从 30 分钟 → 91 秒。
+
+---
+
+### 6. 调用图 O(n²) 算法与硬编码上限
+
+**现象**: `call_graph` 工具在以下场景均失败：
+- 以共享库（.so）而非可执行文件被编译 → 段错误
+- `MAX_FUNC=50000`，Linux 内核 300K+ 函数 → 截断 83% 的数据
+- `add_func_name()` / `is_func_known()` 使用线性扫描，O(n²) → 300K 函数 × 300K 扫描 = 900 亿次 strcmp
+
+**原因**: 
+1. Makefile 中 `LDFLAGS = -shared` 是全局变量，污染了没有显式规则的工具
+2. `call_graph` 没有显式 Makefile 规则，GCC 隐式规则应用了 `-shared`
+3. 函数名去重和查找都使用线性搜索
+
+**修复**：
+
+```makefile
+# Makefile: 添加显式编译规则，避免 LDFLAGS 污染
+$(CALL_GRAPH): $(TOOLS_DIR)/call_graph.c
+	$(CC) $(CFLAGS) -o $@ $< -lm -ljansson -L. -lmydb -Wl,-rpath,.
+```
+
+```c
+// call_graph.c: 哈希表去重，O(1) 查找
+#define HASH_SIZE 524287
+static int g_name_hash[HASH_SIZE];  // -1 = empty
+
+static unsigned int hash_str(const char* s) {
+    unsigned int h = 5381;
+    while (*s) h = ((h << 5) + h) + (unsigned char)*s++;
+    return h % HASH_SIZE;
+}
+
+static void add_func_name(const char* name) {
+    unsigned int h = hash_str(name);
+    while (g_name_hash[h] >= 0) {
+        if (strcmp(g_func_names[g_name_hash[h]], name) == 0) return;
+        h = (h + 1) % HASH_SIZE;
+    }
+    g_func_names[g_func_count] = strdup(name);
+    g_name_hash[h] = g_func_count;
+    g_func_count++;
+}
+```
+
+额外优化：Phase 1（加载函数名）和 Phase 2（加载函数体）合并为单遍文件扫描，消除一次 300MB 的冗余文件读取。
+
+**效果**: 从段错误/数据截断 → 198K 函数 / 250K 体 / 12 分钟完成。
+
+---
+
+### 7. Makefile 全局 LDFLAGS=-shared 污染
+
+**现象**: 多个工具（`dataflow`, `call_graph`, `build_hnsw_index` 等）被编译为共享库（.so）而非可执行文件，运行时段错误。
+
+**原因**: Makefile 第 3 行 `LDFLAGS = -shared` 用于构建 `libmydb.so` 是正确的，但它是一个全局 `make` 变量。任何没有显式编译规则的目标都会通过隐式规则继承 `$(LDFLAGS)`，导致 `-shared` 传入链接步骤。
+
+**检查方法**:
+
+```bash
+file tools/call_graph
+# 正确: ELF 64-bit LSB pie executable
+# 错误: ELF 64-bit LSB shared object  ← 段错误的根源
+```
+
+**修复**: 为所有受影响的目标添加显式 Makefile 编译规则，指定 `$(CFLAGS)` 而不是 `$(LDFLAGS)`。
+
+**受影响的工具清单**（已全部修复）:
+
+| 工具 | 修复方式 |
+|------|---------|
+| `dataflow` | 显式构建规则 |
+| `call_graph` | 显式构建规则 |
+
+---
+
+### 8. `--exclude-dir` 运行时目录排除
+
+**现象**: `drivers/` 被硬编码加入 `is_noise_dir()` 列表以跳过 Linux 内核驱动。但这污染了通用代码，其他项目可能真的有 drivers 目录需要索引。
+
+**原因**: 代码索引器的目录排除列表是编译期硬编码的。
+
+**修复**: 添加 `--exclude-dir` 运行时参数：
+
+```bash
+# 用法: 排除多个目录（逗号分隔）
+./analyze_repo.sh /path --exclude-dir drivers,Documentation
+# 等价于 code_indexer 直接调用
+./tools/code_indexer /path /cache 8 --exclude-dir drivers,Documentation
+```
+
+实现方式：在 `main()` 中解析 `--exclude-dir` 参数，将指定目录存入全局列表，`scan_directory()` 扫描时额外检查。
+
+---
+
+### 9. cache.bin mmap 大小不足
+
+**现象**: `cache.bin` mmap 固定为 2GB，对于 Linux 内核规模（~1.5M 条目）可能不足，强制 LRU 淘汰旧数据。
+
+**修复**: 在 `cache_import.c` 中将 mmap 大小调整为 4GB：
+
+```c
+g_cache = cache_open(cache_dir, 4ULL * 1024 * 1024 * 1024);
+```
+
+---
+
+### 修复效果汇总
+
+| # | 修复点 | 影响项目 | 之前 | 之后 |
+|---|--------|---------|------|------|
+| 1 | protected_regular + exit code | OpenResty 首次 | 丢 50% 数据 | 8/8 worker 成功 |
+| 2 | 扩展名白名单 | llama.cpp | GPU 代码 0 chunks | 全量索引 |
+| 3 | batch_embedder 内存 | Linux 内核 | 17.3GB → OOM | ~2GB 流式 |
+| 4 | chunks 导入 json 循环 | Linux 内核 | ~100 keys/s | ~500,000 keys/s |
+| 5 | dataflow 内循环 | CPython | 1-2 keys/s | 21-25 keys/s |
+| 6 | call_graph O(n²) + 上限 | Linux 内核 | 段错误/截断 | 198K 函数正常 |
+| 7 | Makefile -shared 污染 | 多个工具 | 段错误 | 正常执行 |
+| 8 | 目录排除 | Linux 内核 | 硬编码 | 运行时参数 |
+| 9 | cache mmap 大小 | Linux 内核 | 2GB | 4GB |
+
