@@ -9,10 +9,10 @@
 | 属性 | 值 |
 |------|-----|
 | 源码路径 | `/opt/llama.cpp` |
-| 源文件总数 | 783 (C++/C/H/CUDA) |
-| 索引 Chunks | **25829** |
-| 唯一函数数 | **10801** |
-| 调用边数 | **1784** |
+| 源文件总数 | 1042 (C++/C/H/CUDA) |
+| 索引 Chunks | **28018** |
+| 唯一函数数 | **11379** |
+| 调用边数 | **1871** |
 | 追踪变量 | 2000 (696 字段级) |
 | 语义向量 | 25829 条 (768 维) |
 
@@ -127,12 +127,12 @@ KV Cache 存储注意力层的 Key 和 Value 矩阵，通过 **paged attention**
 
 | 数据文件 | 路径 |
 |---------|------|
-| 代码内容 | `/opt/code_caches/llama.cpp_cache/chunks_text.txt` |
+| 代码内容 | `/opt/code_caches/llama.cpp_cache/chunks_text.txt` (28018 行) |
 | 元数据 | `/opt/code_caches/llama.cpp_cache/chunks_meta.jsonl` |
-| 调用关系 | `/opt/code_caches/llama.cpp_cache/call_graph.json` (1784 边) |
+| 调用关系 | `/opt/code_caches/llama.cpp_cache/call_graph.json` (1871 边) |
 | 数据流 | `/opt/code_caches/llama.cpp_cache/dataflow.json` (2000 变量) |
 | 语义向量 | `/opt/code_caches/llama.cpp_cache/vectors/code_local_llama.cpp.jina.bin` |
-| KV 命名空间 | `/code/llama.cpp` (55103 keys) |
+| KV 命名空间 | `/code/llama.cpp` (63667 keys) |
 
 ```bash
 # 查询示例
