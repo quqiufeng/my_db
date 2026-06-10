@@ -136,38 +136,145 @@ LuaJIT 映射表位置:  jit_State->trace[]
 
 ```
 V8 映射表位置:  Isolate->code_cache
-关键结构体:
-  Isolate (v8/src/execution/isolate.h)
-    └── code_cache → std::unordered_map
-          └── Code (v8/src/codegen/code.h)
-                ├── InstructionStart():  Address   ← 机器码地址
-                ├── InstructionSize():   int       ← 大小
-                └── source():            Handle<Script>
-                      ├── name():        String    ← 文件名
-                      └── line_offset(): int       ← 行号偏移
 
-提取命令:
-  tracec extract v8 <pid>
-  → 输出 JSON: [{start, end, file, line, function}, ...]
+实现路径:
+  Step 1: 通过 GDB 找到 Isolate 指针
+    - V8 嵌入时通常有全局变量保存 Isolate*
+    - Node.js: node::IsolateData 或直接 node::Environment
+    - 或通过 pthread_getspecific 找线程局部存储的 Isolate
+  
+  Step 2: 访问 Isolate->code_cache
+    - code_cache 是 std::unordered_map<CodeDesc, Code*>
+    - 遍历所有 Code 对象
+    
+  Step 3: 从 Code 对象提取映射
+    Code* (v8/src/codegen/code.h)
+      ├── InstructionStart():  Address    ← 机器码起始地址
+      ├── InstructionSize():   int        ← 机器码大小
+      └── SourcePositionInfo():
+            ├── script->name()->ToString() ← 文件名 (app.js)
+            ├── line_offset()             ← 行号偏移
+            └── function_name()           ← 函数名 (sortData)
+  
+  Step 4: 构建映射表输出
+    tracec extract v8 <pid>
+    → JSON: [{start, end, file, line, function}, ...]
+
+  GDB Python 关键代码:
+    isolate = gdb.parse_and_eval("v8::Isolate::GetCurrent()")
+    code_cache = isolate['code_cache']
+    for entry in code_cache:
+        code = entry['code']
+        script = code['script']
+        file = script['name']['value']
+        start = int(code['InstructionStart']())
+        size  = int(code['InstructionSize']())
 ```
 
 ### 3.4 CPython 实现（待实现）
 
 ```
-CPython 映射表位置:  PyThreadState->frame
-关键结构体:
-  PyThreadState (Include/pystate.h)
-    └── frame → PyFrameObject (Include/frameobject.h)
-          ├── f_code → PyCodeObject
-          │     ├── co_filename:    PyObject*  ← 文件名
-          │     ├── co_firstlineno: int        ← 起始行号
-          │     └── co_code:        PyObject*  ← 字节码指令
-          ├── f_lineno:  int        ← 当前行号
-          └── f_back:    PyFrameObject*  ← 上一层调用栈
+CPython 映射表位置:  PyThreadState->frame->f_code
 
-提取命令:
-  tracec extract cpython <pid>
-  → 遍历 frame 链表 → 输出 JSON: [{file, line, function}, ...]
+实现路径:
+  Step 1: 找到 PyThreadState
+    Python.h: PyThreadState *PyThreadState_Get()
+    或通过全局变量 _PyRuntime 访问
+  
+  Step 2: 遍历 frame 链表
+    PyThreadState->frame → PyFrameObject
+      ├── f_code → PyCodeObject
+      │     ├── co_filename:    PyObject*    ← 文件名字符串
+      │     ├── co_firstlineno: int           ← 函数起始行号
+      │     └── co_name:        PyObject*    ← 函数名
+      ├── f_lineno:  int         ← 当前执行行号
+      └── f_back:    PyFrameObject*  ← 上一帧 (调用者)
+    
+    frame 链表就是当前线程的 Python 调用栈
+  
+  Step 3: 遍历所有线程
+    每个线程有自己的 PyThreadState
+    需要遍历所有线程才能拿到完整的运行时调用关系
+  
+  Step 4: 构建映射表输出
+    tracec extract cpython <pid>
+    → JSON: [{file, line, function, thread_id}, ...]
+
+  GDB Python 关键代码:
+    tstate = gdb.parse_and_eval("PyThreadState_Get()")
+    frame = tstate['frame']
+    while frame:
+        code = frame['f_code']
+        name = code['co_name']['ob_type']['tp_name']
+        file = code['co_filename']['ob_type']['tp_name']
+        line = int(frame['f_lineno'])
+        frames.append({file, line, function: name})
+        frame = frame['f_back']
+```
+
+### 3.5 PHP 实现（待实现）
+
+```
+PHP 映射表位置:  zend_executor_globals->opline
+
+实现路径:
+  Step 1: 找到 executor_globals
+    PHP 维护全局变量 executor_globals (zend_executor_globals*)
+    编译 PHP 时保留此符号即可访问
+  
+  Step 2: 读取当前执行状态
+    zend_executor_globals (Zend/zend_globals.h)
+      ├── opline:     zend_op*      ← 当前执行的字节码指令
+      ├── function_state:
+      │     └── function: zend_function
+      │           ├── common.function_name ← 函数名
+      │           └── op_array: zend_op_array
+      │                 ├── filename:  char*  ← 文件名
+      │                 └── line_start: int    ← 起始行号
+      └── prev_execute_data → zend_execute_data
+              └── call 链 = PHP 调用栈
+    
+  Step 3: 遍历调用栈
+    zend_execute_data->call 链就是 PHP 的调用栈
+    每层可以读出: 函数名、文件、当前行号
+    opline->lineno 是当前执行的行号
+  
+  Step 4: 构建映射表输出
+    tracec extract php <pid>
+    → JSON: [{file, line, function, ...}, ...]
+
+  GDB Python 关键代码:
+    eg = gdb.parse_and_eval("executor_globals")
+    opline = eg['opline']
+    line = int(opline['lineno'])
+    func = eg['function_state']['function']['common']['function_name']
+```
+
+### 3.6 JVM 实现（待实现）
+
+```
+JVM 映射表位置:  Klass->vtable
+
+实现路径:
+  JVM 的情况不同 — JVM 本身有完善的工具接口
+  优先使用标准工具而非 GDB 提取:
+  
+  方式 A: 使用 JMX + ThreadMXBean
+    - 通过 JMX 连接目标 JVM
+    - ThreadMXBean.dumpAllThreads() + CPU 时间
+    - 不需要 GDB
+  
+  方式 B: 使用 perf + perf-map-agent
+    - perf record -F 99 -g -p $PID
+    - perf-map-agent 读取 JIT 编译的 /tmp/perf-<pid>.map
+    - JVM 在 -XX:+PreserveFramePointer 下产出 perf 可直接读的符号
+  
+  方式 C: 直接读 JVM 堆
+    - 每个 Java 线程的 JavaThread->vframe()
+    - 遍历 vframe 链 = Java 调用栈
+    - 读出 method->name, bci→行号
+  
+  推荐走方式 B (标准工具链，不需要 GDB)
 ```
 
 ---
@@ -191,7 +298,23 @@ cache_query → 调用者列表
 
 ---
 
-## 五、适用场景
+## 五、各运行时的实现优先级
+
+| 优先级 | 运行时 | 命令 | 难度 | 理由 |
+|--------|--------|------|------|------|
+| ✅ 已实现 | LuaJIT | `extract luajit` | 中 | 结构体固定，trace[] 数组遍历简单 |
+| ⬜ 优先 | V8/Node.js | `extract v8` | 中 | Isolate->code_cache 需要遍历 std::map |
+| ⬜ 次优先 | CPython | `extract cpython` | 低 | frame 链表遍历最简单 |
+| ⬜ 按需 | PHP | `extract php` | 中 | zend_executor_globals 结构复杂 |
+| ⬜ 按需 | JVM | `extract jvm` | 低 | 走 perf-map-agent 标准工具 |
+
+每个运行时的 extract 实现大约 100-200 行 GDB Python 代码，结构完全一致：
+
+```
+gdb 附加进程 → 找到运行时核心结构体 → 遍历映射表 → 输出 JSON
+```
+
+当需要分析某个语言的性能时，按需实现即可。
 
 | 场景 | C/C++ | LuaJIT | V8/JS | CPython | 说明 |
 |------|-------|--------|-------|---------|------|
