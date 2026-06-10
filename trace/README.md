@@ -5,6 +5,8 @@
 >
 > 本文档深受章亦春（agentzh）《动态追踪技术漫谈》启发：
 > https://blog.openresty.com.cn/cn/dynamic-tracing
+>
+> **运行时感知（运行时映射表提取）**: [RUNTIME.md](RUNTIME.md)
 
 ---
 
