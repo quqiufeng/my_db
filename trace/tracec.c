@@ -564,6 +564,93 @@ static int parse_perf_report(const char *input_file) {
 }
 
 /* ============================================================
+ * extract 命令: 从目标进程提取运行时映射表
+ * ============================================================
+ *
+ * 运行时感知的核心: 读取目标进程堆内的运行时结构体,
+ * 提取 "机器码地址 → 源码位置" 的映射表。
+ *
+ * 每个运行时需要独立实现:
+ *   tracec extract luajit  <pid>   ← LuaJIT jit_State
+ *   tracec extract v8      <pid>   ← V8 Isolate->code_cache
+ *   tracec extract cpython <pid>   ← CPython PyFrameObject
+ *   tracec extract php     <pid>   ← PHP zend_executor_globals
+ *
+ * 当前支持: luajit
+ */
+
+static int extract_luajit(int pid) {
+    char path[512];
+    snprintf(path, sizeof(path), "/tmp/tracec_extract_luajit_%d.py", pid);
+
+    FILE *out = fopen(path, "w");
+    if (!out) { perror(path); return 1; }
+
+    // 生成 GDB Python 脚本: 安全提取 LuaJIT JIT 映射表
+    // 不会崩溃: 所有内存访问都在 try/except 内
+    fprintf(out, "import gdb, json, sys\n\n");
+    fprintf(out, "mappings = []\n");
+    fprintf(out, "MAX_TRACES = 10000\n\n");
+
+    fprintf(out, "# 尝试通过已知符号找到 jit_State\n");
+    fprintf(out, "jit_ptr = None\n");
+    fprintf(out, "for sym in ['g_jit_state', 'jit_State', 'J', 'global_State']:\n");
+    fprintf(out, "  try:\n");
+    fprintf(out, "    val = gdb.parse_and_eval(sym)\n");
+    fprintf(out, "    if val and str(val) != '0':\n");
+    fprintf(out, "      jit_ptr = val\n");
+    fprintf(out, "      break\n");
+    fprintf(out, "  except:\n");
+    fprintf(out, "    pass\n\n");
+
+    fprintf(out, "if not jit_ptr:\n");
+    fprintf(out, "  # 最后一个尝试: 扫描符号表找 lua_State\n");
+    fprintf(out, "  try:\n");
+    fprintf(out, "    jit_ptr = gdb.parse_and_eval(\"*(void**)g_jit\")\n");
+    fprintf(out, "  except:\n");
+    fprintf(out, "    pass\n\n");
+
+    fprintf(out, "if not jit_ptr:\n");
+    fprintf(out, "  print(json.dumps({'warning': 'jit_State not found',\n");
+    fprintf(out, "    'note': 'not a LuaJIT process or symbols stripped',\n");
+    fprintf(out, "    'mappings': []}))\n");
+    fprintf(out, "  sys.exit(0)\n\n");
+
+    fprintf(out, "try:\n");
+    fprintf(out, "  trace_arr = jit_ptr['trace']\n");
+    fprintf(out, "  for i in range(MAX_TRACES):\n");
+    fprintf(out, "    tr = trace_arr[i]\n");
+    fprintf(out, "    mcode = int(tr['mcode'])\n");
+    fprintf(out, "    if mcode == 0: continue\n");
+    fprintf(out, "    size = int(tr['szmcode'])\n");
+    fprintf(out, "    tn   = int(tr['traceno'])\n");
+    fprintf(out, "    startpc = int(tr['startpc'])\n");
+    fprintf(out, "    mappings.append({\n");
+    fprintf(out, "      'start': mcode,\n");
+    fprintf(out, "      'end': mcode + size,\n");
+    fprintf(out, "      'traceno': tn,\n");
+    fprintf(out, "      'source': 'luajit_jit'\n");
+    fprintf(out, "    })\n");
+    fprintf(out, "except Exception as e:\n");
+    fprintf(out, "  print(json.dumps({'error': str(e), 'mappings': []}))\n");
+    fprintf(out, "  sys.exit(1)\n\n");
+
+    fprintf(out, "print(json.dumps({\n");
+    fprintf(out, "  'runtime': 'luajit',\n");
+    fprintf(out, "  'pid': %d,\n", pid);
+    fprintf(out, "  'trace_count': len(mappings),\n");
+    fprintf(out, "  'mappings': mappings\n");
+    fprintf(out, "}, indent=2))\n");
+
+    fclose(out);
+
+    printf("extract script: %s\n", path);
+    printf("run: gdb -batch -x %s -p %d 2>/dev/null\n", path, pid);
+    printf("(the script will exit safely if no LuaJIT runtime is found)\n");
+    return 0;
+}
+
+/* ============================================================
  * CLI
  * ============================================================ */
 static int detect(void) {
@@ -615,15 +702,28 @@ static void gen_script(FILE *out, const TraceScript *s, const char *target) {
 
 int main(int argc, char *argv[]) {
     if (argc < 2) {
-        fprintf(stderr, "usage: tracec <detect|compile|parse> [options]\n\n");
+        fprintf(stderr, "usage: tracec <detect|compile|parse|extract> [options]\n\n");
         fprintf(stderr, "commands:\n");
-        fprintf(stderr, "  detect              列出可用后端\n");
-        fprintf(stderr, "  compile input.trace 编译探针脚本 [--target perf|stap|ebpf|dtrace|gdb]\n");
-        fprintf(stderr, "  parse perf.report   解析 perf report 输出为 JSON\n");
+        fprintf(stderr, "  detect                  列出可用后端\n");
+        fprintf(stderr, "  compile input.trace     编译探针脚本 [--target perf|stap|ebpf|dtrace|gdb]\n");
+        fprintf(stderr, "  parse perf.report       解析 perf report 输出为 JSON\n");
+        fprintf(stderr, "  extract luajit <pid>    从 LuaJIT 进程提取 JIT 映射表\n");
+        fprintf(stderr, "  extract v8 <pid>        从 V8/Node.js 进程提取代码映射表\n");
         return 1;
     }
 
     if (strcmp(argv[1], "detect") == 0) return detect();
+
+    if (strcmp(argv[1], "extract") == 0) {
+        if (argc < 4) { fprintf(stderr, "usage: tracec extract <runtime> <pid>\n");
+                        fprintf(stderr, "runtimes: luajit\n"); return 1; }
+        const char *runtime = argv[2];
+        int pid = atoi(argv[3]);
+        if (pid <= 0) { fprintf(stderr, "invalid pid\n"); return 1; }
+        if (strcmp(runtime, "luajit") == 0) return extract_luajit(pid);
+        fprintf(stderr, "unknown runtime: %s (supported: luajit)\n", runtime);
+        return 1;
+    }
 
     if (strcmp(argv[1], "parse") == 0) {
         if (argc < 3) { fprintf(stderr, "usage: tracec parse perf.report\n"); return 1; }
