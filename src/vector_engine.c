@@ -936,15 +936,24 @@ int vector_engine_search_ex(vector_engine_t* engine, const char* query,
             if (!ns_match) ns_match = strstr(namespace, s->namespace) != NULL;
             
             // Allow /code/X to match /code/local/X (and vice versa)
-            if (!ns_match && strncmp(namespace, "/code/", 6) == 0) {
-                char local_ns[256];
-                snprintf(local_ns, sizeof(local_ns), "/code/local/%s", namespace + 6);
-                ns_match = (strcmp(s->namespace, local_ns) == 0);
-            }
+            // Supports nested namespaces: /code/owner/repo matches /code/local/repo
             if (!ns_match && strncmp(s->namespace, "/code/local/", 12) == 0) {
-                char short_ns[256];
-                snprintf(short_ns, sizeof(short_ns), "/code/%s", s->namespace + 12);
-                ns_match = (strcmp(namespace, short_ns) == 0);
+                const char* local_name = s->namespace + 12;
+                size_t name_len = strlen(local_name);
+                size_t ns_len = strlen(namespace);
+                if (ns_len > name_len + 1 &&
+                    namespace[ns_len - name_len - 1] == '/' &&
+                    strcmp(namespace + ns_len - name_len, local_name) == 0) {
+                    ns_match = 1;
+                }
+            }
+            if (!ns_match && strncmp(namespace, "/code/", 6) == 0) {
+                const char* ns_rest = namespace + 6;
+                const char* last_slash = strrchr(ns_rest, '/');
+                const char* last_comp = last_slash ? last_slash + 1 : ns_rest;
+                char local_check[256];
+                snprintf(local_check, sizeof(local_check), "/code/local/%s", last_comp);
+                ns_match = (strcmp(s->namespace, local_check) == 0);
             }
             
             if (!ns_match) continue;
