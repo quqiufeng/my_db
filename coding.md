@@ -31,7 +31,6 @@
 | 项目 | 源码路径 | 分析输出 | 命名空间 | 状态 | 计划导入时间 |
 |------|----------|----------|----------|------|-------------|
 | Linux Kernel | /opt/linux/src/linux-7.0.11 | /code/linux | /code/linux | 待探索 | — |
-| Nginx | 待下载 | /code/nginx | /code/nginx | 待探索 | — |
 | OpenResty | /opt/openresty-1.31.1.1 | /code/openresty | /code/openresty | ✅ 2026-06-10 | 已完成 |
 | Redis | 待下载 | /code/redis | /code/redis | 待探索 | — |
 | stable-diffusion.cpp | https://github.com/leejet/stable-diffusion.cpp | /code/stable-diffusion.cpp | /code/stable-diffusion.cpp | 待探索 | — |
