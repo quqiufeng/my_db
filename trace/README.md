@@ -185,32 +185,98 @@ perf 采到 RIP = 0x7f3a8c1b2408
 perf report -g callers  →  谁调了 lj_gc_step
 ```
 
+### 6.1 什么是火焰图
 ### 5.2 需要什么条件
 
 ```
-必须:  二进制编译时加了 -g（保留 debug symbols）
-       perf_event_paranoid ≤ 1（普通用户也能采）
-
-可选:  有源码（修 bug 时用）
-       无源码也能看热点（但只有函数名，没行号）
+基本要求:  perf_event_paranoid ≤ 1（普通用户也能采）
+可选:     有调试符号或已索引到 code_search（用于地址→函数名）
 ```
 
-### 5.3 没有 debug symbols 怎么办
+### 5.3 符号重建 vs 运行时感知
+
+perf 采到裸地址后，要翻译成 `文件:行号`，涉及两个层次。
+
+#### 第一层：符号重建（地址 → 函数名）
+
+```
+perf 采到 0x5555000a1b40
+    ↓ 查 ELF .symtab / .dynsym
+lj_gc_step                ← 函数名
+    ↓ cache_query "lj_gc_step" --repo /code/LuaJIT/LuaJIT
+lj_gc.c:724               ← 代码位置
+```
+
+对于 C/C++/Rust/Zig 编译的二进制，ELF 符号表就够了。即使被 strip，`.dynsym` 通常保留。
+对于已经用 `analyze_repo.sh` 索引过的项目，`code_search` 可以直接从源码定位，不需要 DWARF。
+
+#### 第二层：运行时感知（C 引擎栈 → 脚本层函数）
+
+这是真正的技术壁垒。
+
+对于 JavaScript、Lua、Python、PHP 等动态语言，perf 只能看到**运行时引擎的 C 代码**，看不到脚本层的函数。因为这些语言的 JIT 编译器或解释器把脚本代码编译为机器码后，存在**进程堆内存里**，不在 ELF 段里。
+
+```
+perf 采到 0x5555001c2408
+    ↓ 查 ELF 符号表
+v8::Array::New               ← V8 引擎的 C++ 函数
+    ↓ 真正在执行的 JS 代码
+sortData (app.js:42)         ← 看不到！在 V8 堆里
+```
+
+每个运行时内部都维护着一张 **"机器码地址 → 源码位置"** 的映射表，但存放位置和格式完全不同：
+
+```
+运行时       映射表位置                             关键结构体
+──────────────────────────────────────────────────────────────────
+V8           Isolate->code_cache                   v8::internal::Isolate
+LuaJIT       jit_State->trace[].mcode              GCtrace, MCode
+CPython      PyThreadState->frame->f_code          PyFrameObject
+PHP          zend_executor_globals->opline          zend_op_array
+JVM          Klass->vtable                          java_lang_ClassLoader
+```
+
+要拿到映射数据，需要：
+
+```
+V8 运行时感知:
+  1. 读 V8 源码 src/execution/isolate.h → 找到 Isolate 结构体布局
+  2. 找到 code_cache 的存储格式 (Builtins + Code 对象)
+  3. 遍历所有已编译代码，提取 地址范围 → (文件名, 行号, 函数名)
+  4. perf 采到地址后反向查询此映射表
+
+LuaJIT 运行时感知:
+  1. 读 lj_jit.h → 找到 jit_State + GCtrace 结构体
+  2. 遍历 GCtrace 链表，读 mcode 字段（编译后的机器码地址）
+  3. 通过 lj_debug.c 提取对应的行号信息
+  4. 构建地址范围 → 函数名映射表
+```
+
+这就是 XRay 真正的技术壁垒——不是探针 DSL，不是符号重建，而是 **对每个运行时内部数据结构的深入理解**。每接入一种语言，就要读透它的运行时源码，找到这张映射表，实现提取器。每个运行时的版本更新都可能改变结构体布局。
+
+```
+              符号重建                             运行时感知
+────────────────────────────────────────────────────────────────────
+问题          地址 → 函数名                         C 引擎栈 → 脚本层函数
+数据来源      ELF .symtab / .dynsym               运行时的堆内存数据结构
+解决方案      code_search + ELF 符号表              读源码 + 实现遍历器
+覆盖语言      C/C++/Rust/Zig (ELF 格式)            JS/Lua/Python/PHP/JVM
+难度          ✅ 已有方案                           🔲 每个语言独立实现
+```
+
+### 5.4 没有调试符号的兜底
 
 ```bash
-# 安装 debuginfo 包 (大部分发行版提供)
+# 安装 debuginfo 包（大部分发行版提供）
 dnf debuginfo-install nginx     # RHEL/Fedora
 apt install nginx-dbg           # Debian/Ubuntu
 
 # 或者自己编译带 -g 的版本
 ./configure --with-debug && make -j
+
+# 对于已索引的项目，code_search 直接定位
+cache_query "lj_gc_step" --repo /code/LuaJIT/LuaJIT --type context
 ```
-
----
-
-## 六、火焰图
-
-### 6.1 什么是火焰图
 
 由 Brendan Gregg 发明，是给软件系统拍的 X 光照片。它将时间和空间两个维度的信息融合在一张图上，直观反映性能方面的定量统计规律。
 
