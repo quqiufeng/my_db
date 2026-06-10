@@ -42,7 +42,7 @@
 | HAProxy | 待下载 | /code/haproxy | /code/haproxy | 待探索 | — |
 | libuv | 待下载 | /code/libuv | /code/libuv | 待探索 | — |
 | whisper.cpp | 待下载 | /code/whisper.cpp | /code/whisper.cpp | 待探索 | — |
-| CPython | /opt/cpython/src | /code/python | /code/python | ✅ 2026-06-09 | 已完成 |
+| CPython | /opt/cpython/src | /code/python | /code/python | ✅ 2026-06-10 | 已完成 |
 | LuaJIT | https://github.com/LuaJIT/LuaJIT | /code/luajit | /code/LuaJIT/LuaJIT | ✅ 2026-06-10 | 已完成 |
 | HotSpot JVM | 待下载 | /code/hotspot | /code/hotspot | 待探索 | — |
 | mruby | 待下载 | /code/mruby | /code/mruby | 待探索 | — |
