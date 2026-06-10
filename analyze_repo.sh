@@ -206,6 +206,7 @@ SKIP_DATAFLOW=false                 # 是否跳过数据流
 CACHE_DIR="/memory"        # KV Cache 目录
 JOBS=""                             # 并行进程数（默认 auto）
 PROJECT_NAME=""                     # 项目名（用于目录命名）
+EXCLUDE_DIRS=""
 
 # 解析命令行参数
 while [[ $# -gt 0 ]]; do
@@ -234,6 +235,10 @@ while [[ $# -gt 0 ]]; do
             PROJECT_NAME="$2"
             shift 2
             ;;
+        --exclude-dir)
+            EXCLUDE_DIRS="$2"
+            shift 2
+            ;;
         --help|-h)
             echo "Usage: $0 <source> [namespace] [options]"
             echo ""
@@ -248,6 +253,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --cache-dir <dir>  KV Cache directory"
             echo "  --jobs <n>         Parallel jobs"
             echo "  --name <name>      Project name"
+            echo "  --exclude-dir <dirs>  Comma-separated dirs to skip"
             echo ""
             echo "Examples:"
             echo "  $0 https://github.com/redis/redis"
@@ -325,6 +331,7 @@ log "Jobs: $JOBS"
 log "Skip vectors: $SKIP_VECTORS"
 log "Skip callgraph: $SKIP_CALLGRAPH"
 log "Skip dataflow: $SKIP_DATAFLOW"
+log "Exclude dirs: ${EXCLUDE_DIRS:-none}"
 log "================================================================"
 
 # =============================================================================
@@ -381,7 +388,11 @@ else
 fi
 
 # 执行索引（容错：非零退出继续执行）
-if ! "$INDEXER" "$SOURCE_DIR" "$ANALYSIS_DIR" "$JOBS" 2>&1; then
+EXCLUDE_ARG=""
+if [ -n "$EXCLUDE_DIRS" ]; then
+    EXCLUDE_ARG="--exclude-dir $EXCLUDE_DIRS"
+fi
+if ! "$INDEXER" "$SOURCE_DIR" "$ANALYSIS_DIR" "$JOBS" $EXCLUDE_ARG 2>&1; then
     warn "Indexer returned non-zero, continuing..."
 fi
 
