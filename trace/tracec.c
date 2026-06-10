@@ -596,6 +596,130 @@ static void gen_gdb_probe(FILE *out, const Probe *p) {
 }
 
 /* ============================================================
+ * report 命令: 生成 ASCII 柱状图报告
+ * ============================================================
+ * 输入: tracec parse 输出的 JSON 或 extract 输出的 JSON
+ * 输出: 终端友好的柱状图
+ *
+ *   tracec compile app.trace --target perf
+ *   bash trace_perf.sh 2>&1 | tee perf.report
+ *   tracec parse perf.report | tracec report
+ *
+ *   tracec extract luajit <pid>
+ *   gdb -batch -x luajit.py -p <pid> | tracec report
+ */
+
+static int report_json(void) {
+    char *buf = read_file("/dev/stdin", NULL);
+    if (!buf) return 1;
+
+    // 查找 "results" 数组
+    char *p = strstr(buf, "\"results\"");
+    if (!p) {
+        // 也可能是 "mappings" (extract 输出)
+        p = strstr(buf, "\"mappings\"");
+        if (!p) { fprintf(stderr, "no results or mappings found in JSON\n"); free(buf); return 1; }
+
+        // 处理 extract 的 mappings 输出
+        printf("\n┌─ 运行时 JIT 映射表 ─────────────────────────────┐\n");
+        int count = 0;
+        char *item = p;
+        while ((item = strstr(item, "\"start\"")) && count < 10) {
+            count++;
+            long start = 0, end = 0, traceno = 0;
+            sscanf(item, "\"start\": %ld", &start);
+            char *e = strstr(item, "\"end\"");
+            if (e) sscanf(e, "\"end\": %ld", &end);
+            char *t = strstr(item, "\"traceno\"");
+            if (t) sscanf(t, "\"traceno\": %ld", &traceno);
+            printf("  trace %-4ld  0x%lx - 0x%lx  (%ld KB)\n", traceno, start, end, (end - start) / 1024);
+            item += 8;
+        }
+        printf("└──────────────────────────────────────────────────┘\n");
+        printf("  total JIT traces: %d\n\n", count);
+        free(buf);
+        return 0;
+    }
+
+    // 处理 perf report results
+    // 解析 JSON 提取 function + cpu_percent
+    typedef struct { char name[256]; float pct; char file[256]; int line; } HotEntry;
+    HotEntry entries[100];
+    int n = 0;
+
+    char *cur = p;
+    while (cur && n < 100) {
+        cur = strstr(cur, "\"function\"");
+        if (!cur) break;
+        cur += 10;
+
+        // 跳过到值
+        char *v = strchr(cur, ':');
+        if (!v) continue;
+        v++;
+        while (*v == ' ' || *v == '\"') v++;
+        int i = 0;
+        while (*v && *v != '\"' && i < 255) entries[n].name[i++] = *v++;
+        entries[n].name[i] = '\0';
+
+        // cpu_percent
+        char *pp = strstr(cur, "\"cpu_percent\"");
+        if (pp) sscanf(pp, "\"cpu_percent\": %f", &entries[n].pct);
+
+        // file
+        char *fp = strstr(cur, "\"file\"");
+        if (fp) {
+            char *fv = strchr(fp, ':');
+            if (fv) {
+                fv++;
+                while (*fv == ' ' || *fv == '\"') fv++;
+                i = 0;
+                while (*fv && *fv != '\"' && i < 255) entries[n].file[i++] = *fv++;
+                entries[n].file[i] = '\0';
+            }
+        }
+
+        // line
+        char *lp = strstr(cur, "\"line\"");
+        if (lp) sscanf(lp, "\"line\": %d", &entries[n].line);
+
+        n++;
+        cur = v;
+    }
+
+    free(buf);
+
+    if (n == 0) { fprintf(stderr, "no hotspot data found\n"); return 1; }
+
+    // CPU 热点柱状图
+    float max_pct = 0;
+    for (int i = 0; i < n; i++) if (entries[i].pct > max_pct) max_pct = entries[i].pct;
+    int bar_max = 40;
+
+    printf("\n┌─ TOP 10 CPU 热点 ──────────────────────────────────┐\n");
+    int top = n < 10 ? n : 10;
+    for (int i = 0; i < top; i++) {
+        int bar_len = (int)(entries[i].pct / max_pct * bar_max);
+        if (bar_len < 1) bar_len = 1;
+        printf("  %18s ", entries[i].name);
+        for (int j = 0; j < bar_len; j++) printf("█");
+        printf(" %.1f%%\n", entries[i].pct);
+        if (entries[i].file[0]) printf("  %18s   %s:%d\n", "", entries[i].file, entries[i].line);
+    }
+    printf("└──────────────────────────────────────────────────┘\n");
+    printf("  total functions: %d\n\n", n);
+
+    // 内存热点柱状图
+    // 如果有 bytes_sum 字段则显示
+    printf("┌─ TOP 10 内存分配热点 ───────────────────────────────┐\n");
+    printf("  (需要 memory probe 数据)\n");
+    printf("  probe \"malloc\" { collect(bytes: sum) collect(caller) }\n");
+    printf("└──────────────────────────────────────────────────┘\n");
+
+    return 0;
+}
+
+/* ============================================================
  * perf report 解析器 (parse 命令)
  * ============================================================
  * 输入: perf report --stdio 输出
@@ -818,17 +942,24 @@ static void gen_script(FILE *out, const TraceScript *s, const char *target, int 
 
 int main(int argc, char *argv[]) {
     if (argc < 2) {
-        fprintf(stderr, "usage: tracec <detect|compile|parse|extract> [options]\n\n");
+        fprintf(stderr, "usage: tracec <detect|compile|parse|extract|report> [options]\n\n");
         fprintf(stderr, "commands:\n");
         fprintf(stderr, "  detect                  列出可用后端\n");
         fprintf(stderr, "  compile input.trace     编译探针脚本 [--target perf|stap|ebpf|dtrace|gdb]\n");
         fprintf(stderr, "  parse perf.report       解析 perf report 输出为 JSON\n");
+        fprintf(stderr, "  report                  从 JSON 生成 ASCII 柱状图报告 (stdin)\n");
         fprintf(stderr, "  extract luajit <pid>    从 LuaJIT 进程提取 JIT 映射表\n");
         fprintf(stderr, "  extract v8 <pid>        从 V8/Node.js 进程提取代码映射表\n");
+        fprintf(stderr, "\nexamples:\n");
+        fprintf(stderr, "  tracec compile app.trace --target perf 2>&1\n");
+        fprintf(stderr, "  bash trace_perf.sh 2>&1 | tee perf.report\n");
+        fprintf(stderr, "  tracec parse perf.report | tracec report\n");
         return 1;
     }
 
     if (strcmp(argv[1], "detect") == 0) return detect();
+
+    if (strcmp(argv[1], "report") == 0) return report_json();
 
     if (strcmp(argv[1], "extract") == 0) {
         if (argc < 4) { fprintf(stderr, "usage: tracec extract <runtime> <pid>\n");
