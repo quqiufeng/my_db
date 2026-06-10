@@ -18,6 +18,46 @@
 #include <string.h>
 #include <ctype.h>
 #include <unistd.h>
+#include <sys/stat.h>
+
+/* ============================================================
+ * 辅助函数
+ * ============================================================ */
+
+// 检查命令是否存在 (不启动 shell)
+static int cmd_avail(const char *cmd) {
+    char buf[1024];
+    // 搜索 PATH
+    const char *path = getenv("PATH");
+    if (!path) return 0;
+    char *copy = strdup(path);
+    if (!copy) return 0;
+    char *save;
+    char *dir = strtok_r(copy, ":", &save);
+    while (dir) {
+        snprintf(buf, sizeof(buf), "%s/%s", dir, cmd);
+        if (access(buf, X_OK) == 0) { free(copy); return 1; }
+        dir = strtok_r(NULL, ":", &save);
+    }
+    free(copy);
+    return 0;
+}
+
+// 读取整个文件到字符串 (调用者 free)
+static char *read_file(const char *path, long *out_len) {
+    FILE *fp = fopen(path, "r");
+    if (!fp) { perror(path); return NULL; }
+    fseek(fp, 0, SEEK_END);
+    long len = ftell(fp);
+    fseek(fp, 0, SEEK_SET);
+    char *buf = malloc(len + 1);
+    if (!buf) { fclose(fp); return NULL; }
+    fread(buf, 1, len, fp);
+    buf[len] = '\0';
+    fclose(fp);
+    if (out_len) *out_len = len;
+    return buf;
+}
 
 /* ============================================================
  * JSON 输出 schema
@@ -654,22 +694,33 @@ static int extract_luajit(int pid) {
  * CLI
  * ============================================================ */
 static int detect(void) {
+    struct { const char *name; const char *desc; int (*avail)(void); } backends[] = {
+        {"perf", "Linux 自带",       NULL},
+        {"stap", "SystemTap, 功能最强", NULL},
+        {"bpftrace", "低开销",       NULL},
+        {"dtrace", "macOS/BSD",     NULL},
+        {"gdb",   "兜底, 慢但通用",  NULL},
+        {NULL, NULL, NULL}
+    };
     printf("available backends:\n");
-    int has = 0;
-    if (system("which perf >/dev/null 2>&1") == 0) { printf("  perf ✅ (Linux 自带)\n"); has = 1; }
-    if (system("which stap  >/dev/null 2>&1") == 0) { printf("  stap ✅ (SystemTap, 功能最强)\n"); has = 1; }
-    if (system("which bpftrace >/dev/null 2>&1") == 0) { printf("  ebpf ✅ (bpftrace, 低开销)\n"); has = 1; }
-    if (system("which dtrace >/dev/null 2>&1") == 0) { printf("  dtrace ✅ (macOS/BSD)\n"); has = 1; }
-    if (system("which gdb >/dev/null 2>&1") == 0) { printf("  gdb   ✅ (兜底, 慢但通用)\n"); has = 1; }
-    if (!has) { printf("  (none) 安装 perf: apt install linux-tools-common\n"); }
+    int has = 0, best_prio = 999;
+    const char *best = NULL;
+    for (int i = 0; backends[i].name; i++) {
+        int ok = cmd_avail(backends[i].name);
+        printf("  %-8s %s", backends[i].name, backends[i].desc);
+        printf(ok ? " ✅\n" : "\n");
+        if (ok) { has = 1; }
+    }
+    if (!has) printf("  (none) 安装 perf: apt install linux-tools-common\n");
     printf("\nrecommended: ");
-    if (system("which stap >/dev/null 2>&1") == 0) printf("stap (SystemTap)\n");
-    else if (system("which bpftrace >/dev/null 2>&1") == 0) printf("ebpf\n");
-    else printf("perf\n");
+    if (cmd_avail("stap")) printf("stap (SystemTap)\n");
+    else if (cmd_avail("bpftrace")) printf("ebpf\n");
+    else if (cmd_avail("perf")) printf("perf\n");
+    else printf("(none)\n");
     return 0;
 }
 
-static void gen_script(FILE *out, const TraceScript *s, const char *target) {
+static void gen_script(FILE *out, const TraceScript *s, const char *target, int embed_pid) {
     if (strcmp(target, "stap") == 0) {
         fprintf(out, "#!/usr/bin/env stap\n");
     } else {
@@ -677,8 +728,12 @@ static void gen_script(FILE *out, const TraceScript *s, const char *target) {
     }
     fprintf(out, "# tracec generated | target: %s | probes: %d\n", target, s->probe_count);
     if (strcmp(target, "stap") != 0) {
-        fprintf(out, "PID=\"${PID:-$1}\"\n");
-        fprintf(out, "if [ -z \"$PID\" ]; then echo \"usage: PID=<pid> bash $0\"; exit 1; fi\n");
+        if (embed_pid > 0) {
+            fprintf(out, "PID=%d\n", embed_pid);
+        } else {
+            fprintf(out, "PID=\"${PID:-$1}\"\n");
+            fprintf(out, "if [ -z \"$PID\" ]; then echo \"usage: PID=<pid> bash $0\"; exit 1; fi\n");
+        }
         fprintf(out, "set -e\n");
     }
     fprintf(out, "\n");
@@ -731,51 +786,48 @@ int main(int argc, char *argv[]) {
     }
 
     if (strcmp(argv[1], "compile") == 0) {
-        if (argc < 3) { fprintf(stderr, "usage: tracec compile input.trace [--target perf|stap|ebpf]\n"); return 1; }
+        if (argc < 3) { fprintf(stderr, "usage: tracec compile input.trace [--target perf|stap|ebpf] [--output file] [--pid N]\n"); return 1; }
         const char *input_file = argv[2];
         const char *target = "auto";
+        char output_file[512] = {0};
+        int embed_pid = 0;
 
         for (int i = 3; i < argc; i++) {
             if (strcmp(argv[i], "--target") == 0 && i + 1 < argc) target = argv[++i];
+            else if (strcmp(argv[i], "--output") == 0 && i + 1 < argc) snprintf(output_file, sizeof(output_file), "%s", argv[++i]);
+            else if (strcmp(argv[i], "--pid") == 0 && i + 1 < argc) embed_pid = atoi(argv[++i]);
         }
 
-        // 自动选后端
-        if (strcmp(target, "auto") == 0) {
-            if (system("which stap >/dev/null 2>&1") == 0) target = "stap";
-            else if (system("which bpftrace >/dev/null 2>&1") == 0) target = "ebpf";
-            else target = "perf";
-        }
+    // 自动选后端
+    if (strcmp(target, "auto") == 0) {
+        if (cmd_avail("stap")) target = "stap";
+        else if (cmd_avail("bpftrace")) target = "ebpf";
+        else target = "perf";
+    }
 
-        // 读取 .trace 文件
-        FILE *fp = fopen(input_file, "r");
-        if (!fp) { perror(input_file); return 1; }
-        fseek(fp, 0, SEEK_END);
-        long len = ftell(fp);
-        fseek(fp, 0, SEEK_SET);
-        char *buf = malloc(len + 1);
-        fread(buf, 1, len, fp);
-        buf[len] = '\0';
-        fclose(fp);
+    // 读取 + 解析
+    long len;
+    char *buf = read_file(input_file, &len);
+    if (!buf) return 1;
+    TraceScript script;
+    if (parse_trace(&script, buf) != 0) { free(buf); return 1; }
+    free(buf);
 
-        // 解析
-        TraceScript script;
-        if (parse_trace(&script, buf) != 0) { free(buf); return 1; }
-        free(buf);
+        // 确定输出路径
+        if (!output_file[0])
+            snprintf(output_file, sizeof(output_file), "trace_%s.sh", target);
 
-        // 生成脚本
-        char outname[256];
-        snprintf(outname, sizeof(outname), "trace_%s.sh", target);
-        FILE *out = fopen(outname, "w");
-        if (!out) { perror(outname); return 1; }
+        FILE *out = fopen(output_file, "w");
+        if (!out) { perror(output_file); return 1; }
 
         if (strcmp(target, "stap") == 0) {
-            gen_script(out, &script, "stap");
+            gen_script(out, &script, "stap", embed_pid);
         } else {
-            gen_script(out, &script, target);
+            gen_script(out, &script, target, embed_pid);
         }
 
         fclose(out);
-        printf("generated: %s (target: %s, %d probes)\n", outname, target, script.probe_count);
+        printf("generated: %s (target: %s, %d probes)\n", output_file, target, script.probe_count);
         return 0;
     }
 
