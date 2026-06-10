@@ -30,8 +30,9 @@
 
 | 任务 | 状态 | 说明 |
 |------|------|------|
-| 采样数据解析器 | ⬜ | 各后端原始输出 → 统一 JSON schema |
-| JSON schema 定义 | ⬜ | 定义：{函数名, 频次, 耗时, 源码位置, 调用者} |
+| JSON schema 定义 | ✅ | 顶层 + 每探针结果结构的完整 schema |
+| tracec parse 命令 | ✅ | 解析 perf report 输出 → JSON |
+| GDB JSON 输出 | ✅ | GDB 采样脚本直接输出 JSON |
 
 ### 1.4 工具框架
 

@@ -20,6 +20,35 @@
 #include <unistd.h>
 
 /* ============================================================
+ * JSON 输出 schema
+ * ============================================================
+ *
+ * {
+ *   "probe_file": "test.trace",
+ *   "target": "perf",
+ *   "pid": 31274,
+ *   "duration_sec": 60,
+ *   "probes": [
+ *     {
+ *       "name": "lj_gc_step",
+ *       "type": "function",
+ *       "results": [
+ *         {
+ *           "function": "lj_gc_step",
+ *           "file": "lj_gc.c",
+ *           "line": 724,
+ *           "call_count": 142000,
+ *           "duration_ns": { "avg": 2340, "p50": 2100, "p90": 4500, "p99": 12000 },
+ *           "callers": { "lj_gc_step_jit": 85200, "lua_pcall": 42600 },
+ *           "backtrace": [ "lj_gc_step", "lj_gc_step_jit", "lj_asm_trace" ]
+ *         }
+ *       ]
+ *     }
+ *   ]
+ * }
+ */
+
+/* ============================================================
  * DSL 语法定义 (简单递归下降解析器)
  * ============================================================
  *
@@ -417,14 +446,20 @@ static void gen_dtrace_probe(FILE *out, const Probe *p) {
  * GDB Python 后端生成 (兜底)
  * ============================================================ */
 static void gen_gdb_probe(FILE *out, const Probe *p) {
-    fprintf(out, "# GDB Python sampler\n");
-    fprintf(out, "# usage: gdb -batch -x sampler.py -p $PID\n\n");
-    fprintf(out, "import gdb\n");
-    fprintf(out, "import time\n\n");
+    // 生成 bash 包装脚本: 将 Python 写入临时文件后调用 gdb
+    fprintf(out, "GDB_PID=\"${PID:-$1}\"\n");
+    fprintf(out, "if [ -z \"$GDB_PID\" ]; then echo \"usage: PID=<pid> bash $0\"; exit 1; fi\n");
+    fprintf(out, "DUR=%d\n", p->duration_sec > 0 ? p->duration_sec : 60);
+    fprintf(out, "PY=$(mktemp /tmp/tracec_gdb.XXXXXX.py)\n");
+    fprintf(out, "cat > \"$PY\" << 'GDBPYEOF'\n");
+    fprintf(out, "import gdb, time, sys\n");
+    fprintf(out, "from collections import Counter\n");
     fprintf(out, "frames = []\n");
-    fprintf(out, "for _ in range(%d):\n", p->duration_sec);
+    fprintf(out, "pid = gdb.selected_inferior().pid\n");
+    fprintf(out, "for i in range(%d):\n", p->duration_sec > 0 ? p->duration_sec : 60);
     fprintf(out, "  try:\n");
     fprintf(out, "    frame = gdb.selected_thread().frame()\n");
+    fprintf(out, "    stack = []\n");
     fprintf(out, "    while frame:\n");
     fprintf(out, "      sal = frame.find_sal()\n");
     fprintf(out, "      if sal.symtab:\n");
@@ -432,12 +467,85 @@ static void gen_gdb_probe(FILE *out, const Probe *p) {
     fprintf(out, "      frame = frame.older()\n");
     fprintf(out, "  except:\n");
     fprintf(out, "    pass\n");
-    fprintf(out, "  time.sleep(1)\n\n");
-    fprintf(out, "# print results\n");
-    fprintf(out, "from collections import Counter\n");
+    fprintf(out, "  time.sleep(1)\n");
     fprintf(out, "hot = Counter(frames).most_common(20)\n");
+    fprintf(out, "import json\n");
+    fprintf(out, "results = []\n");
     fprintf(out, "for (func, file, line), count in hot:\n");
-    fprintf(out, "  print(f\"{count:5d}  {func}  {file}:{line}\")\n");
+    fprintf(out, "  results.append({\"function\": func, \"file\": file, \"line\": line, \"samples\": count})\n");
+    fprintf(out, "print(json.dumps({\"source\": \"gdb\", \"results\": results}, indent=2))\n");
+    fprintf(out, "GDBPYEOF\n");
+    fprintf(out, "gdb -batch -x \"$PY\" -p \"$GDB_PID\" 2>/dev/null\n");
+    fprintf(out, "rm -f \"$PY\"\n");
+}
+
+/* ============================================================
+ * perf report 解析器 (parse 命令)
+ * ============================================================
+ * 输入: perf report --stdio 输出
+ * 输出: JSON (到 stdout)
+ */
+static int parse_perf_report(const char *input_file) {
+    FILE *fp = fopen(input_file, "r");
+    if (!fp) { perror(input_file); return 1; }
+
+    printf("{\n  \"source\": \"%s\",\n", input_file);
+    printf("  \"parser\": \"perf report\",\n");
+    printf("  \"results\": [\n");
+
+    char line[4096];
+    int first = 1;
+    while (fgets(line, sizeof(line), fp)) {
+        float percent = 0;
+        char func[256] = {0};
+        char file[256] = {0};
+        int line_no = 0;
+
+        // perf report 格式:
+        //   N.NN%  command  shared  [.] function_name  file.c:line
+        if (sscanf(line, " %f%%", &percent) != 1 || percent < 0.01) continue;
+
+        // 提取 [.] 或 [k] 后面的函数名
+        char *bracket = strstr(line, "[.]");
+        if (!bracket) bracket = strstr(line, "[k]");
+        if (!bracket) continue;
+        bracket = strchr(bracket, ']');
+        if (!bracket) continue;
+        bracket++;
+        while (*bracket == ' ') bracket++;
+        int i = 0;
+        while (*bracket && *bracket != ' ' && *bracket != '\n' && i < 255)
+            func[i++] = *bracket++;
+        func[i] = '\0';
+        if (!func[0]) continue;
+
+        // 提取文件名:行号 (行末)
+        char *colon = strrchr(line, ':');
+        if (colon) {
+            int maybe_line = atoi(colon + 1);
+            if (maybe_line > 0) {
+                line_no = maybe_line;
+                // 取文件名
+                char *sp = colon;
+                while (sp > line && *sp != ' ') sp--;
+                if (*sp == ' ') sp++;
+                sscanf(sp, "%255[^:]:%d", file, &line_no);
+            }
+        }
+
+        if (!first) printf(",\n");
+        first = 0;
+        printf("    {\n");
+        printf("      \"function\": \"%s\",\n", func);
+        printf("      \"cpu_percent\": %.1f,\n", percent);
+        if (file[0]) printf("      \"file\": \"%s\",\n", file);
+        if (line_no > 0) printf("      \"line\": %d,\n", line_no);
+        printf("      \"source\": \"perf\"\n");
+        printf("    }");
+    } // end while
+    fclose(fp);
+    printf("\n  ]\n}\n");
+    return 0;
 }
 
 /* ============================================================
@@ -492,11 +600,20 @@ static void gen_script(FILE *out, const TraceScript *s, const char *target) {
 
 int main(int argc, char *argv[]) {
     if (argc < 2) {
-        fprintf(stderr, "usage: tracec <detect|compile> [input.trace] [--target perf|stap|ebpf]\n");
+        fprintf(stderr, "usage: tracec <detect|compile|parse> [options]\n\n");
+        fprintf(stderr, "commands:\n");
+        fprintf(stderr, "  detect              列出可用后端\n");
+        fprintf(stderr, "  compile input.trace 编译探针脚本 [--target perf|stap|ebpf|dtrace|gdb]\n");
+        fprintf(stderr, "  parse perf.report   解析 perf report 输出为 JSON\n");
         return 1;
     }
 
     if (strcmp(argv[1], "detect") == 0) return detect();
+
+    if (strcmp(argv[1], "parse") == 0) {
+        if (argc < 3) { fprintf(stderr, "usage: tracec parse perf.report\n"); return 1; }
+        return parse_perf_report(argv[2]);
+    }
 
     if (strcmp(argv[1], "compile") == 0) {
         if (argc < 3) { fprintf(stderr, "usage: tracec compile input.trace [--target perf|stap|ebpf]\n"); return 1; }
