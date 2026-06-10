@@ -182,6 +182,11 @@ $(VECTOR_ENGINE_LIB): $(VECTOR_ENGINE_OBJ) $(ONNX_EMBEDDER_LIB) $(LIB)
 $(CACHE_IMPORT): $(TOOLS_DIR)/cache_import.c $(LIB)
 	$(CC) $(CFLAGS) -o $@ $(TOOLS_DIR)/cache_import.c -L. -lmydb -ljansson -Wl,-rpath,.
 
+CALL_GRAPH = $(TOOLS_DIR)/call_graph
+
+$(CALL_GRAPH): $(TOOLS_DIR)/call_graph.c
+	$(CC) $(CFLAGS) -o $@ $< -lm -ljansson -L. -lmydb -Wl,-rpath,.
+
 $(CACHE_QUERY): $(TOOLS_DIR)/cache_query.c $(LIB) $(VECTOR_ENGINE_LIB)
 	$(CC) $(CFLAGS) $(ONNX_CFLAGS) -fopenmp -o $@ $(TOOLS_DIR)/cache_query.c -L. -lmydb -lvector_engine -lonnx_embedder $(ONNX_LDFLAGS) -lm -ldl -ljansson -Wl,-rpath,'$$ORIGIN/..'
 

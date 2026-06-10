@@ -4,7 +4,13 @@
 #include <ctype.h>
 
 #define MAX_NAME_LEN 256
-#define MAX_FUNC 50000
+#define MAX_FUNC 300000
+#define HASH_SIZE 524287
+static char** g_func_names = NULL;
+static int g_func_count = 0;
+
+
+static int g_name_hash[HASH_SIZE];  // -1 = empty
 #define MAX_ARGS 20
 
 typedef struct func_body {
@@ -18,20 +24,31 @@ typedef struct func_body {
 static func_body_t* g_bodies = NULL;
 static int g_body_count = 0;
 
-static char** g_func_names = NULL;
-static int g_func_count = 0;
+
+
+// DJB2 hash
+static unsigned int hash_str(const char* s) {
+    unsigned int h = 5381;
+    while (*s) h = ((h << 5) + h) + (unsigned char)*s++;
+    return h % HASH_SIZE;
+}
 
 static void add_func_name(const char* name) {
-    for (int i = 0; i < g_func_count; i++) {
-        if (strcmp(g_func_names[i], name) == 0) return;
+    unsigned int h = hash_str(name);
+    while (g_name_hash[h] >= 0) {
+        if (strcmp(g_func_names[g_name_hash[h]], name) == 0) return;
+        h = (h + 1) % HASH_SIZE;
     }
     g_func_names[g_func_count] = strdup(name);
+    g_name_hash[h] = g_func_count;
     g_func_count++;
 }
 
 static int is_func_known(const char* name) {
-    for (int i = 0; i < g_func_count; i++) {
-        if (strcmp(g_func_names[i], name) == 0) return 1;
+    unsigned int h = hash_str(name);
+    while (g_name_hash[h] >= 0) {
+        if (strcmp(g_func_names[g_name_hash[h]], name) == 0) return 1;
+        h = (h + 1) % HASH_SIZE;
     }
     return 0;
 }
@@ -167,8 +184,10 @@ int main(int argc, char** argv) {
     
     g_func_names = malloc(MAX_FUNC * sizeof(char*));
     if (!g_func_names) return 1;
+    memset(g_name_hash, -1, sizeof(g_name_hash));
     
     printf("Phase 1: Loading function names...\n");
+    fflush(stdout);
     
     FILE* fp = fopen(meta_file, "r");
     if (!fp) {
@@ -176,10 +195,12 @@ int main(int argc, char** argv) {
         return 1;
     }
     
+    int line_count = 0;
     char* line = NULL;
     size_t line_len = 0;
     
     while (getline(&line, &line_len, fp) != -1) {
+        line_count++;
         char* name_p = strstr(line, "\"name\":\"");
         char* kind_p = strstr(line, "\"kind\":\"");
         if (!name_p || !kind_p) continue;
@@ -212,6 +233,7 @@ int main(int argc, char** argv) {
     memset(processed, 0, sizeof(processed));
     
     while (getline(&line, &line_len, fp) != -1) {
+        line_count++;
         char* name_p = strstr(line, "\"name\":\"");
         char* file_p = strstr(line, "\"file\":\"");
         char* kind_p = strstr(line, "\"kind\":\"");
