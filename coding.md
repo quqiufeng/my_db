@@ -34,7 +34,7 @@
 | OpenResty | /opt/openresty-1.31.1.1 | /code/openresty | /code/openresty | ✅ 2026-06-10 | 已完成 |
 | Redis | 待下载 | /code/redis | /code/redis | 待探索 | — |
 | stable-diffusion.cpp | https://github.com/leejet/stable-diffusion.cpp | /code/stable-diffusion.cpp | /code/stable-diffusion.cpp | 待探索 | — |
-| llama.cpp | 待下载 | /code/llama.cpp | /code/llama.cpp | 待探索 | — |
+| llama.cpp | /opt/llama.cpp | /code/llama.cpp | /code/llama.cpp | ✅ 2026-06-10 | 已完成 |
 | PostgreSQL | 待下载 | /code/postgresql | /code/postgresql | 待探索 | — |
 | SQLite | 待下载 | /code/sqlite | /code/sqlite | 待探索 | — |
 | RocksDB | 待下载 | /code/rocksdb | /code/rocksdb | 待探索 | — |
