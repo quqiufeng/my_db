@@ -12,8 +12,8 @@
 
 #define DIM 768
 #define MAX_SEQ 512
-#define BATCH_SIZE 64
-#define MAX_TEXT_LEN 8192
+#define BATCH_SIZE 256
+#define MAX_TEXT_LEN 16384
 
 typedef struct {
     char* name;

@@ -559,7 +559,7 @@ int main(int argc, char** argv) {
            skip_chunks && skip_callgraph && skip_dataflow ? "register only" :
            "full import");
     
-    g_cache = cache_open(cache_dir, 2ULL * 1024 * 1024 * 1024);
+    g_cache = cache_open(cache_dir, 4ULL * 1024 * 1024 * 1024);
     if (!g_cache) {
         fprintf(stderr, "[ERROR] Failed to open cache: %s\n", cache_dir);
         return 1;
