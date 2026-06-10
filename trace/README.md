@@ -264,6 +264,7 @@ LuaJIT 运行时感知:
 难度          ✅ 已有方案                           🔲 每个语言独立实现
 ```
 
+# 对于已索引的项目，code_search 直接定位
 ### 5.4 没有调试符号的兜底
 
 ```bash
@@ -273,8 +274,43 @@ apt install nginx-dbg           # Debian/Ubuntu
 
 # 或者自己编译带 -g 的版本
 ./configure --with-debug && make -j
+```
 
-# 对于已索引的项目，code_search 直接定位
+对于已索引的项目，code_search 直接定位：
+
+```
+cache_query "lj_gc_step" --repo /code/LuaJIT/LuaJIT --type context
+```
+
+---
+
+### 5.5 容器和虚拟机中的分析
+
+运行时感知的映射表存在**进程堆里**，和进程跑在哪里无关：
+
+```
+bare metal              Docker 容器              QEMU 虚拟机
+perf 采到 0x3b3faad    perf 采到 0x3b3faad    perf 采到 0x3b3faad
+     ↓                       ↓                       ↓
+V8 Isolate->code_cache  同一张表               同一张表
+     ↓                       ↓                       ↓
+sortData (app.js:42)    sortData (app.js:42)    sortData (app.js:42)
+```
+
+容器引入的额外问题属于运维层面，不是技术壁垒：
+
+| 问题 | 说明 | 对策 |
+|------|------|------|
+| 访问目标进程内存 | 宿主机默认看不到容器进程的 /proc | 容器加 `--pid=host`，或在容器内运行 agent |
+| 短生命周期容器 | 采完之前容器就退出了 | 先起探针，再启动容器 |
+| 调试符号 | 容器镜像通常剥离了符号 | 依赖中央符号数据库，或 code_search 替代 |
+| 内核探针 | 容器共享宿主机内核 | kprobe/tracepoint 无需特殊配置 |
+
+**核心结论**：容器和虚拟化不改变运行时感知的本质——映射表一直在进程的堆内存里，结构体布局不因容器而改变。需要解决的是从宿主机访问目标进程内存的权限问题。
+
+---
+
+## 六、火焰图
 cache_query "lj_gc_step" --repo /code/LuaJIT/LuaJIT --type context
 ```
 
