@@ -8,6 +8,33 @@
 >
 > **运行时感知（运行时映射表提取）**: [RUNTIME.md](RUNTIME.md)
 
+### 当前能力
+
+| 能力 | 状态 | 说明 |
+|------|------|------|
+| **on-CPU 热点** (CPU 花在哪) | ✅ 已实现 | `probe cpu` → perf 采样 → TOP 10 柱状图 |
+| **off-CPU 分析** (进程为什么空转) | ✅ 已实现 | `probe offcpu` → 按 I/O/锁/抢占 分类 |
+| **函数级耗时** | ✅ 已实现 | `probe "func" { collect(duration_ns: hist) }` → p50/p90/p99 |
+| **内存分配热点** | ✅ 已实现 | `probe "malloc" { collect(bytes: sum) }` → TOP 10 |
+| **调用关系** | ✅ 已实现 | `collect(caller)` + `collect(backtrace)` |
+| **探测后端** | ✅ 已实现 | perf / SystemTap / eBPF / DTrace / GDB 自动切换 |
+| **探针 DSL 编译器** | ✅ 已实现 | `.trace` → 各后端脚本，支持 --output/--pid |
+| **ASCII 柱状图报告** | ✅ 已实现 | `tracec parse | tracec report` → TOP 10 |
+| **perf report → JSON** | ✅ 已实现 | `tracec parse perf.report` |
+| | | |
+| **LuaJIT 运行时感知** | ✅ 已实现 | `tracec extract luajit <pid>` → JIT MCode 映射表 |
+| **V8/Node.js 运行时感知** | 🔲 可实现 | `tracec extract v8 <pid>` → 遍历 code_cache {RUNTIME.md} |
+| **CPython 运行时感知** | 🔲 可实现 | `tracec extract cpython <pid>` → 遍历 frame 链表 |
+| **PHP 运行时感知** | 🔲 可实现 | `tracec extract php <pid>` → 读 zend_op_array |
+| **JVM 运行时感知** | 🔲 可实现 | 走 perf-map-agent 标准工具链 |
+| | | |
+| **采样 → extract → code_search 自动串联** | ⬜ 待规划 | 一键定位到源码行 + 调用关系 |
+| **火焰图自动生成** | ⬜ 待规划 | 当前需手动调用 flamegraph.pl |
+| **容器自动发现** | ⬜ 待规划 | 当前需 `--pid=host` |
+| **持久化存储** | ⬜ 待规划 | 集成 my_db KV Cache |
+
+> 带 🔲 标识的能力已有完整的实现路径（见 RUNTIME.md），需要时补齐对应的 `extract_xxx()` 即可，每个约 100-200 行 GDB Python。
+
 ---
 
 ## 一、一句话
