@@ -350,10 +350,94 @@ static void gen_ebpf_probe(FILE *out, const Probe *p) {
         fprintf(out, "}\n");
         return;
     }
+    // 函数探针
     fprintf(out, "uprobe:/proc/\"$PID\"/exe:\"%s\"\n", p->target);
     fprintf(out, "{\n");
-    fprintf(out, "  @[ustack] = count();\n");
+    for (int j = 0; j < p->collect_count; j++) {
+        switch (p->collects[j].type) {
+            case COLLECT_CALL_COUNT:
+                fprintf(out, "  @count[\"%s\"] = count();\n", p->target);
+                break;
+            case COLLECT_CALLER:
+                fprintf(out, "  @caller[\"%s\"] = ustack(2);\n", p->target);
+                break;
+            case COLLECT_BACKTRACE:
+                fprintf(out, "  @stack[\"%s\"] = ustack();\n", p->target);
+                break;
+            case COLLECT_DURATION:
+                fprintf(out, "  @ts[\"%s\", tid] = nsecs;\n", p->target);
+                break;
+            case COLLECT_ARG:
+                fprintf(out, "  @arg%d[\"%s\"] = arg%d;\n", p->collects[j].arg_index, p->target, p->collects[j].arg_index);
+                break;
+            case COLLECT_BYTES:
+                fprintf(out, "  @bytes[\"%s\"] += arg0;\n", p->target);
+                break;
+            default:
+                break;
+        }
+    }
     fprintf(out, "}\n");
+    // 出口探针
+    int need_return = 0;
+    for (int j = 0; j < p->collect_count; j++)
+        if (p->collects[j].type == COLLECT_DURATION || p->collects[j].type == COLLECT_RETURN) need_return = 1;
+    if (need_return) {
+        fprintf(out, "uretprobe:/proc/\"$PID\"/exe:\"%s\"\n", p->target);
+        fprintf(out, "{\n");
+        fprintf(out, "  $dur = nsecs - @ts[\"%s\", tid];\n", p->target);
+        fprintf(out, "  @dur_hist[\"%s\"] = hist($dur);\n", p->target);
+        fprintf(out, "  delete(@ts[\"%s\", tid]);\n", p->target);
+        fprintf(out, "}\n");
+    }
+}
+
+/* ============================================================
+ * DTrace 后端生成 (macOS/FreeBSD)
+ * ============================================================ */
+static void gen_dtrace_probe(FILE *out, const Probe *p) {
+    if (strcmp(p->target, "cpu") == 0) {
+        fprintf(out, "profile-99hz\n");
+        fprintf(out,"/ { @[ustack()] = count(); }\n");
+        return;
+    }
+    fprintf(out, "pid$1::%s:entry\n", p->target);
+    fprintf(out,"/ { @[ustack()] = count(); }\n");
+
+    int need_return = 0;
+    for (int j = 0; j < p->collect_count; j++)
+        if (p->collects[j].type == COLLECT_DURATION || p->collects[j].type == COLLECT_RETURN) need_return = 1;
+    if (need_return) {
+        fprintf(out, "pid$1::%s:return\n", p->target);
+        fprintf(out, "/ { @[ustack()] = count(); }\n");
+    }
+}
+
+/* ============================================================
+ * GDB Python 后端生成 (兜底)
+ * ============================================================ */
+static void gen_gdb_probe(FILE *out, const Probe *p) {
+    fprintf(out, "# GDB Python sampler\n");
+    fprintf(out, "# usage: gdb -batch -x sampler.py -p $PID\n\n");
+    fprintf(out, "import gdb\n");
+    fprintf(out, "import time\n\n");
+    fprintf(out, "frames = []\n");
+    fprintf(out, "for _ in range(%d):\n", p->duration_sec);
+    fprintf(out, "  try:\n");
+    fprintf(out, "    frame = gdb.selected_thread().frame()\n");
+    fprintf(out, "    while frame:\n");
+    fprintf(out, "      sal = frame.find_sal()\n");
+    fprintf(out, "      if sal.symtab:\n");
+    fprintf(out, "        frames.append((frame.name(), sal.symtab.filename, sal.line))\n");
+    fprintf(out, "      frame = frame.older()\n");
+    fprintf(out, "  except:\n");
+    fprintf(out, "    pass\n");
+    fprintf(out, "  time.sleep(1)\n\n");
+    fprintf(out, "# print results\n");
+    fprintf(out, "from collections import Counter\n");
+    fprintf(out, "hot = Counter(frames).most_common(20)\n");
+    fprintf(out, "for (func, file, line), count in hot:\n");
+    fprintf(out, "  print(f\"{count:5d}  {func}  {file}:{line}\")\n");
 }
 
 /* ============================================================
@@ -366,6 +450,7 @@ static int detect(void) {
     if (system("which stap  >/dev/null 2>&1") == 0) { printf("  stap ✅ (SystemTap, 功能最强)\n"); has = 1; }
     if (system("which bpftrace >/dev/null 2>&1") == 0) { printf("  ebpf ✅ (bpftrace, 低开销)\n"); has = 1; }
     if (system("which dtrace >/dev/null 2>&1") == 0) { printf("  dtrace ✅ (macOS/BSD)\n"); has = 1; }
+    if (system("which gdb >/dev/null 2>&1") == 0) { printf("  gdb   ✅ (兜底, 慢但通用)\n"); has = 1; }
     if (!has) { printf("  (none) 安装 perf: apt install linux-tools-common\n"); }
     printf("\nrecommended: ");
     if (system("which stap >/dev/null 2>&1") == 0) printf("stap (SystemTap)\n");
@@ -393,11 +478,15 @@ static void gen_script(FILE *out, const TraceScript *s, const char *target) {
         if (strcmp(target, "perf") == 0) gen_perf_probe(out, &s->probes[i]);
         else if (strcmp(target, "stap") == 0) gen_stap_probe(out, &s->probes[i]);
         else if (strcmp(target, "ebpf") == 0) gen_ebpf_probe(out, &s->probes[i]);
+        else if (strcmp(target, "dtrace") == 0) gen_dtrace_probe(out, &s->probes[i]);
+        else if (strcmp(target, "gdb") == 0) gen_gdb_probe(out, &s->probes[i]);
         fprintf(out, "\n");
     }
 
     if (strcmp(target, "stap") == 0) {
         fprintf(out, "# 运行: stap -x $PID probe.stp\n");
+    } else if (strcmp(target, "gdb") == 0) {
+        fprintf(out, "# 运行: gdb -batch -x trace_gdb.py -p $PID\n");
     }
 }
 

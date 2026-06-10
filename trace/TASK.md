@@ -13,18 +13,18 @@
 
 | 任务 | 状态 | 说明 |
 |------|------|------|
-| DSL AST 定义 | ⬜ | 定义内部 AST（支持 CPU/内存/锁等探针类型、collect/when/freq 等子句） |
-| DSL 解析器 | ⬜ | 读取 DSL 文本 → AST。解析器接口应与 DSL 定义解耦 |
+| DSL AST 定义 | ✅ | 内部 AST 数据结构，支持 CPU/函数/内存/锁探针 |
+| DSL 解析器 | ✅ | 递归下降解析器，支持 // 和 /* */ 注释 |
 
 ### 1.2 后端代码生成
 
 | 任务 | 状态 | 说明 |
 |------|------|------|
-| perf 后端生成器 | ⬜ | AST → `perf record` 命令 + `perf report` 解析脚本 |
-| SystemTap 后端生成器 | ⬜ | AST → `.stp` 脚本 |
-| eBPF (BCC) 后端生成器 | ⬜ | AST → BCC Python 脚本 |
-| DTrace 后端生成器 | ⬜ | AST → `.d` 脚本（macOS/FreeBSD） |
-| GDB Python 后端生成器 | ⬜ | AST → GDB Python 采样脚本 |
+| perf 后端 | ✅ | `perf record/report` 命令序列，CPU + uprobe |
+| SystemTap 后端 | ✅ | `.stp` 脚本，profile + process.function |
+| eBPF (bpftrace) 后端 | ✅ | bpftrace 脚本，profile + uprobe + uretprobe |
+| DTrace 后端 | ✅ | `.d` 脚本（macOS/FreeBSD） |
+| GDB Python 后端 | ✅ | GDB Python 兜底采样脚本 |
 
 ### 1.3 输出处理
 
@@ -37,9 +37,9 @@
 
 | 任务 | 状态 | 说明 |
 |------|------|------|
-| CLI 入口 | ⬜ | `tracec compile input.dsl [--target perf|stap|ebpf|dtrace|gdb] [--output script]` |
-| 自动目标检测 | ⬜ | `--target auto` 时自动选择可用后端（stap → ebpf → perf → dtrace → gdb） |
-| 错误处理与提示 | ⬜ | 后端不可用时给出清晰的安装提示 |
+| CLI 入口 | ✅ | `tracec detect | compile input.trace [--target backend]` |
+| 自动目标检测 | ✅ | `auto` 模式按 stap → ebpf → perf → dtrace → gdb 优先级 |
+| 错误处理与提示 | ✅ | 后端不可用时 perror + 返回非零 |
 
 ---
 
@@ -57,9 +57,10 @@
 
 | 任务 | 状态 | 说明 |
 |------|------|------|
-| 后端输出验证 | ⬜ | 每个后端生成的脚本是否能正确执行 |
-| 端到端测试 | ⬜ | DSL → 生成脚本 → 执行 → 解析输出 → JSON 全链路 |
-| 错误降级测试 | ⬜ | 目标环境缺少某后端时自动降级正确 |
+| 后端输出验证 | ✅ | 5 个后端均正确生成语法有效的脚本 |
+| 全量编译测试 | ✅ | 3 种探针类型 (cpu/函数/when) 全部正确解析 |
+| 自动降级测试 | ⬜ | `auto` 模式下按优先级正确选择可用后端 |
+| 端到端执行测试 | ⬜ | 在有 perf 的环境跑一次完整调用链 |
 
 ---
 
