@@ -45,6 +45,7 @@
 | LuaJIT | https://github.com/LuaJIT/LuaJIT | /code/luajit | /code/LuaJIT/LuaJIT | ✅ 2026-06-10 | 已完成 |
 | HotSpot JVM | 待下载 | /code/hotspot | /code/hotspot | 待探索 | — |
 | mruby | 待下载 | /code/mruby | /code/mruby | 待探索 | — |
+| Zig | https://github.com/ziglang/zig | /code/zig | /code/zig | 待探索 | — |
 | PHP | /opt/php/src | /code/php | /code/php | ✅ 2026-06-09 | 已完成 |
 
 
