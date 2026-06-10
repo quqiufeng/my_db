@@ -1,14 +1,19 @@
 // full.trace — 全维度探针示例
-// 覆盖: CPU 分布 | 内存分布 | 代码级耗时 | 代码级内存占用
+// 覆盖: CPU 分布 | off-CPU 分布 | 内存分布 | 代码级耗时 | 代码级内存占用
 
-// === 1. CPU 使用分布 ===
+// === 1. on-CPU 使用分布 ===
 // on-CPU 热点，99Hz 采样 60 秒
 probe cpu {
     freq 99
     duration 60
 }
 
-// === 2. off-CPU 时间分布（锁等待、I/O 阻塞）===
+// === 2. off-CPU 时间分布 ===
+// 进程被调度出去的原因: 谁在等什么
+probe offcpu {
+    duration 60
+}
+
 // 通过 sched:sched_switch tracepoint 采集
 probe "t:sched:sched_switch" {
     collect(backtrace)

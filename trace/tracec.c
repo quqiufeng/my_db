@@ -43,19 +43,37 @@ static int cmd_avail(const char *cmd) {
     return 0;
 }
 
-// 读取整个文件到字符串 (调用者 free)
+// 读取整个文件到字符串 (调用者 free, 兼容 pipe)
 static char *read_file(const char *path, long *out_len) {
     FILE *fp = fopen(path, "r");
     if (!fp) { perror(path); return NULL; }
-    fseek(fp, 0, SEEK_END);
-    long len = ftell(fp);
-    fseek(fp, 0, SEEK_SET);
-    char *buf = malloc(len + 1);
+
+    // 尝试 fseek/ftell (仅普通文件)
+    long len = 0;
+    if (fseek(fp, 0, SEEK_END) == 0) {
+        len = ftell(fp);
+        fseek(fp, 0, SEEK_SET);
+    }
+
+    // 管道模式: 逐块读取直到 EOF
+    size_t cap = len > 0 ? (size_t)len + 1 : 65536;
+    char *buf = malloc(cap);
     if (!buf) { fclose(fp); return NULL; }
-    fread(buf, 1, len, fp);
-    buf[len] = '\0';
+
+    size_t total = 0;
+    size_t n;
+    while ((n = fread(buf + total, 1, cap - total - 1, fp)) > 0) {
+        total += n;
+        if (total >= cap - 1) {
+            cap *= 2;
+            char *nb = realloc(buf, cap);
+            if (!nb) { free(buf); fclose(fp); return NULL; }
+            buf = nb;
+        }
+    }
+    buf[total] = '\0';
     fclose(fp);
-    if (out_len) *out_len = len;
+    if (out_len) *out_len = (long)total;
     return buf;
 }
 
@@ -277,6 +295,11 @@ static int parse_target(Probe *p) {
         g_input += 3;
         return 0;
     }
+    if (strncmp(g_input, "offcpu", 6) == 0 && !isalnum(g_input[6])) {
+        strcpy(p->target, "offcpu");
+        g_input += 6;
+        return 0;
+    }
     return parse_string(p->target, sizeof(p->target));
 }
 
@@ -363,6 +386,24 @@ static void gen_perf_probe(FILE *out, const Probe *p) {
         fprintf(out, "echo ''\n");
         fprintf(out, "echo '=== CPU TOP 20 ==='\n");
         fprintf(out, "perf report -i perf.data -n --stdio 2>/dev/null | head -30\n");
+    } else if (strcmp(p->target, "offcpu") == 0) {
+        int dur = p->duration_sec > 0 ? p->duration_sec : 60;
+        fprintf(out, "# off-CPU: 追踪进程被调度出去的原因\n");
+        fprintf(out, "perf record -e sched:sched_switch -g -p \"$PID\" --sleep %d -o perf.data 2>&1\n\n", dur);
+        fprintf(out, "# 按 off-CPU 原因分类统计\n");
+        fprintf(out, "echo '=== off-CPU 原因分布 ==='\n");
+        fprintf(out, "perf script -i perf.data -F trace:event,trace:prev_state,comm,pid 2>/dev/null | \\\n");
+        fprintf(out, "  awk '{a[$3]++} END{for(k in a) printf \"%%5d  %%s\\n\", a[k], k}' | sort -rn | head -10\n\n");
+        fprintf(out, "# 生成 off-CPU 火焰图数据\n");
+        fprintf(out, "perf script -i perf.data -F trace:event,trace:prev_state,ip,sym 2>/dev/null | \\\n");
+        fprintf(out, "  awk -v state=\"${STATE:-1}\" '$2==state' | \\\n");
+        fprintf(out, "  stackcollapse-perf.pl 2>/dev/null > offcpu.folded 2>&1\n");
+        fprintf(out, "if [ -s offcpu.folded ]; then\n");
+        fprintf(out, "  flamegraph.pl --color=java offcpu.folded > offcpu.svg 2>&1\n");
+        fprintf(out, "  echo \"flame graph: offcpu.svg\"\n");
+        fprintf(out, "fi\n");
+        fprintf(out, "echo ''\n");
+        fprintf(out, "echo '注: prev_state=1 等I/O, 2 等锁/磁盘, 0 被抢占'\n");
     } else {
         // 函数探针: 动态添加 uprobe
         fprintf(out, "perf probe -x /proc/\"$PID\"/exe \"%s\" 2>&1\n", p->target);
@@ -380,6 +421,13 @@ static void gen_stap_probe(FILE *out, const Probe *p) {
         fprintf(out, "probe profile-%d.hz\n", p->freq);
         fprintf(out, "{\n");
         fprintf(out, "  printf(\"%%s\\n\", usymname(ubacktrace()));\n");
+        fprintf(out, "}\n");
+        return;
+    }
+    if (strcmp(p->target, "offcpu") == 0) {
+        fprintf(out, "probe scheduler.ctxswitch\n");
+        fprintf(out, "{\n");
+        fprintf(out, "  printf(\"pid:%%d -> %%d state:%%d\\n\", prev_pid, next_pid, task_state(prev_task));\n");
         fprintf(out, "}\n");
         return;
     }
@@ -434,6 +482,14 @@ static void gen_ebpf_probe(FILE *out, const Probe *p) {
         fprintf(out, "}\n");
         return;
     }
+    if (strcmp(p->target, "offcpu") == 0) {
+        fprintf(out, "tracepoint:sched:sched_switch\n");
+        fprintf(out, "{\n");
+        fprintf(out, "  @reason[args->prev_state] = count();\n");
+        fprintf(out, "  @[kstack, args->prev_state] = count();\n");
+        fprintf(out, "}\n");
+        return;
+    }
     // 函数探针
     fprintf(out, "uprobe:/proc/\"$PID\"/exe:\"%s\"\n", p->target);
     fprintf(out, "{\n");
@@ -482,6 +538,11 @@ static void gen_ebpf_probe(FILE *out, const Probe *p) {
 static void gen_dtrace_probe(FILE *out, const Probe *p) {
     if (strcmp(p->target, "cpu") == 0) {
         fprintf(out, "profile-99hz\n");
+        fprintf(out,"/ { @[ustack()] = count(); }\n");
+        return;
+    }
+    if (strcmp(p->target, "offcpu") == 0) {
+        fprintf(out, "sched:::\n");
         fprintf(out,"/ { @[ustack()] = count(); }\n");
         return;
     }

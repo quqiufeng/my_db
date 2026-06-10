@@ -36,9 +36,22 @@ probe <target> {
 probe cpu {
     ...
 }
+
+probe offcpu {
+    ...
+}
 ```
 
-采集 CPU 调用栈分布。
+`probe cpu` 采集 CPU 调用栈分布（on-CPU 热点）。
+`probe offcpu` 采集进程被调度出去的原因分布（off-CPU 分析），包括：
+
+```
+prev_state 含义:
+  0: TASK_RUNNING     → 被抢占（CPU 时间片用完）
+  1: TASK_INTERRUPTIBLE  → 等待 I/O（磁盘/网络）
+  2: TASK_UNINTERRUPTIBLE → 等待锁或磁盘
+  4: TASK_STOPPED     → 停止
+```
 
 ### 3.2 函数
 
