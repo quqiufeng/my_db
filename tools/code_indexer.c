@@ -736,15 +736,34 @@ int main(int argc, char** argv) {
     
     printf("Phase 3: Waiting for workers...\n");
     int completed = 0;
+    int failed_workers[64];
+    int failed_count = 0;
     for (int i = 0; i < num_workers; i++) {
         if (pids[i] > 0) {
             int status;
             waitpid(pids[i], &status, 0);
-            if (WIFEXITED(status) && WEXITSTATUS(status) == 0) completed++;
-            else fprintf(stderr, "Worker %d failed\n", i);
+            if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+                completed++;
+            } else {
+                int code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+                fprintf(stderr, "[ERROR] Worker %d failed (exit code %d, %d files)\n",
+                        i, code, workers[i].file_count);
+                if (failed_count < 64) failed_workers[failed_count++] = i;
+            }
         }
     }
-    printf("  %d/%d workers completed\n\n", completed, num_workers);
+    printf("  %d/%d workers completed", completed, num_workers);
+    if (failed_count > 0) {
+        printf(" [WARNING: %d worker(s) failed!]", failed_count);
+        printf("\n  Failed workers: ");
+        for (int f = 0; f < failed_count; f++) {
+            printf("%d", failed_workers[f]);
+            if (f < failed_count - 1) printf(", ");
+        }
+        printf("\n  Check stderr output above for details.\n");
+    } else {
+        printf("\n");
+    }
     
     struct timespec end_time;
     clock_gettime(CLOCK_MONOTONIC, &end_time);

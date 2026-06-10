@@ -403,42 +403,41 @@ static void import_dataflow(const char* analysis_dir, const char* namespace) {
         }
         json_decref(val);
         
-        // Group by function
-        json_t* func_vars = json_object();
+    }
+    
+    // Build function index: aggregate all variables per function
+    // (single pass after variable storage avoids N*M cache_set calls)
+    json_t* func_index = json_object();
+    json_object_foreach(root, var_name, var_data) {
+        json_t* occurrences = json_object_get(var_data, "occurrences");
+        if (!occurrences || !json_is_array(occurrences)) continue;
         size_t idx;
         json_t* occ;
         json_array_foreach(occurrences, idx, occ) {
             const char* func = json_string_value(json_object_get(occ, "func"));
             if (!func) func = "unknown";
-            json_t* arr = json_object_get(func_vars, func);
+            json_t* arr = json_object_get(func_index, func);
             if (!arr) {
                 arr = json_array();
-                json_object_set_new(func_vars, func, arr);
+                json_object_set_new(func_index, func, arr);
             }
-            json_array_append(arr, occ);
+            json_t* entry = json_object();
+            json_object_set_new(entry, "var", json_string(var_name));
+            json_object_set_new(entry, "line", json_integer(
+                json_integer_value(json_object_get(occ, "line"))));
+            json_array_append_new(arr, entry);
         }
-        
-        // Store function-level data
-        const char* func_name;
-        json_t* vars;
-        json_object_foreach(func_vars, func_name, vars) {
-            char fkey[512];
-            snprintf(fkey, sizeof(fkey), "%s/dataflow/func/%s", namespace, func_name);
-            json_t* fval = json_object();
-            json_object_set_new(fval, "function", json_string(func_name));
-            json_object_set_new(fval, "variable_count", json_integer(json_array_size(vars)));
-            json_object_set_new(fval, "variables", json_incref(vars));
-            
-            char* fstr = json_dumps(fval, JSON_COMPACT);
-            if (fstr) {
-                safe_set_json(fkey, fstr);
-                free(fstr);
-            }
-            json_decref(fval);
-        }
-        
-        json_decref(func_vars);
     }
+    
+    // Store function index as single bulk entry
+    char fkey[512];
+    snprintf(fkey, sizeof(fkey), "%s/dataflow/_func_index", namespace);
+    char* fstr = json_dumps(func_index, JSON_COMPACT);
+    if (fstr) {
+        safe_set_json(fkey, fstr);
+        free(fstr);
+    }
+    json_decref(func_index);
     
     json_decref(root);
     
