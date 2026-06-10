@@ -5,6 +5,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <sys/wait.h>
+#include <errno.h>
 #include <ctype.h>
 #include <time.h>
 #include "cache.h"
@@ -350,16 +351,17 @@ static void write_chunk(FILE* fp, FILE* text_fp, FILE* meta_fp,
     }
 }
 
-static void worker_process(worker_t* worker, int worker_id) {
+static int worker_process(worker_t* worker, int worker_id) {
     printf("[Worker %d] Processing %d files...\n", worker_id, worker->file_count);
     
     // Write file list to temp file (avoid command line length limit)
     char file_list[256];
     snprintf(file_list, sizeof(file_list), "/tmp/code_indexer_files_%d.txt", worker_id);
+    unlink(file_list);
     FILE* list_fp = fopen(file_list, "w");
     if (!list_fp) {
         fprintf(stderr, "[Worker %d] Failed to create file list\n", worker_id);
-        return;
+        return 1;
     }
     for (int i = 0; i < worker->file_count; i++) {
         fprintf(list_fp, "%s\n", worker->files[i]);
@@ -374,28 +376,31 @@ static void worker_process(worker_t* worker, int worker_id) {
         "ctags-universal --output-format=json --fields=+nKzSe "
         "--extras=+r+f --sort=no -L %s > %s 2>/dev/null",
         file_list, output_file);
+    unlink(output_file);
     
     int ret = system(cmd);
     unlink(file_list); // Clean up file list
     
     if (ret != 0) {
         fprintf(stderr, "[Worker %d] ctags failed: %d\n", worker_id, ret);
-        return;
+        return 1;
     }
     
     FILE* ctags_fp = fopen(output_file, "r");
     if (!ctags_fp) {
         fprintf(stderr, "[Worker %d] Failed to open ctags output\n", worker_id);
-        return;
+        return 1;
     }
     
     char chunk_file[256];
     snprintf(chunk_file, sizeof(chunk_file), "/tmp/code_indexer_chunks_%d.jsonl", worker_id);
+    // Remove old file first (handles protected_regular on modern kernels)
+    unlink(chunk_file);
     FILE* chunk_fp = fopen(chunk_file, "w");
     if (!chunk_fp) {
-        fprintf(stderr, "[Worker %d] Failed to create chunk file\n", worker_id);
+        fprintf(stderr, "[Worker %d] Failed to create chunk file: %s\n", worker_id, strerror(errno));
         fclose(ctags_fp);
-        return;
+        return 1;
     }
 
     char text_file[256];
@@ -620,6 +625,7 @@ static void worker_process(worker_t* worker, int worker_id) {
     unlink(output_file);
 
     printf("[Worker %d] Done: %d chunks -> %s\n", worker_id, chunk_count, chunk_file);
+    return 0;
 }
 
 int main(int argc, char** argv) {
@@ -718,8 +724,8 @@ int main(int argc, char** argv) {
             perror("fork");
             continue;
         } else if (pid == 0) {
-            worker_process(&workers[i], i);
-            exit(0);
+            int ret = worker_process(&workers[i], i);
+            exit(ret);
         } else {
             pids[i] = pid;
         }
