@@ -186,7 +186,7 @@ int main(int argc, char** argv) {
     if (!g_func_names) return 1;
     memset(g_name_hash, -1, sizeof(g_name_hash));
     
-    printf("Phase 1: Loading function names...\n");
+    printf("Phase 1: Loading functions and bodies\n");
     fflush(stdout);
     
     FILE* fp = fopen(meta_file, "r");
@@ -195,109 +195,69 @@ int main(int argc, char** argv) {
         return 1;
     }
     
-    int line_count = 0;
     char* line = NULL;
     size_t line_len = 0;
+    int processed_count = 0;
     
+    // Single pass: extract names + bodies together
     while (getline(&line, &line_len, fp) != -1) {
-        line_count++;
-        char* name_p = strstr(line, "\"name\":\"");
-        char* kind_p = strstr(line, "\"kind\":\"");
-        if (!name_p || !kind_p) continue;
-        
-        name_p += 8;
-        kind_p += 8;
-        
-        char kind[32] = {0};
-        int i = 0;
-        while (*kind_p && *kind_p != '"' && i < 31) kind[i++] = *kind_p++;
-        
-        if (strcmp(kind, "function") != 0 && strcmp(kind, "method") != 0) continue;
-        
-        char name[256] = {0};
-        i = 0;
-        while (*name_p && *name_p != '"' && i < 255) name[i++] = *name_p++;
-        
-        add_func_name(name);
-        if (g_func_count >= MAX_FUNC) break;
-    }
-    fclose(fp);
-    printf("  Found %d unique functions\n", g_func_count);
-    
-    printf("Phase 2: Loading function bodies...\n");
-    
-    fp = fopen(meta_file, "r");
-    if (!fp) return 1;
-    
-    static int processed[MAX_FUNC];
-    memset(processed, 0, sizeof(processed));
-    
-    while (getline(&line, &line_len, fp) != -1) {
-        line_count++;
         char* name_p = strstr(line, "\"name\":\"");
         char* file_p = strstr(line, "\"file\":\"");
         char* kind_p = strstr(line, "\"kind\":\"");
         char* line_p = strstr(line, "\"line_start\":");
         char* content_p = strstr(line, "\"content\":\"");
-        if (!name_p || !file_p || !kind_p || !content_p) continue;
+        if (!name_p || !kind_p) continue;
         
         name_p += 8;
-        file_p += 8;
         kind_p += 8;
-        line_p += 13;
-        content_p += 11;
-        
         char kind[32] = {0};
         int i = 0;
         while (*kind_p && *kind_p != '"' && i < 31) kind[i++] = *kind_p++;
-        
         if (strcmp(kind, "function") != 0 && strcmp(kind, "method") != 0) continue;
         
         char name[256] = {0};
         i = 0;
         while (*name_p && *name_p != '"' && i < 255) name[i++] = *name_p++;
+        if (!name[0]) continue;
         
-        char file[512] = {0};
-        i = 0;
-        while (*file_p && *file_p != '"' && i < 511) file[i++] = *file_p++;
+        add_func_name(name);
         
-        int line_start = atoi(line_p);
-        
-        // 查找函数索引
-        int func_idx = -1;
-        for (int j = 0; j < g_func_count; j++) {
-            if (strcmp(g_func_names[j], name) == 0) {
-                func_idx = j;
-                break;
+        // If we have body info, add the body too
+        if (file_p && content_p) {
+            file_p += 7;
+            char file[512] = {0};
+            i = 0;
+            while (*file_p && *file_p != '"' && i < 511) file[i++] = *file_p++;
+            
+            int line_start = line_p ? atoi(line_p + 13) : 0;
+            content_p += 11;
+            
+            // Extract content
+            char* content = malloc(line_len);
+            if (content) {
+                const char* p = content_p;
+                int j = 0;
+                while (*p) {
+                    if (*p == '\\' && *(p+1)) {
+                        content[j++] = *(++p);
+                        p++;
+                    } else if (*p == '"') {
+                        break;
+                    } else {
+                        content[j++] = *p++;
+                    }
+                }
+                content[j] = '\0';
+                add_body(name, file, line_start, content);
+                free(content);
+                processed_count++;
             }
         }
-        if (func_idx < 0) continue;
-        if (processed[func_idx]) continue;
-        processed[func_idx] = 1;
         
-        // Extract content
-        char* content = malloc(line_len);
-        if (!content) continue;
-        
-        const char* p = content_p;
-        int j = 0;
-        while (*p) {
-            if (*p == '\\' && *(p+1)) {
-                content[j++] = *(++p);
-                p++;
-            } else if (*p == '"') {
-                break;
-            } else {
-                content[j++] = *p++;
-            }
-        }
-        content[j] = '\0';
-        
-        add_body(name, file, line_start, content);
-        free(content);
+        if (g_func_count >= MAX_FUNC) break;
     }
     fclose(fp);
-    printf("  Loaded %d function bodies\n", g_body_count);
+    printf("  Found %d unique functions, loaded %d bodies\n", g_func_count, processed_count);
     
     printf("Phase 3: Building call graph with arguments...\n");
     
