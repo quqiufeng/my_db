@@ -1,0 +1,463 @@
+/*
+ * tracec.c — 探针 DSL 编译器
+ *
+ * 将 .trace 探针描述编译为 perf/SystemTap/eBPF 等后端追踪脚本。
+ *
+ * 用法:
+ *   tracec detect                   # 列出可用后端
+ *   tracec compile input.trace      # 编译为 Shell 脚本 (自动选后端)
+ *   tracec compile input.trace --target perf
+ *   tracec compile input.trace --target stap
+ *
+ * 构建:
+ *   gcc -o tracec tracec.c -lm
+ */
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <ctype.h>
+#include <unistd.h>
+
+/* ============================================================
+ * DSL 语法定义 (简单递归下降解析器)
+ * ============================================================
+ *
+ * probe     := "probe" target "{" { clause } "}"
+ * target    := "cpu" | string
+ * string    := '"' { char } '"'
+ * clause    := "freq" number
+ *            | "duration" number
+ *            | "collect" "(" field [ ":" agg ] ")"
+ *            | "on" ("enter" | "exit")
+ *            | "when" field ">" number
+ * field     := ident
+ * agg       := "hist" | "sum" | "avg" | "max"
+ * number    := digit { digit }
+ */
+
+/* ============================================================
+ * 数据结构
+ * ============================================================ */
+#define MAX_COLLECTS 16
+
+typedef enum { COLLECT_CALL_COUNT, COLLECT_DURATION, COLLECT_BYTES,
+               COLLECT_CALLER, COLLECT_BACKTRACE, COLLECT_ARG, COLLECT_RETURN } CollectType;
+
+typedef enum { AGG_NONE, AGG_HIST, AGG_SUM, AGG_AVG, AGG_MAX } AggType;
+
+typedef struct {
+    CollectType type;
+    AggType agg;
+    int arg_index;
+    int backtrace_depth;
+} CollectItem;
+
+typedef struct {
+    char target[256];        // "cpu" / 函数名
+    char library[256];       // 可选 lib 路径
+    int freq;
+    int duration_sec;
+    CollectItem collects[MAX_COLLECTS];
+    int collect_count;
+    int has_when_field;
+    char when_field[64];
+    int when_op;            // 0=>
+    long long when_value;
+    int phase;              // 0=enter, 1=exit, -1=default
+} Probe;
+
+typedef struct {
+    Probe probes[32];
+    int probe_count;
+} TraceScript;
+
+/* ============================================================
+ * DSL 解析器 (递归下降)
+ * ============================================================ */
+static const char *g_input;
+static int g_line;
+
+static int next_char(void) {
+    return (unsigned char)*g_input;
+}
+
+static void skip_spaces(void) {
+    while (*g_input) {
+        if (*g_input == ' ' || *g_input == '\t' || *g_input == '\r') { g_input++; }
+        else if (*g_input == '\n') { g_input++; g_line++; }
+        else if (*g_input == '/' && g_input[1] == '/') {
+            g_input += 2;
+            while (*g_input && *g_input != '\n') g_input++;
+        }
+        else if (*g_input == '/' && g_input[1] == '*') {
+            g_input += 2;
+            while (*g_input && !(*g_input == '*' && g_input[1] == '/')) {
+                if (*g_input == '\n') g_line++;
+                g_input++;
+            }
+            if (*g_input) g_input += 2;
+        }
+        else break;
+    }
+}
+
+static int expect_char(char c) {
+    skip_spaces();
+    if (next_char() != c) return -1;
+    g_input++;
+    return 0;
+}
+
+static int parse_number(long long *val) {
+    skip_spaces();
+    if (!isdigit(next_char())) return -1;
+    *val = 0;
+    while (isdigit(next_char())) {
+        *val = *val * 10 + (next_char() - '0');
+        g_input++;
+    }
+    return 0;
+}
+
+static int parse_ident(char *buf, int maxlen) {
+    skip_spaces();
+    int i = 0;
+    while (isalnum(next_char()) || next_char() == '_') {
+        if (i < maxlen - 1) buf[i++] = next_char();
+        g_input++;
+    }
+    buf[i] = '\0';
+    return i > 0 ? 0 : -1;
+}
+
+static int parse_string(char *buf, int maxlen) {
+    skip_spaces();
+    if (expect_char('"') != 0) return -1;
+    int i = 0;
+    while (next_char() != '"' && *g_input) {
+        if (i < maxlen - 1) buf[i++] = next_char();
+        g_input++;
+    }
+    buf[i] = '\0';
+    if (expect_char('"') != 0) return -1;
+    return 0;
+}
+
+static int parse_field(char *buf) {
+    return parse_ident(buf, 64);
+}
+
+static int parse_agg(AggType *agg) {
+    char name[32];
+    if (expect_char(':') != 0) { *agg = AGG_NONE; return 0; }
+    if (parse_ident(name, sizeof(name)) != 0) return -1;
+    if (strcmp(name, "hist") == 0) *agg = AGG_HIST;
+    else if (strcmp(name, "sum") == 0) *agg = AGG_SUM;
+    else if (strcmp(name, "avg") == 0) *agg = AGG_AVG;
+    else if (strcmp(name, "max") == 0) *agg = AGG_MAX;
+    else return -1;
+    return 0;
+}
+
+static int parse_collect(Probe *p) {
+    if (expect_char('(') != 0) return fprintf(stderr, "line %d: expected '('\n", g_line), -1;
+
+    char field[64];
+    if (parse_field(field) != 0) return fprintf(stderr, "line %d: expected collect field\n", g_line), -1;
+
+    CollectItem c = {0};
+    c.agg = AGG_NONE;
+
+    if (strcmp(field, "call_count") == 0) c.type = COLLECT_CALL_COUNT;
+    else if (strcmp(field, "duration_ns") == 0) { c.type = COLLECT_DURATION; parse_agg(&c.agg); }
+    else if (strcmp(field, "bytes") == 0) { c.type = COLLECT_BYTES; parse_agg(&c.agg); }
+    else if (strcmp(field, "caller") == 0) c.type = COLLECT_CALLER;
+    else if (strcmp(field, "backtrace") == 0) { c.type = COLLECT_BACKTRACE; c.backtrace_depth = 0; }
+    else if (strncmp(field, "arg", 3) == 0 && isdigit(field[3])) {
+        c.type = COLLECT_ARG;
+        c.arg_index = atoi(field + 3);
+    }
+    else if (strcmp(field, "return") == 0) c.type = COLLECT_RETURN;
+    else return fprintf(stderr, "line %d: unknown collect field '%s'\n", g_line, field), -1;
+
+    if (expect_char(')') != 0) return -1;
+    if (p->collect_count < MAX_COLLECTS) p->collects[p->collect_count++] = c;
+    return 0;
+}
+
+static int parse_target(Probe *p) {
+    skip_spaces();
+    if (strncmp(g_input, "cpu", 3) == 0 && !isalnum(g_input[3])) {
+        strcpy(p->target, "cpu");
+        g_input += 3;
+        return 0;
+    }
+    return parse_string(p->target, sizeof(p->target));
+}
+
+static int parse_probe(Probe *p) {
+    memset(p, 0, sizeof(Probe));
+    p->freq = 99;
+    p->duration_sec = 60;
+    p->phase = -1;
+    if (parse_target(p) != 0) return -1;
+
+    // 可选的 when 子句, 在 { 之前
+    {
+        char kw[64];
+        skip_spaces();
+        if (strncmp(g_input, "when", 4) == 0 && !isalnum(g_input[4])) {
+            g_input += 4;
+            parse_field(p->when_field);
+            skip_spaces();
+            if (next_char() == '>') { p->when_op = 0; g_input++; }
+            parse_number(&p->when_value);
+            p->has_when_field = 1;
+        }
+    }
+
+    if (expect_char('{') != 0) return -1;
+
+    while (next_char() && next_char() != '}') {
+        char kw[64];
+        if (parse_ident(kw, sizeof(kw)) != 0) break;
+
+        if (strcmp(kw, "freq") == 0) {
+            { long long v = 99; parse_number(&v); p->freq = (int)v; }
+        } else if (strcmp(kw, "duration") == 0) {
+            long long v = 0;
+            parse_number(&v);
+            p->duration_sec = (int)v;
+        } else if (strcmp(kw, "collect") == 0) {
+            parse_collect(p);
+        } else if (strcmp(kw, "on") == 0) {
+            char phase[16];
+            parse_ident(phase, sizeof(phase));
+            if (strcmp(phase, "enter") == 0) p->phase = 0;
+            else if (strcmp(phase, "exit") == 0) p->phase = 1;
+        }
+    }
+    if (expect_char('}') != 0) return -1;
+    return 0;
+}
+
+static int parse_trace(TraceScript *s, const char *input) {
+    memset(s, 0, sizeof(TraceScript));
+    g_input = input;
+    g_line = 1;
+
+    while (*g_input) {
+        skip_spaces();
+        if (!*g_input) break;
+
+        char kw[64];
+        if (parse_ident(kw, sizeof(kw)) != 0) {
+            fprintf(stderr, "line %d: expected 'probe'\n", g_line);
+            return -1;
+        }
+        if (strcmp(kw, "probe") != 0) {
+            fprintf(stderr, "line %d: expected 'probe', got '%s'\n", g_line, kw);
+            return -1;
+        }
+        if (s->probe_count >= 32) {
+            fprintf(stderr, "too many probes (max 32)\n");
+            return -1;
+        }
+        if (parse_probe(&s->probes[s->probe_count]) != 0) return -1;
+        s->probe_count++;
+    }
+    return 0;
+}
+
+/* ============================================================
+ * perf 后端生成
+ * ============================================================ */
+static void gen_perf_probe(FILE *out, const Probe *p) {
+    if (strcmp(p->target, "cpu") == 0) {
+        fprintf(out, "perf record -F %d -g -p \"$PID\" --sleep %d -o perf.data 2>&1\n", p->freq, p->duration_sec);
+        fprintf(out, "echo ''\n");
+        fprintf(out, "echo '=== CPU TOP 20 ==='\n");
+        fprintf(out, "perf report -i perf.data -n --stdio 2>/dev/null | head -30\n");
+    } else {
+        // 函数探针: 动态添加 uprobe
+        fprintf(out, "perf probe -x /proc/\"$PID\"/exe \"%s\" 2>&1\n", p->target);
+        fprintf(out, "perf record -e probe:%s -g -p \"$PID\" --sleep %d -o perf.data 2>&1\n", p->target, p->duration_sec);
+        fprintf(out, "perf report -i perf.data -n --stdio 2>/dev/null | head -30\n");
+        fprintf(out, "perf probe --del \"%s\" 2>/dev/null\n", p->target);
+    }
+}
+
+/* ============================================================
+ * SystemTap 后端生成
+ * ============================================================ */
+static void gen_stap_probe(FILE *out, const Probe *p) {
+    if (strcmp(p->target, "cpu") == 0) {
+        fprintf(out, "probe profile-%d.hz\n", p->freq);
+        fprintf(out, "{\n");
+        fprintf(out, "  printf(\"%%s\\n\", usymname(ubacktrace()));\n");
+        fprintf(out, "}\n");
+        return;
+    }
+
+    // 函数探针
+    fprintf(out, "probe process.function(\"%s\").call\n", p->target);
+    fprintf(out, "{\n");
+    for (int j = 0; j < p->collect_count; j++) {
+        switch (p->collects[j].type) {
+            case COLLECT_CALLER:
+                fprintf(out, "  printf(\"caller: %%s\\n\", usymname(ubacktrace()[1]));\n");
+                break;
+            case COLLECT_ARG:
+                fprintf(out, "  printf(\"arg%d: %%d\\n\", $arg%d);\n", p->collects[j].arg_index, p->collects[j].arg_index);
+                break;
+            case COLLECT_DURATION:
+                fprintf(out, "  t = gettimeofday_ns();\n");
+                break;
+            default:
+                break;
+        }
+    }
+    fprintf(out, "}\n");
+
+    // return probe for duration
+    int need_return = 0;
+    for (int j = 0; j < p->collect_count; j++) {
+        if (p->collects[j].type == COLLECT_DURATION || p->collects[j].type == COLLECT_RETURN)
+            need_return = 1;
+    }
+    if (need_return) {
+        fprintf(out, "probe process.function(\"%s\").return\n", p->target);
+        fprintf(out, "{\n");
+        for (int j = 0; j < p->collect_count; j++) {
+            if (p->collects[j].type == COLLECT_DURATION)
+                fprintf(out, "  printf(\"duration_ns: %%d\\n\", gettimeofday_ns() - t);\n");
+            if (p->collects[j].type == COLLECT_RETURN)
+                fprintf(out, "  printf(\"return: %%x\\n\", $return);\n");
+        }
+        fprintf(out, "}\n");
+    }
+}
+
+/* ============================================================
+ * eBPF (bpftrace) 后端生成
+ * ============================================================ */
+static void gen_ebpf_probe(FILE *out, const Probe *p) {
+    if (strcmp(p->target, "cpu") == 0) {
+        fprintf(out, "profile:hz:%d\n", p->freq);
+        fprintf(out, "{\n");
+        fprintf(out, "  @[ustack] = count();\n");
+        fprintf(out, "}\n");
+        return;
+    }
+    fprintf(out, "uprobe:/proc/\"$PID\"/exe:\"%s\"\n", p->target);
+    fprintf(out, "{\n");
+    fprintf(out, "  @[ustack] = count();\n");
+    fprintf(out, "}\n");
+}
+
+/* ============================================================
+ * CLI
+ * ============================================================ */
+static int detect(void) {
+    printf("available backends:\n");
+    int has = 0;
+    if (system("which perf >/dev/null 2>&1") == 0) { printf("  perf ✅ (Linux 自带)\n"); has = 1; }
+    if (system("which stap  >/dev/null 2>&1") == 0) { printf("  stap ✅ (SystemTap, 功能最强)\n"); has = 1; }
+    if (system("which bpftrace >/dev/null 2>&1") == 0) { printf("  ebpf ✅ (bpftrace, 低开销)\n"); has = 1; }
+    if (system("which dtrace >/dev/null 2>&1") == 0) { printf("  dtrace ✅ (macOS/BSD)\n"); has = 1; }
+    if (!has) { printf("  (none) 安装 perf: apt install linux-tools-common\n"); }
+    printf("\nrecommended: ");
+    if (system("which stap >/dev/null 2>&1") == 0) printf("stap (SystemTap)\n");
+    else if (system("which bpftrace >/dev/null 2>&1") == 0) printf("ebpf\n");
+    else printf("perf\n");
+    return 0;
+}
+
+static void gen_script(FILE *out, const TraceScript *s, const char *target) {
+    if (strcmp(target, "stap") == 0) {
+        fprintf(out, "#!/usr/bin/env stap\n");
+    } else {
+        fprintf(out, "#! /bin/bash\n");
+    }
+    fprintf(out, "# tracec generated | target: %s | probes: %d\n", target, s->probe_count);
+    if (strcmp(target, "stap") != 0) {
+        fprintf(out, "PID=\"${PID:-$1}\"\n");
+        fprintf(out, "if [ -z \"$PID\" ]; then echo \"usage: PID=<pid> bash $0\"; exit 1; fi\n");
+        fprintf(out, "set -e\n");
+    }
+    fprintf(out, "\n");
+
+    for (int i = 0; i < s->probe_count; i++) {
+        fprintf(out, "# ---- probe %d: %s ----\n", i + 1, s->probes[i].target);
+        if (strcmp(target, "perf") == 0) gen_perf_probe(out, &s->probes[i]);
+        else if (strcmp(target, "stap") == 0) gen_stap_probe(out, &s->probes[i]);
+        else if (strcmp(target, "ebpf") == 0) gen_ebpf_probe(out, &s->probes[i]);
+        fprintf(out, "\n");
+    }
+
+    if (strcmp(target, "stap") == 0) {
+        fprintf(out, "# 运行: stap -x $PID probe.stp\n");
+    }
+}
+
+int main(int argc, char *argv[]) {
+    if (argc < 2) {
+        fprintf(stderr, "usage: tracec <detect|compile> [input.trace] [--target perf|stap|ebpf]\n");
+        return 1;
+    }
+
+    if (strcmp(argv[1], "detect") == 0) return detect();
+
+    if (strcmp(argv[1], "compile") == 0) {
+        if (argc < 3) { fprintf(stderr, "usage: tracec compile input.trace [--target perf|stap|ebpf]\n"); return 1; }
+        const char *input_file = argv[2];
+        const char *target = "auto";
+
+        for (int i = 3; i < argc; i++) {
+            if (strcmp(argv[i], "--target") == 0 && i + 1 < argc) target = argv[++i];
+        }
+
+        // 自动选后端
+        if (strcmp(target, "auto") == 0) {
+            if (system("which stap >/dev/null 2>&1") == 0) target = "stap";
+            else if (system("which bpftrace >/dev/null 2>&1") == 0) target = "ebpf";
+            else target = "perf";
+        }
+
+        // 读取 .trace 文件
+        FILE *fp = fopen(input_file, "r");
+        if (!fp) { perror(input_file); return 1; }
+        fseek(fp, 0, SEEK_END);
+        long len = ftell(fp);
+        fseek(fp, 0, SEEK_SET);
+        char *buf = malloc(len + 1);
+        fread(buf, 1, len, fp);
+        buf[len] = '\0';
+        fclose(fp);
+
+        // 解析
+        TraceScript script;
+        if (parse_trace(&script, buf) != 0) { free(buf); return 1; }
+        free(buf);
+
+        // 生成脚本
+        char outname[256];
+        snprintf(outname, sizeof(outname), "trace_%s.sh", target);
+        FILE *out = fopen(outname, "w");
+        if (!out) { perror(outname); return 1; }
+
+        if (strcmp(target, "stap") == 0) {
+            gen_script(out, &script, "stap");
+        } else {
+            gen_script(out, &script, target);
+        }
+
+        fclose(out);
+        printf("generated: %s (target: %s, %d probes)\n", outname, target, script.probe_count);
+        return 0;
+    }
+
+    fprintf(stderr, "unknown command: %s\n", argv[1]);
+    return 1;
+}
