@@ -1,0 +1,75 @@
+// full.trace — 全维度探针示例
+// 覆盖: CPU 分布 | 内存分布 | 代码级耗时 | 代码级内存占用
+
+// === 1. CPU 使用分布 ===
+// on-CPU 热点，99Hz 采样 60 秒
+probe cpu {
+    freq 99
+    duration 60
+}
+
+// === 2. off-CPU 时间分布（锁等待、I/O 阻塞）===
+// 通过 sched:sched_switch tracepoint 采集
+probe "t:sched:sched_switch" {
+    collect(backtrace)
+    collect(call_count)
+}
+
+// === 3. 函数级 CPU 耗时 ===
+// 追踪热点函数，记录每次调用耗时分布和调用者
+probe "lj_gc_step" {
+    collect(call_count)
+    collect(duration_ns: hist)
+    collect(duration_ns: sum)
+    collect(caller)
+    collect(backtrace: depth 8)
+}
+
+probe "ngx_http_process_request" {
+    collect(call_count)
+    collect(duration_ns: hist)
+    collect(caller)
+}
+
+probe "ngx_event_accept" {
+    collect(call_count)
+    collect(caller)
+}
+
+// === 4. 内存分配分布 ===
+// 追踪大内存分配，记录每次大小、调用者和调用栈
+probe "malloc" when bytes > 0 {
+    collect(call_count)
+    collect(bytes: sum)
+    collect(bytes: max)
+    collect(caller)
+    collect(backtrace: depth 8)
+}
+
+probe "free" {
+    collect(call_count)
+    collect(caller)
+}
+
+probe "realloc" when bytes > 0 {
+    collect(call_count)
+    collect(bytes: sum)
+    collect(caller)
+}
+
+// === 5. 自定义运行时内存追踪 ===
+// 针对 LuaJIT 的 lj_alloc_malloc
+probe "lj_alloc_malloc" {
+    collect(arg0)            // 参数: 分配大小
+    collect(call_count)
+    collect(bytes: sum)
+    collect(caller)
+    collect(backtrace)
+}
+
+probe "lj_str_new" when bytes > 1000 {
+    // 追踪大字符串创建
+    collect(call_count)
+    collect(bytes: sum)
+    collect(caller)
+}

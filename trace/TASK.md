@@ -20,11 +20,11 @@
 
 | 任务 | 状态 | 说明 |
 |------|------|------|
-| perf 后端 | ✅ | `perf record/report` 命令序列，CPU + uprobe |
-| SystemTap 后端 | ✅ | `.stp` 脚本，profile + process.function |
-| eBPF (bpftrace) 后端 | ✅ | bpftrace 脚本，profile + uprobe + uretprobe |
+| perf 后端 | ✅ | CPU + uprobe + tracepoint 探针 |
+| SystemTap 后端 | ✅ | `.stp` 脚本，profile + process.function + tracepoint |
+| eBPF (bpftrace) 后端 | ✅ | profile + uprobe/uretprobe + 内存聚合 |
 | DTrace 后端 | ✅ | `.d` 脚本（macOS/FreeBSD） |
-| GDB Python 后端 | ✅ | GDB Python 兜底采样脚本 |
+| GDB Python 后端 | ✅ | bash 包装脚本，输出 JSON |
 
 ### 1.3 输出处理
 

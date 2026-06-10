@@ -202,7 +202,22 @@ static int parse_collect(Probe *p) {
     else if (strcmp(field, "duration_ns") == 0) { c.type = COLLECT_DURATION; parse_agg(&c.agg); }
     else if (strcmp(field, "bytes") == 0) { c.type = COLLECT_BYTES; parse_agg(&c.agg); }
     else if (strcmp(field, "caller") == 0) c.type = COLLECT_CALLER;
-    else if (strcmp(field, "backtrace") == 0) { c.type = COLLECT_BACKTRACE; c.backtrace_depth = 0; }
+    else if (strcmp(field, "backtrace") == 0) {
+        c.type = COLLECT_BACKTRACE;
+        c.backtrace_depth = 0;
+        // 可选: backtrace: depth N
+        skip_spaces();
+        if (next_char() == ':') {
+            g_input++;
+            char kw[16];
+            parse_ident(kw, sizeof(kw));
+            if (strcmp(kw, "depth") == 0) {
+                long long v = 0;
+                parse_number(&v);
+                c.backtrace_depth = (int)v;
+            }
+        }
+    }
     else if (strncmp(field, "arg", 3) == 0 && isdigit(field[3])) {
         c.type = COLLECT_ARG;
         c.arg_index = atoi(field + 3);
