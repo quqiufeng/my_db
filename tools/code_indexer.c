@@ -39,6 +39,9 @@ static int is_source_file(const char* filename) {
         strcmp(ext, ".rb") == 0 || strcmp(ext, ".php") == 0 ||
         strcmp(ext, ".sh") == 0 || strcmp(ext, ".lua") == 0 ||
         strcmp(ext, ".swift") == 0 || strcmp(ext, ".scala") == 0 ||
+        strcmp(ext, ".cu") == 0 ||
+        strcmp(ext, ".cuh") == 0 ||
+        strcmp(ext, ".metal") == 0 ||
         strcmp(ext, ".r") == 0 || strcmp(ext, ".R") == 0
     );
 }
