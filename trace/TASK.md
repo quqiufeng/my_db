@@ -38,9 +38,20 @@
 
 | 任务 | 状态 | 说明 |
 |------|------|------|
-| CLI 入口 | ✅ | `tracec detect | compile input.trace [--target backend]` |
+| CLI 入口 | ✅ | `tracec detect | compile | parse | extract` |
 | 自动目标检测 | ✅ | `auto` 模式按 stap → ebpf → perf → dtrace → gdb 优先级 |
 | 错误处理与提示 | ✅ | 后端不可用时 perror + 返回非零 |
+
+### 1.5 运行时提取（新增）
+
+| 任务 | 状态 | 说明 |
+|------|------|------|
+| tracec extract 框架 | ✅ | `extract <runtime> <pid>` 命令结构 |
+| LuaJIT trace 提取 | ✅ | 读 jit_State->trace[] 输出 JSON 映射表 |
+| 安全退出机制 | ✅ | 非目标进程不崩溃，输出空表 |
+| V8/Node.js 提取 | ⬜ | 读 Isolate->code_cache |
+| CPython 提取 | ⬜ | 读 PyThreadState->frame |
+| PHP 提取 | ⬜ | 读 zend_executor_globals |
 
 ---
 
@@ -59,7 +70,7 @@
 | 任务 | 状态 | 说明 |
 |------|------|------|
 | 后端输出验证 | ✅ | 5 个后端均正确生成语法有效的脚本 |
-| 全量编译测试 | ✅ | 3 种探针类型 (cpu/函数/when) 全部正确解析 |
+| 全量编译测试 | ✅ | 10 探针全部正确解析 |
 | 自动降级测试 | ⬜ | `auto` 模式下按优先级正确选择可用后端 |
 | 端到端执行测试 | ⬜ | 在有 perf 的环境跑一次完整调用链 |
 
