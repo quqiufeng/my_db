@@ -85,6 +85,7 @@ static std::string xml_node_text(xmlNodePtr node) {
 }
 
 // 递归提取 HTML 中的纯文本
+// 递归提取 HTML 中的 Markdown 格式文本
 static void extract_text_from_html(xmlNodePtr node, std::string& out) {
     if (!node) return;
     
@@ -96,43 +97,176 @@ static void extract_text_from_html(xmlNodePtr node, std::string& out) {
         }
     }
     
+    // === 前置处理：添加 Markdown 标记 ===
+    bool is_pre = false;
+    bool is_li = false;
+    bool is_dt = false;
+    bool is_blockquote = false;
+    bool is_block = false;
+    
+    if (node->type == XML_ELEMENT_NODE) {
+        const char* name = (const char*)node->name;
+        
+        // Headings
+        if (name && strlen(name) == 2 && name[0] == 'h' && name[1] >= '1' && name[1] <= '6') {
+            int h = name[1] - '0';
+            if (!out.empty() && out.back() != '\n') out += '\n';
+            for (int i = 0; i < h; i++) out += '#';
+            out += ' ';
+            is_block = true;
+        }
+        // Bold
+        else if (name && (strcasecmp(name, "b") == 0 || strcasecmp(name, "strong") == 0)) {
+            out += "**";
+        }
+        // Italic
+        else if (name && (strcasecmp(name, "i") == 0 || strcasecmp(name, "em") == 0)) {
+            out += "*";
+        }
+        // Code
+        else if (name && (strcasecmp(name, "code") == 0 || strcasecmp(name, "tt") == 0)) {
+            out += "`";
+        }
+        // Link: add opening bracket
+        else if (name && strcasecmp(name, "a") == 0) {
+            out += "[";
+        }
+        // List item
+        else if (name && strcasecmp(name, "li") == 0) {
+            is_li = true;
+            if (!out.empty() && out.back() != '\n') out += '\n';
+            out += "- ";
+            is_block = true;
+        }
+        // Definition term
+        else if (name && strcasecmp(name, "dt") == 0) {
+            is_dt = true;
+            if (!out.empty() && out.back() != '\n') out += '\n';
+            out += "- ";
+            is_block = true;
+        }
+        // Pre (code block)
+        else if (name && strcasecmp(name, "pre") == 0) {
+            is_pre = true;
+            if (!out.empty() && out.back() != '\n') out += '\n';
+            out += "```\n";
+            is_block = true;
+        }
+        // Blockquote
+        else if (name && strcasecmp(name, "blockquote") == 0) {
+            is_blockquote = true;
+            if (!out.empty() && out.back() != '\n') out += '\n';
+            out += "> ";
+            is_block = true;
+        }
+        // Horizontal rule
+        else if (name && strcasecmp(name, "hr") == 0) {
+            out += "\n---\n";
+            return; // hr has no children
+        }
+        // Break
+        else if (name && (strcasecmp(name, "br") == 0)) {
+            out += "\n";
+            return; // br has no children
+        }
+        // Block-level elements that need newline
+        else if (name && (strcasecmp(name, "p") == 0 || strcasecmp(name, "div") == 0 ||
+                         strcasecmp(name, "ul") == 0 || strcasecmp(name, "ol") == 0 ||
+                         strcasecmp(name, "table") == 0 || strcasecmp(name, "tr") == 0)) {
+            is_block = true;
+        }
+    }
+    
+    // === 处理文本节点 ===
     if (node->type == XML_TEXT_NODE && node->content) {
         const char* text = (const char*)node->content;
-        // 跳过纯空白
-        int has_content = 0;
+        // Skip pure whitespace
+        bool has_content = false;
         for (const char* p = text; *p; p++) {
             if (*p != ' ' && *p != '\t' && *p != '\n' && *p != '\r') {
-                has_content = 1;
+                has_content = true;
                 break;
             }
         }
         if (has_content) {
-            out += text;
-        }
-    }
-    
-    // 块级元素后加换行
-    const char* block_tags[] = {"p", "div", "h1", "h2", "h3", "h4", "h5", "h6",
-                                 "li", "tr", "br", "blockquote", "pre", nullptr};
-    int is_block = 0;
-    if (node->type == XML_ELEMENT_NODE) {
-        const char* name = (const char*)node->name;
-        for (int i = 0; block_tags[i]; i++) {
-            if (name && strcasecmp(name, block_tags[i]) == 0) {
-                is_block = 1;
-                break;
+            // HTML entity decoding for text content
+            std::string cleaned;
+            for (const char* p = text; *p; p++) {
+                if (*p == '&') {
+                    if (strncmp(p, "&amp;", 5) == 0) { cleaned += '&'; p += 4; continue; }
+                    if (strncmp(p, "&lt;", 4) == 0) { cleaned += '<'; p += 3; continue; }
+                    if (strncmp(p, "&gt;", 4) == 0) { cleaned += '>'; p += 3; continue; }
+                    if (strncmp(p, "&quot;", 6) == 0) { cleaned += '"'; p += 5; continue; }
+                    if (strncmp(p, "&nbsp;", 6) == 0) { cleaned += ' '; p += 5; continue; }
+                    if (strncmp(p, "&apos;", 6) == 0) { cleaned += '\''; p += 5; continue; }
+                }
+                cleaned += *p;
             }
+            out += cleaned;
         }
     }
     
+    // === 递归处理子节点 ===
     for (xmlNodePtr child = node->children; child; child = child->next) {
         extract_text_from_html(child, out);
     }
     
-    if (is_block && !out.empty() && out.back() != '\n') {
-        out += '\n';
+    // === 后置处理：添加闭合 Markdown 标记 ===
+    if (node->type == XML_ELEMENT_NODE) {
+        const char* name = (const char*)node->name;
+        
+        if (name && (strcasecmp(name, "b") == 0 || strcasecmp(name, "strong") == 0)) {
+            out += "**";
+        }
+        else if (name && (strcasecmp(name, "i") == 0 || strcasecmp(name, "em") == 0)) {
+            out += "*";
+        }
+        else if (name && (strcasecmp(name, "code") == 0 || strcasecmp(name, "tt") == 0)) {
+            out += "`";
+        }
+        else if (name && strcasecmp(name, "a") == 0) {
+            out += "]";
+            // Extract href from attribute
+            xmlChar* href = xmlGetProp(node, BAD_CAST "href");
+            if (href) {
+                out += "(";
+                out += (const char*)href;
+                out += ")";
+                xmlFree(href);
+            }
+        }
+        else if (name && strcasecmp(name, "pre") == 0) {
+            out += "\n```\n";
+        }
+        else if (name && strcasecmp(name, "blockquote") == 0) {
+            if (!out.empty() && out.back() != '\n') out += '\n';
+        }
+        else if (name && strcasecmp(name, "li") == 0) {
+            if (!out.empty() && out.back() != '\n') out += '\n';
+        }
+        else if (name && strcasecmp(name, "img") == 0) {
+            xmlChar* alt = xmlGetProp(node, BAD_CAST "alt");
+            xmlChar* src = xmlGetProp(node, BAD_CAST "src");
+            out += "![";
+            out += alt ? (const char*)alt : "image";
+            out += "](";
+            out += src ? (const char*)src : "";
+            out += ")";
+            if (alt) xmlFree(alt);
+            if (src) xmlFree(src);
+        }
+        
+        // Block elements: ensure trailing newline
+        if (is_block && !out.empty() && out.back() != '\n') {
+            out += '\n';
+        }
+        // Heading: add extra newline after
+        if (name && strlen(name) == 2 && name[0] == 'h' && name[1] >= '1' && name[1] <= '6') {
+            out += '\n';
+        }
     }
 }
+
 
 // 解析 META-INF/container.xml 获取 OPF 路径
 static std::string get_opf_path(zip_t* za) {
