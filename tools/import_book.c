@@ -1661,14 +1661,18 @@ int main(int argc, char* argv[]) {
     
     printf("Cache opened: %s\n", cache_dir);
     
-    // 初始化 Jina v2 嵌入模型
-    printf("Loading embedding model (Jina v2, %d-dim)...\n", EMBEDDING_DIM);
-    g_embedder = onnx_embedder_init(MODEL_PATH, VOCAB_PATH, MODEL_SEQ_LEN, EMBEDDING_DIM);
-    if (g_embedder) {
-        printf("  Embedding model loaded successfully\n");
+    // 初始化 Jina v2 嵌入模型（--skip-vectors 时不初始化，加速导入）
+    if (!flag_skip_vectors) {
+        printf("Loading embedding model (Jina v2, %d-dim)...\n", EMBEDDING_DIM);
+        g_embedder = onnx_embedder_init(MODEL_PATH, VOCAB_PATH, MODEL_SEQ_LEN, EMBEDDING_DIM);
+        if (g_embedder) {
+            printf("  Embedding model loaded successfully\n");
+        } else {
+            printf("  Warning: Failed to load embedding model (%s)\n", onnx_embedder_error());
+            printf("  Continuing without vector generation\n");
+        }
     } else {
-        printf("  Warning: Failed to load embedding model (%s)\n", onnx_embedder_error());
-        printf("  Continuing without vector generation\n");
+        printf("  Skipping embedding model (--skip-vectors)\n");
     }
     
     // 生成命名空间
@@ -1796,7 +1800,7 @@ int main(int argc, char* argv[]) {
                 size_t chapter_len = 0;
                 mobi_get_chapter_text(handle, i, &chapter_text, &chapter_len);
                 
-                if (!chapter_text || chapter_len == 0) {
+                if (!chapter_text || chapter_len < 100) {
                     use_per_chapter = 0;
                     break;
                 }

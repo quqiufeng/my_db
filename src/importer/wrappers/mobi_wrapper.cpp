@@ -130,15 +130,25 @@ static void extract_text_from_html(const char* data, size_t size, std::string& r
             in_tag = true;
             // Read tag name
             size_t j = i + 1;
-            bool is_close = (data[j] == '/');
-            if (is_close) j++;
+            bool is_close = false;
+            if (j < size && data[j] == '/') { is_close = true; j++; }
+            size_t name_start = is_close ? i + 2 : i + 1;
             while (j < size && data[j] != '>' && data[j] != ' ' && data[j] != '\t') j++;
-            std::string tag(data + (is_close ? i + 2 : i + 1), j - (is_close ? i + 2 : i + 1));
+            std::string tag;
+            if (name_start < size && j > name_start && j <= size) {
+                tag = std::string(data + name_start, j - name_start);
+            }
             for (auto& ch : tag) ch = tolower(ch);
             
             // Find tag end
-            const char* end_ptr = (const char*)memchr(data + i, '>', size - i);
-            if (!end_ptr) { result += c; continue; }
+            const char* end_ptr = nullptr;
+            if (i < size) {
+                end_ptr = (const char*)memchr(data + i, '>', size - i);
+            }
+            if (!end_ptr || tag.empty()) {
+                in_tag = false;
+                continue;
+            }
             
             // Heading conversion
             if (tag == "h1" || tag == "h2" || tag == "h3" ||
@@ -207,16 +217,6 @@ static void extract_text_from_html(const char* data, size_t size, std::string& r
             // Link: just keep [text](url) marker
             if (tag == "a") {
                 if (!is_close) {
-                    // Check for href
-                    std::string attr_start = "href=\"";
-                    const char* href_pos = (const char*)memchr(data + i, 'h', end_ptr - (data + i));
-                    if (href_pos) {
-                        const char* val_start = (const char*)memchr(href_pos + 5, '"', end_ptr - (href_pos + 5));
-                        if (val_start) {
-                            const char* val_end = (const char*)memchr(val_start + 1, '"', end_ptr - (val_start + 1));
-                            // Just output [ and let the ](url) be reconstructed
-                        }
-                    }
                     result += "[";
                 } else {
                     result += "]";

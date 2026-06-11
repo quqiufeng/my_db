@@ -399,17 +399,28 @@ cmd_read() {
             current_page="$(basename "$page_key")"
         else
             current_page="$page_key"
-            # 查找 page 属于哪个 chapter
-            local ch_dirs=()
-            while IFS= read -r -d '' line; do
-                ch_dirs+=("$line")
-            done < <(find "${book_dir}/chapters" -maxdepth 1 -mindepth 1 -type d -print0 2>/dev/null | sort -z)
-            for ch_path in "${ch_dirs[@]}"; do
-                if [[ -f "${ch_path}/${current_page}.md" ]]; then
-                    current_ch=$(basename "$ch_path")
-                    break
+            # 查找 page 属于哪个 chapter（优先用 KV Cache，回退到 find）
+            local search_key="${NAMESPACE}/${current_page}"
+            local kv_found=$("$CACHE_QUERY" "$search_key" --type exact --cache-dir /book/cache --pretty 2>/dev/null | grep -c '"type":"page"')
+            if [[ "$kv_found" -gt 0 ]]; then
+                local kv_val=$("$CACHE_QUERY" "$search_key" --type exact --cache-dir /book/cache --pretty 2>/dev/null)
+                local md_file=$(echo "$kv_val" | grep -oP '"md_file":"[^"]*"' | head -1 | sed 's/"md_file":"//;s/"//g')
+                if [[ -n "$md_file" ]]; then
+                    current_ch=$(basename "$(dirname "$md_file")")
                 fi
-            done
+            else
+                # Fallback: find-based search
+                local ch_dirs=()
+                while IFS= read -r -d '' line; do
+                    ch_dirs+=("$line")
+                done < <(find "${book_dir}/chapters" -maxdepth 1 -mindepth 1 -type d -print0 2>/dev/null | sort -z)
+                for ch_path in "${ch_dirs[@]}"; do
+                    if [[ -f "${ch_path}/${current_page}.md" ]]; then
+                        current_ch=$(basename "$ch_path")
+                        break
+                    fi
+                done
+            fi
         fi
         
         # 提取数字编号
@@ -668,6 +679,43 @@ cmd_list_books() {
     fi
 }
 
+cmd_delete_book() {
+    local book_name=$(basename "$NAMESPACE")
+    log "Deleting book: $book_name (namespace: $NAMESPACE)"
+    echo ""
+    
+    # 1. Remove from KV Cache
+    echo "  Removing from KV Cache..."
+    local count=0
+    local keys=$(strings /book/cache/cache.bin 2>/dev/null | grep "^$NAMESPACE" | sort -u)
+    for key in $keys; do
+        "$CACHE_QUERY" "$key" --type delete --cache-dir /book/cache --pretty 2>/dev/null
+        count=$((count + 1))
+    done
+    echo "  Removed $count KV Cache entries"
+    
+    # 2. Remove markdown files
+    if [[ -d "/opt/books/$book_name" ]]; then
+        echo "  Removing Markdown directory: /opt/books/$book_name/"
+        rm -rf "/opt/books/$book_name"
+    fi
+    
+    # 3. Remove vector files (HNSW index)
+    local vec_base="/book/cache/vectors"
+    if [[ -d "$vec_base" ]]; then
+        for f in "$vec_base"/books_*.jina.bin "$vec_base"/books_*.jina.idx "$vec_base"/books_*.jina.bin.hnsw; do
+            if [[ -f "$f" ]]; then
+                rm -f "$f"
+            fi
+        done 2>/dev/null
+        echo "  Removed vector files"
+    fi
+    
+    echo ""
+    ok "Book deleted: $book_name"
+    log "To verify: ./explore_book.sh list"
+}
+
 cmd_toc() {
     log "Table of Contents: $NAMESPACE"
     echo ""
@@ -772,6 +820,9 @@ main() {
         list|ls|l)
             cmd_list_books
             ;;
+        delete|remove|rm)
+            cmd_delete_book
+            ;;
         help|--help|-h)
             echo "Usage: $0 <namespace> <command> [options]"
             echo ""
@@ -782,6 +833,7 @@ main() {
             echo "  read <page_key>       读取页面内容（Markdown）"
             echo "  chapter [name]        列出章节或查看章节页面"
             echo "  toc                   目录结构"
+            echo "  delete                从 Cache 中删除本书"
             echo ""
             echo "Examples:"
             echo '  $0 /books/ddia overview'
