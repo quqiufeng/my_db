@@ -61,85 +61,31 @@ int unpack_header(const proto_header_t *hdr, uint8_t *type, uint8_t *flags, uint
  * =================================================================== */
 int send_message(int fd, uint8_t type, uint8_t flags,
                  const char *payload, uint32_t payload_len) {
-    proto_header_t hdr;
-    uint8_t        crc_buf[PROTO_CRC_LEN];
-    uint32_t       crc;
-    uint32_t       nlen = htonl(payload_len);
-    int            ret;
+    uint8_t  buf[256];
+    int      total;
+    int      ret;
 
-    /* 限制 payload 大小 */
-    if (payload_len > PROTO_MAX_PAYLOAD)
-        payload_len = PROTO_MAX_PAYLOAD;
+    if (payload_len > sizeof(buf) - PROTO_HEADER_LEN - 4)
+        payload_len = sizeof(buf) - PROTO_HEADER_LEN - 4;
 
-    /* 构造帧头 */
-    pack_header(&hdr, type, flags, payload_len);
+    pack_header((proto_header_t *)buf, type, flags, payload_len);
 
-    /* 发送帧头（循环直到全部发完） */
-    {
-        size_t remain = PROTO_HEADER_LEN;
-        const uint8_t *ptr = (const uint8_t *)&hdr;
-        while (remain > 0) {
-            ret = (int)write(fd, ptr, remain);
-            if (ret < 0) {
-                if (errno == EAGAIN || errno == EWOULDBLOCK) return -1;
-                return -1;
-            }
-            ptr    += ret;
-            remain -= ret;
-        }
-    }
-
-    /* 发送 payload */
-    if (payload_len > 0) {
-        {
-        size_t remain = payload_len;
-        const uint8_t *ptr = (const uint8_t *)payload;
-        while (remain > 0) {
-            ret = (int)write(fd, ptr, remain);
-            if (ret < 0) {
-                if (errno == EAGAIN || errno == EWOULDBLOCK) return -1;
-                return -1;
-            }
-            ptr    += ret;
-            remain -= ret;
-        }
-    }
-    }
-
-    /* 计算并发送 CRC（从 type 到 payload 末尾） */
-    /* 临时变量用于 CRC：type + flags + nlen + payload */
-    {
-        uint8_t crc_data[8 + PROTO_MAX_PAYLOAD];
-        size_t  crc_len = 0;
-        crc_data[crc_len++] = hdr.type;
-        crc_data[crc_len++] = hdr.flags;
-        memcpy(crc_data + crc_len, &nlen, 4); crc_len += 4;
-        if (payload_len > 0) {
-            memcpy(crc_data + crc_len, payload, payload_len);
-            crc_len += payload_len;
-        }
-        crc = crc32_bytes(crc_data, crc_len);
-    }
-
-    crc_buf[0] = (crc >> 24) & 0xFF;
-    crc_buf[1] = (crc >> 16) & 0xFF;
-    crc_buf[2] = (crc >>  8) & 0xFF;
-    crc_buf[3] = (crc >>  0) & 0xFF;
+    if (payload_len > 0)
+        memcpy(buf + PROTO_HEADER_LEN, payload, payload_len);
 
     {
-        size_t remain = PROTO_CRC_LEN;
-        const uint8_t *ptr = crc_buf;
-        while (remain > 0) {
-            ret = (int)write(fd, ptr, remain);
-            if (ret < 0) {
-                if (errno == EAGAIN || errno == EWOULDBLOCK) return -1;
-                return -1;
-            }
-            ptr    += ret;
-            remain -= ret;
-        }
+        uint32_t crc = crc32_bytes(buf + 2, PROTO_HEADER_LEN - 2 + payload_len);
+        crc = htonl(crc);
+        memcpy(buf + PROTO_HEADER_LEN + payload_len, &crc, 4);
     }
 
+    total = PROTO_HEADER_LEN + payload_len + 4;
+    ret = (int)write(fd, buf, total);
+    if (ret < 0) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK) return -1;
+        return -1;
+    }
+    if (ret != total) return -1;
     return 0;
 }
 

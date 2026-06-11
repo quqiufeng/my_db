@@ -121,7 +121,7 @@ static int accept_connection(agent_state_t *state) {
             int matched = 0;
             for (int i = 0; i < state->peer_count && !matched; i++) {
                 if (strcmp(state->peers[i].ip, ip) != 0) continue;
-                if (state->peers[i].state == PEER_CONNECTED && state->peers[i].fd >= 0)
+                if (state->peers[i].state != PEER_DISCONNECTED)
                     continue;  /* already have a working connection */
                 if (state->peers[i].fd >= 0) {
                     epoll_ctl(state->epoll_fd, EPOLL_CTL_DEL, state->peers[i].fd, NULL);
@@ -135,11 +135,8 @@ static int accept_connection(agent_state_t *state) {
                           state->peers[i].addr, connfd);
                 matched = 1;
             }
-            if (!matched) {
-                agent_log("DEBUG", "closing redundant inbound from %s (no matching peer)", ip);
-                close(connfd);
-                continue;
-            }
+            if (!matched)
+                agent_log("DEBUG", "inbound from %s (unmatched, fd=%d)", ip, connfd);
         }
 
         struct epoll_event ev;
@@ -425,21 +422,44 @@ static int handle_peer_connect(agent_state_t *state, int fd) {
 
     /* 连接成功 */
     peer_t *peer = peer_find_by_fd(state, fd);
-    if (peer) {
-        peer->state = PEER_CONNECTED;
-        peer->heartbeat_miss = 0;
-        peer->last_heartbeat = now_ms();
-        agent_log("INFO", "connected to %s (fd=%d)", peer->addr, fd);
+    if (!peer) {
+        for (int i = 0; i < state->peer_count; i++) {
+            if (state->peers[i].state == PEER_CONNECTING && state->peers[i].fd == fd) {
+                peer = &state->peers[i];
+                break;
+            }
+        }
+    }
+    if (!peer) {
+        agent_log("WARN", "connect fd=%d: no matching peer", fd);
+        close(fd);
+        return -1;
+    }
+    if (peer->state == PEER_CONNECTED) {
+        close(fd);
+        return 0;
+    }
+    peer->state = PEER_CONNECTED;
+    peer->heartbeat_miss = 0;
+    peer->last_heartbeat = now_ms();
+    agent_log("INFO", "connected to %s (fd=%d)", peer->addr, fd);
 
-        /* 改为监听可读事件 */
-        struct epoll_event ev;
-        ev.events  = EPOLLIN;
-        ev.data.fd = fd;
-        epoll_ctl(state->epoll_fd, EPOLL_CTL_MOD, fd, &ev);
+    struct epoll_event ev;
+    ev.events  = EPOLLIN;
+    ev.data.fd = fd;
+    if (epoll_ctl(state->epoll_fd, EPOLL_CTL_MOD, fd, &ev) < 0) {
+        agent_log("ERROR", "epoll_ctl MOD fd=%d failed: %s", fd, strerror(errno));
+        close(fd);
+        return -1;
     }
 
     return 0;
+
 }
+
+/* ===================================================================
+ * handle_read - 处理可读事件
+ * =================================================================== */
 
 /* ===================================================================
  * handle_read - 处理可读事件
