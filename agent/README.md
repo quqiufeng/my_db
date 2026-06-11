@@ -3,7 +3,7 @@
 > **面向 AI 编程助手的集群控制工具。** 纯 C 语言，一个二进制文件，SCP 部署，零依赖，**Raft 自组织选举**，自动故障恢复。
 > 让 AI 像操作一台机器一样操作整个集群——部署、命令执行、文件分发、服务管理，全部通过结构化 JSON 接口完成。
 
-> ✅ **当前状态：Raft 选举、任务调度、状态上报、命令执行全部完成，44 个单元测试通过。**
+> ✅ **当前状态：Raft 选举、命令执行、加密通信、Lua 热更新、状态上报全部完成。**
 
 ---
 
@@ -307,12 +307,14 @@ agent/
 │
 ├── src/
 │   ├── main.c           # 入口：参数解析 → daemonize → 启动
-│   ├── server.c         # epoll 事件循环 + TCP 连接管理 + 消息分发
+│   ├── server.c         # epoll 事件循环 + TCP 管理 + 消息分发
 │   ├── peer.c           # 对端管理：单向连接、重连、保活
-│   ├── election.c       # Raft 选举 FSM (Follower/Candidate/Leader)
+│   ├── election.c       # Raft 选举 FSM
 │   ├── protocol.c       # 二进制帧编解码（单缓冲区原子发送）
-│   ├── json.c           # 轻量 JSON 构造/解析器
+│   ├── crypto.c         # XXTEA 加密（128-bit key）
+│   ├── plugin.c         # LuaJIT 插件系统（热更新、cjson）
 │   ├── task.c           # 任务执行 + 结果序列化
+│   ├── json.c           # 轻量 JSON 工具
 │   ├── clusterctl.c     # Master 端 CLI
 │   └── deploy.c         # SCP + SSH 批量部署
 │
@@ -338,6 +340,8 @@ agent/
   peer_mark_offline 关闭 fd 并调度重连 |
 | **election.c** | Follower → Candidate → Leader 状态机；
   随机超时生成；多数派判定；任期管理 |
+| **crypto.c** | XXTEA 加解密（128-bit key）、密钥派生；
+| **plugin.c** | LuaJIT 虚拟机、脚本加载/热重载、API 绑定（on_tick/on_message/set_timer）；
 | **task.c** | 任务执行（`popen`）、结果 JSON 序列化、ID 生成；
 | **protocol.c** | 帧编解码；单缓冲区原子 write；循环 read；
   CRC32 校验；session_ctx JSON 序列化 |
@@ -385,20 +389,20 @@ make clusterctl deploy  # 编译 Master 端工具
 ### 本地模拟 3 节点集群
 
 ```bash
-# 终端 1 — node0（port 9527，最低，主动连接所有人）
+# 终端 1 — node0（port 9527）
 ./agent --foreground --bind 127.0.0.1 --port 9527 \
        -ip 127.0.0.1:9528,127.0.0.1:9529 \
-       --idx 0 --id node0 --cluster-size 3
+       --idx 0 --id node0 --cluster-size 3 --key "my-cluster-key"
 
-# 终端 2 — node1（port 9528，只连 9529，不连 9527）
+# 终端 2 — node1（port 9528）
 ./agent --foreground --bind 127.0.0.1 --port 9528 \
        -ip 127.0.0.1:9527,127.0.0.1:9529 \
-       --idx 1 --id node1 --cluster-size 3
+       --idx 1 --id node1 --cluster-size 3 --key "my-cluster-key"
 
-# 终端 3 — node2（port 9529，最高，不主动连任何人）
+# 终端 3 — node2（port 9529）
 ./agent --foreground --bind 127.0.0.1 --port 9529 \
-       -ip 127.0.0.1:9527,127.0.0.1:9528 \
-       --idx 2 --id node2 --cluster-size 3
+       -ip 127.0.0.1:9527,127.0.0.1:9529 \
+       --idx 2 --id node2 --cluster-size 3 --key "my-cluster-key"
 ```
 
 > 启动后自动选举，约 1.5~3s 内选出 Leader。日志中可见：
@@ -416,6 +420,8 @@ make clusterctl deploy  # 编译 Master 端工具
 | `-ip` | — | 逗号分隔的 peer 地址列表。**所有节点必须都用完整的 IP 列表** |
 | `--idx` | 0 | 节点在集群中的索引（0-based）。用于初始化选举定时器 |
 | `--cluster-size` | peer_count+1 | 集群总节点数。**必须正确设置**以便计算多数派（N/2+1） |
+| `--key` | — | **XXTEA 加密密钥**。所有节点和 clusterctl 必须使用相同密钥 |
+| `--plugin-dir` | /etc/agent/plugins | Lua 插件目录，inotify 热更新 |
 | `--foreground` | — | 前台运行（调试用）。默认 daemonize |
 | `--bind` | 0.0.0.0 | 监听地址 |
 
@@ -497,12 +503,13 @@ Raft 多数派 = `ceil(N/2) + 1`。要算这个需要知道集群总节点数 N�
 - [x] TCP 可靠性（原子发送、单向连接、零断连）
 - [x] `deploy` 批量部署工具
 - [x] `clusterctl` 命令行框架
-- [x] 加密（`proto_xor` 简单混淆）
+- [x] XXTEA 加密（`--key` 参数，128-bit key）
+- [x] LuaJIT 热更新插件系统
+- [x] cjson 支持（Lua 插件可用 `require("cjson")`）
 
 ### ⏳ 待实现
-- [ ] Follower 执行结果异步聚合回 Master（`on_task_result` → `pending_task_collect`）
-- [ ] 任务队列持久化完整（加载/恢复）
-- [ ] TLS 1.3 加密通信
+- [ ] Lua 插件沙箱（移除 `os.execute`、`io.open` 等危险函数）
+- [ ] `send_message` 返回值检查 + 重试（关键路径 COORD/heartbeat）
 - [ ] Webhook / MCP Server 集成
 
 ---
