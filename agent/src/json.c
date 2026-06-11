@@ -171,3 +171,25 @@ void json_escape(const char *in, char *out, size_t out_size) {
     }
     out[pos] = '\0';
 }
+
+/* json_unescape - 反转义 JSON 字符串 */
+void json_unescape(const char *in, char *out, size_t out_size) {
+    if (!in || !out || out_size == 0) return;
+    size_t pos = 0;
+    for (const char *p = in; *p && pos < out_size - 1; p++) {
+        if (*p == '\\' && *(p+1)) {
+            p++;
+            switch (*p) {
+                case '"':  out[pos++] = '"'; break;
+                case '\\': out[pos++] = '\\'; break;
+                case 'n':  out[pos++] = '\n'; break;
+                case 'r':  out[pos++] = '\r'; break;
+                case 't':  out[pos++] = '\t'; break;
+                default:   out[pos++] = '\\'; out[pos++] = *p; break;
+            }
+        } else {
+            out[pos++] = *p;
+        }
+    }
+    out[pos] = '\0';
+}

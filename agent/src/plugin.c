@@ -163,7 +163,23 @@ int plugin_init(agent_state_t *state) {
     }
     luaL_openlibs(pm->L);
 
-    /* add cjson to package.path */
+    /* sandbox: remove dangerous globals/functions */
+    lua_pushnil(pm->L); lua_setglobal(pm->L, "dofile");
+    lua_pushnil(pm->L); lua_setglobal(pm->L, "loadfile");
+    lua_pushnil(pm->L); lua_setglobal(pm->L, "load");
+    lua_pushnil(pm->L); lua_setglobal(pm->L, "io");
+    /* restrict os table: nil out dangerous functions, keep clock/time */
+    lua_getglobal(pm->L, "os");
+    if (lua_istable(pm->L, -1)) {
+        lua_pushnil(pm->L); lua_setfield(pm->L, -2, "execute");
+        lua_pushnil(pm->L); lua_setfield(pm->L, -2, "exit");
+        lua_pushnil(pm->L); lua_setfield(pm->L, -2, "tmpname");
+        lua_pushnil(pm->L); lua_setfield(pm->L, -2, "rename");
+        lua_pushnil(pm->L); lua_setfield(pm->L, -2, "remove");
+    }
+    lua_pop(pm->L, 1);  /* pop os table */
+    
+    /* add cjson to package.path */    /* add cjson to package.path */
     lua_getglobal(pm->L, "package");
     if (lua_istable(pm->L, -1)) {
         lua_getfield(pm->L, -1, "path");

@@ -422,20 +422,38 @@ static int on_master_cmd(agent_state_t *state, int fd,
     }
     agent_log("DEBUG", "master cmd: %.*s", (int)len, payload);
     char action[32] = {0};
-    sscanf(payload, "{%*[^:]:\"%*[^\"]\",\"action\":\"%31[^\"]\"", action);
+    {
+        const char *_a = strstr(payload, "\"action\":\"");
+        if (_a) sscanf(_a, "\"action\":\"%31[^\"]\"", action);
+    }
 
     if (strcmp(action, "exec") == 0) {
         char cmd[4096] = {0};
         int tmo = 30;
-        sscanf(payload,
-            "{%*[^:]:\"%*[^\"]\",\"action\":\"%*[^\"]\",\"cmd\":\"%4095[^\"]\",\"timeout\":%d}",
-            cmd, &tmo);
+        /* extract cmd and timeout robustly */
+        {
+            const char *p = strstr(payload, "\"cmd\":\"");
+            if (p) {
+                p += 7;
+                int ci = 0;
+                while (*p && ci < (int)sizeof(cmd) - 2) {
+                    if (*p == '\\' && *(p+1) == '\"') { cmd[ci++] = '\"'; p += 2; }
+                    else if (*p == '\"') break;
+                    else { if (*p != '\\') cmd[ci++] = *p; p++; }
+                }
+                cmd[ci] = '\0';
+                char _uc[4096];
+                json_unescape(cmd, _uc, sizeof(_uc));
+                memcpy(cmd, _uc, sizeof(cmd));
+            }
+            const char *t = strstr(payload, "\"timeout\":");
+            if (t) tmo = atoi(t + 10);
+        }
         if (tmo < 1) tmo = 30;
 
-        char task_id[64];
-        task_generate_id(task_id, sizeof(task_id));
+        char task_id[64]; task_generate_id(task_id, sizeof(task_id));
 
-        /* self-execute on leader */
+        /* self-execute */
         char self_result[4096] = {0};
         {
             task_t task;
@@ -449,34 +467,26 @@ static int on_master_cmd(agent_state_t *state, int fd,
             task_result_to_json(&tr, self_result, sizeof(self_result));
         }
 
-        /* count total nodes */
         int total = 1;
-        for (int i = 0; i < state->peer_count; i++) {
+        for (int i = 0; i < state->peer_count; i++)
             if (state->peers[i].state == PEER_CONNECTED) total++;
-        }
 
-        /* create pending task for async collection */
         pending_task_t *pt = pending_task_new(state, task_id, cmd, fd, total, tmo);
         if (pt) {
-            /* store self result */
             snprintf(pt->results[pt->result_count++], sizeof(pt->results[0]),
                      "%s", self_result);
             pending_task_collect(state, pt);
 
-            /* dispatch to followers */
             char dispatch[4608];
             snprintf(dispatch, sizeof(dispatch),
                 "{\"task_id\":\"%s\",\"action\":\"exec\",\"cmd\":\"%s\",\"timeout\":%d}",
                 task_id, cmd, tmo);
-            for (int i = 0; i < state->peer_count; i++) {
-                if (state->peers[i].state == PEER_CONNECTED) {
+            for (int i = 0; i < state->peer_count; i++)
+                if (state->peers[i].state == PEER_CONNECTED)
                     send_message(state->peers[i].fd, MSG_TASK_DISPATCH,
                                  PROTO_FLAG_REQUEST, dispatch, strlen(dispatch));
-                }
-            }
-            agent_log("INFO", "task %s dispatched to %d nodes, tracking", task_id, total);
+            agent_log("INFO", "task %s dispatched to %d nodes", task_id, total);
 
-            /* save to persistent queue */
             char persist_path[512];
             snprintf(persist_path, sizeof(persist_path), "%s/task_%s.json",
                      state->config.data_dir, task_id);
@@ -487,7 +497,6 @@ static int on_master_cmd(agent_state_t *state, int fd,
                 fclose(pf);
             }
         } else {
-            /* fallback: respond immediately with self result only */
             char resp[33000];
             snprintf(resp, sizeof(resp),
                 "{\"status\":\"ok\",\"task_id\":\"%s\",\"results\":[%s]}",

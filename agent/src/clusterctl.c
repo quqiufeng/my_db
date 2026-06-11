@@ -214,8 +214,7 @@ static int do_exec(int fd, const char *cmd, int timeout_sec) {
 
     char json[16384];
     snprintf(json, sizeof(json),
-             "{\"type\":\"master_cmd\",\"action\":\"exec\","
-             "\"cmd\":\"%s\",\"target\":\"all\",\"timeout\":%d}",
+             "{\"action\":\"exec\",\"cmd\":\"%s\",\"timeout\":%d}",
              escaped_cmd, timeout_sec);
 
     if (send_message(fd, MSG_MASTER_CMD, PROTO_FLAG_REQUEST, json, strlen(json)) < 0) {

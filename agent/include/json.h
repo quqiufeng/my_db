@@ -6,6 +6,7 @@
 #ifdef __cplusplus
 extern "C" {
 void json_escape(const char *in, char *out, size_t out_size);
+void json_unescape(const char *in, char *out, size_t out_size);
 
 #endif
 
@@ -42,9 +43,11 @@ int json_get_long(const char *json, const char *key, long *val);
 #ifdef __cplusplus
 }
 void json_escape(const char *in, char *out, size_t out_size);
+void json_unescape(const char *in, char *out, size_t out_size);
 
 #endif
 
 void json_escape(const char *in, char *out, size_t out_size);
+void json_unescape(const char *in, char *out, size_t out_size);
 
 #endif /* JSON_H */
