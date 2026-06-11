@@ -1197,7 +1197,7 @@ static int import_book(cache_t* cache, const char* namespace,
         }
         
         // ====== 阶段二：并行处理所有章节（CPU/GPU 密集）======
-        printf("  Processing %d chapters in parallel (OpenMP)...\n", valid_chapter_count);
+        printf("  Processing chapters (serial for vector safety)...\n", valid_chapter_count);
         
         chapter_result_t** results = calloc(valid_chapter_count, sizeof(chapter_result_t*));
         if (!results) {
@@ -1206,7 +1206,7 @@ static int import_book(cache_t* cache, const char* namespace,
             return 0;
         }
         
-        #pragma omp parallel for schedule(dynamic, 1)
+        // serial (vector safety)
         for (int i = 0; i < valid_chapter_count; i++) {
             if (!bounds[i].valid) continue;
             
@@ -1975,10 +1975,10 @@ int main(int argc, char* argv[]) {
             }
             
             // 并行处理所有章节（文本清理、分块、向量生成）
-            printf("  Processing %d chapters in parallel (OpenMP)...\n", imported_chapters);
+            printf("  Processing chapters (serial for vector safety)...\n", imported_chapters);
             chapter_result_t** results = calloc(imported_chapters, sizeof(chapter_result_t*));
             
-            #pragma omp parallel for schedule(dynamic, 1)
+            // serial (vector safety)
             for (int i = 0; i < imported_chapters; i++) {
                 if (mobi_chapters[i].chapter_text && mobi_chapters[i].chapter_len > 0) {
                     results[i] = process_chapter(md_dir, mobi_chapters[i].ch_dir, 
