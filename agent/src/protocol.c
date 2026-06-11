@@ -2,6 +2,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <unistd.h>
+#include <errno.h>
 #include <arpa/inet.h>
 #include "agent.h"
 #include <errno.h>   /* htonl, ntohl */
