@@ -342,12 +342,6 @@ elon_musk/
 
 ## 已导入书籍
 
-```bash
-strings /book/cache/cache.bin | grep "^/books/" | grep "/_meta" | sort -u
-```
-
-## 已导入书籍
-
 当前系统已导入以下书籍：
 
 | 命名空间 | 书名 | 格式 | 章节数 | 页数 | 向量 |
