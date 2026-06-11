@@ -1479,7 +1479,7 @@ stdbuf -oL ./tools/cache_import /opt/code_caches/php_cache /code/php --cache-dir
 
 ---
 
-*文档版本：2026-06-11*（系统级修复 9 项 + 对齐 ebook 导入 cache 大小：protected_regular / GPU扩展名 / batch_embedder流式 / chunks导入5000x / dataflow导入15x / Makefile污染 / call_graph哈希 / exclude-dir参数 / cache mmap扩容）
+*文档版本：2026-06-11 v2*（系统级修复 9 项 + 对齐 ebook 导入 cache 大小 + tokenizer 线程安全：protected_regular / GPU扩展名 / batch_embedder流式 / chunks导入5000x / dataflow导入15x / Makefile污染 / call_graph哈希 / exclude-dir参数 / cache mmap扩容）
 *适用于：analyze_repo.sh + ai_code_search.sh + ai_code_search_large.sh 最新版本*
 ---
 

@@ -1393,5 +1393,147 @@ ls -la /memory/vectors/*.hnsw
 
 ---
 
-*文档版本：2026-06-11 v3（对齐 coding.md 系统级修复 #9）*
-*适用于：explore_book.sh + import_book 最新版本*
+### 问题 16: Kobo 格式 EPUB 章节边界检测失败
+
+**现象**：Kobo 电子阅读器生成的 EPUB 使用 `<span class="koboSpan">` 代替 `<h1>` 作为章节标题，导致 `import_book()` 无法识别章节边界。所有技术章节都收到相同的 200KB 文本（书开头的内容），15 个章节中仅 5-6 个有唯一内容。
+
+**根因**：`import_book()` 的章节切分逻辑依赖章节标题进行字符串匹配。当标题为空时，offset-based 切片被跳过（条件 `chapters[i].title && strlen(chapters[i].title) > 0`），fallback 到全文截断。
+
+**修复**（`tools/import_book.c`）：
+```c
+// 旧：标题为空时跳过 offset 切片
+if (main_chapter_count > 1 && chapters[i].title && strlen(chapters[i].title) > 0) {
+
+// 新：标题为空也尝试 offset 切片
+if (main_chapter_count > 1) {
+```
+
+**效果**：15 个技术章节唯一率从 30% → 100%，每章内容独立。
+
+---
+
+### 问题 17: Rust tokenizer 多线程 panic
+
+**现象**：`tokenizers_encode()`（Rust 库）在 OpenMP 多线程并发调用时 panic 崩溃，日志显示 `thread caused non-unwinding panic. aborting.`。
+
+**根因**：`tokenizers-cpp` 库不是线程安全的。多个线程同时调用 `tokenizers_encode()` 导致 Rust 内部状态被写坏，触发 `unwrap()` panic（Rust 的 panic 无法被 C++ 的 `try/catch` 捕获）。
+
+**修复**（`tools/import_book.c`）：
+```c
+// 在所有 onnx_embedder_encode 调用外包 critical section
+#pragma omp critical(embedder)
+ret = onnx_embedder_encode_batch(g_embedder, texts, bcount, ...);
+```
+
+**效果**：批量编码 + OpenMP 并行两全，GPU 利用率不降，tokenizer 不再崩溃。
+
+---
+
+### 问题 18: onnx_embedder_encode_batch tokenizer 崩溃
+
+**现象**：`import_book` 导入带向量时在 `process_chapter()` 中崩溃，backtrace 指向 `onnx_embedder_encode_batch` → `tokenizers_encode`。
+
+**根因**：与问题 17 同一根源。batch 编码时多线程竞争 tokenizer 内部状态。
+
+**修复**：同问题 17，`#pragma omp critical(embedder)` 保护所有 embedder 调用。
+
+**效果**：batch 编码正常工作，无需禁用。`use_batch = 1` 保留。
+
+---
+
+### 问题 19: 控制字符导致 tokenizer Rust panic
+
+**现象**：某些电子书文本包含控制字符（0x00-0x1F, 0x7F），导致 Rust tokenizer 在 `unwrap()` 时 abort。
+
+**根因**：`process_chapter()` 的 UTF-8 清洗只过滤了非法 UTF-8 序列，没有过滤合法但会导致 tokenizer 崩溃的控制字符。
+
+**修复**（`tools/import_book.c`）：
+```c
+// 在 UTF-8 清洗中增加控制字符过滤
+if ((c & 0x80) == 0) {
+    // 过滤控制字符(0x00-0x1F,0x7F)，保留 tab(9) newline(10) cr(13)
+    if (c < 0x20 && c != 9 && c != 10 && c != 13) {
+        skipped_bytes++; i++; continue;
+    }
+    if (c == 0x7F) { skipped_bytes++; i++; continue; }
+    char_len = 1;
+}
+```
+
+**效果**：tokenizer 不再因控制字符崩溃。
+
+---
+
+### 问题 20: HTML→Markdown 格式保留（MOBI + EPUB）
+
+**现象**：电子书导入后所有格式丢失——标题没有 `#`、粗体没有 `**`、链接没有 `[]()`、列表没有 `-`、代码块没有 `` ` ``。原本是 HTML 标签的内容变成了连续纯文本。
+
+**根因**：wrapper 库的 `extract_text_from_html()` 函数只做 `<` 标签剥离，不做格式转换。
+
+**修复**：
+- **MOBI**（`src/importer/wrappers/mobi_wrapper.cpp`）：重写 `extract_text_from_html()`，手动解析 HTML 标签并转换为 Markdown 语法
+- **EPUB**（`src/importer/wrappers/epub_wrapper.cpp`）：重写 `extract_text_from_html()`，利用 libxml2 XML 解析器递归遍历节点树，按标签类型输出 Markdown
+
+**转换对照表**：
+
+| HTML | Markdown | 状态 |
+|------|----------|:----:|
+| `<h1>..<h6>` | `# .. ######` | ✅ |
+| `<b>/<strong>` | `**text**` | ✅ |
+| `<i>/<em>` | `*text*` | ✅ |
+| `<code>/<tt>` | `` `text` `` | ✅ |
+| `<a href>` | `[text](url)` | ✅ |
+| `<img alt src>` | `![alt](src)` | ✅ |
+| `<li>` | `- item` | ✅ |
+| `<pre>` | ` ``` ` code block | ✅ |
+| `<blockquote>` | `> quote` | ✅ |
+| `&amp;` 等实体 | 解码为字符 | ✅ |
+
+---
+
+### 问题 21: `--skip-vectors` 事实上不跳过 GPU
+
+**现象**：加上 `--skip-vectors` 参数后导入仍然慢，GPU 仍然在工作。参数只跳过了最后的 `export_vectors()` 阶段，`process_chapter()` 中的向量生成不受影响。
+
+**根因**：`--skip-vectors` 只控制了是否调用 `export_vectors()`，没有阻止 `onnx_embedder_init()` 的调用和 `process_chapter()` 中的向量生成。
+
+**修复**（`tools/import_book.c`）：
+```c
+// --skip-vectors 时不初始化 embedder
+if (!flag_skip_vectors) {
+    g_embedder = onnx_embedder_init(...);
+}
+```
+
+**效果**：`--skip-vectors` 导入速度从 5-10 分钟降到 10-30 秒。
+
+---
+
+### 性能优化汇总
+
+| # | 优化 | 之前 | 之后 | 加速比 |
+|---|------|------|------|--------|
+| 1 | `--skip-vectors` 真跳过 GPU | 300+s | 10-30s | **10-30x** |
+| 2 | 向量导出进度条 | 静默等待 | 实时百分比+ETA | — |
+| 3 | cache.bin 4GB | 500MB | 4GB | 8x 容量 |
+| 4 | `--generate-vectors` 模式 | 无此功能 | 批量生成 | — |
+| 5 | `--only-vectors` 增量模式 | 无此功能 | 重新导出 | — |
+| 6 | KV Cache 独立路径 | `/memory/` | `/book/cache/` | 不冲突 |
+
+---
+
+### 新增功能
+
+| 功能 | 命令 | 用途 |
+|------|------|------|
+| 增量导入（跳过向量） | `--skip-vectors` | 快速导入文本，不生成搜索索引 |
+| 增量导入（仅向量） | `--only-vectors` | 重新导出已有向量并重建 HNSW |
+| 增量导入（生成向量） | `--generate-vectors` | 为已导入但无向量的页面生成向量 |
+| 书籍列表 | `list` | 列出所有已导入书籍 |
+| 删除书籍 | `delete` | 从 KV Cache + 磁盘中移除 |
+| 搜索预览 | `search` | 搜索结果显示内容预览片段 |
+
+---
+
+*文档版本：2026-06-11 v4（新增问题 16-21、HTML→Markdown 格式保留、性能优化汇总）*
+*适用于：explore_book.sh + import_book + mobi_wrapper + epub_wrapper 最新版本*
