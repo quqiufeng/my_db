@@ -627,7 +627,7 @@ static chapter_result_t* process_chapter(const char* md_dir, const char* chapter
     for (size_t i = 0; i < text_len; ) {
         unsigned char c = (unsigned char)text[i];
         int char_len = 1;
-        if ((c & 0x80) == 0) {
+        if (((c & 0x80) == 0) && (c >= 0x20 || c == 0x09 || c == 0x0A || c == 0x0D) && c != 0x7F) {
             char_len = 1;
         } else if ((c & 0xE0) == 0xC0 && i + 1 < text_len && ((unsigned char)text[i+1] & 0xC0) == 0x80) {
             char_len = 2;
@@ -726,7 +726,7 @@ static chapter_result_t* process_chapter(const char* md_dir, const char* chapter
     if (g_embedder && item_count > 0) {
         float* all_vectors = calloc(item_count, EMBEDDING_DIM * sizeof(float));
         if (all_vectors) {
-            int use_batch = 1;
+            int use_batch = 0;  // batch encoding causes tokenizer panic
             #define EMBED_BATCH_SIZE 32
             for (int batch_start = 0; batch_start < item_count; batch_start += EMBED_BATCH_SIZE) {
                 int batch_end = batch_start + EMBED_BATCH_SIZE;
