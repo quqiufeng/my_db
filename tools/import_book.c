@@ -1017,7 +1017,7 @@ static int import_book(cache_t* cache, const char* namespace,
             const char* best_pos = NULL;
             size_t best_len = 0;
             
-            if (main_chapter_count > 1 && chapters[i].title && strlen(chapters[i].title) > 0) {
+            if (main_chapter_count > 1) {
                 // 策略0: 优先使用MOBI wrapper提供的offset信息
                 if (chapters[i].offset > 0 && chapters[i].offset < text_len) {
                     chapter_text = text + chapters[i].offset;
