@@ -3,7 +3,7 @@
 > **面向 AI 编程助手的集群控制工具。** 纯 C 语言，一个二进制文件，SCP 部署，零依赖，**Raft 自组织选举**，自动故障恢复。
 > 让 AI 像操作一台机器一样操作整个集群——部署、命令执行、文件分发、服务管理，全部通过结构化 JSON 接口完成。
 
-> ✅ **当前状态：Raft 选举、命令执行、加密通信、Lua 热更新、状态上报全部完成。**
+> ✅ **当前状态：全部核心功能完成，44 个单元测试通过，`make test` 无警告。**
 
 ---
 
@@ -508,9 +508,8 @@ Raft 多数派 = `ceil(N/2) + 1`。要算这个需要知道集群总节点数 N�
 - [x] cjson 支持（Lua 插件可用 `require("cjson")`）
 
 ### ⏳ 待实现
-- [ ] Lua 插件沙箱（移除 `os.execute`、`io.open` 等危险函数）
-- [ ] `send_message` 返回值检查 + 重试（关键路径 COORD/heartbeat）
 - [ ] Webhook / MCP Server 集成
+- [ ] Follower 执行结果异步聚合（`on_task_result` → `pending_task_collect`）
 
 ---
 

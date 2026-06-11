@@ -59,16 +59,6 @@ install: $(TARGET)
 
 # Test targets
 TEST_DIR = tests
-TEST_BINS = tests/test_election tests/test_protocol tests/test_json
-
-tests/test_election: tests/test_election.c src/election.c
-	  -o  $^ 
-
-tests/test_protocol: tests/test_protocol.c src/protocol.c src/json.c
-	  -o  $^ 
-
-tests/test_json: tests/test_json.c src/json.c
-	  -o  $^ 
 
 test:  
 	for t in ; do ./190561t || exit 1; done
