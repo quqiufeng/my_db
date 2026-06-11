@@ -152,6 +152,7 @@ scp agent root@192.168.1.12:/tmp/agent && ssh root@192.168.1.12 "/tmp/agent -ip 
 ```
 
 > 每一台 agent 启动时都通过 `-ip` 知道全部对端是谁，直接开始建连 + 选举。
+> agent 启动后自动 daemonize（fork + setsid），SSH 断开后继续运行。
 
 ### 2. 集群自组织 + Master 等待报备
 
@@ -223,7 +224,7 @@ agent/
 ├── README.md             # 本文档
 │
 ├── src/
-│   ├── main.c            # 入口：参数解析 + 初始化
+│   ├── main.c            # 入口：参数解析 → daemonize → 启动
 │   ├── server.c          # TCP 监听 + 连接管理（epoll）
 │   ├── peer.c            # 对端管理：连接、重连、保活
 │   ├── election.c        # 随机数 PK 选举算法
@@ -284,6 +285,8 @@ agent/
 
 
 ### 会话上下文（Session Context）
+
+A 启动后自动 daemonize（fork + setsid），脱离 SSH 会话独立运行。
 
 每个 TCP 连接对应一个会话上下文，Agent 在上下文中维护自己的身份和状态，Master 可随时查询。
 
