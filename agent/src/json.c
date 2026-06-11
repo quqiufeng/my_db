@@ -153,3 +153,21 @@ int json_get_long(const char *json, const char *key, long *val) {
     snprintf(pattern, sizeof(pattern), "\"%s\":%%ld", key);
     return (sscanf(json, pattern, val) == 1) ? 0 : -1;
 }
+
+
+/* json_escape - 转义字符串中的 JSON 特殊字符 */
+void json_escape(const char *in, char *out, size_t out_size) {
+    if (!in || !out || out_size == 0) return;
+    size_t pos = 0;
+    for (const char *p = in; *p && pos < out_size - 1; p++) {
+        switch (*p) {
+            case '"':  if (pos + 2 < out_size) { out[pos++] = '\\'; out[pos++] = '"'; } break;
+            case '\\': if (pos + 2 < out_size) { out[pos++] = '\\'; out[pos++] = '\\'; } break;
+            case '\n': if (pos + 2 < out_size) { out[pos++] = '\\'; out[pos++] = 'n'; } break;
+            case '\r': if (pos + 2 < out_size) { out[pos++] = '\\'; out[pos++] = 'r'; } break;
+            case '\t': if (pos + 2 < out_size) { out[pos++] = '\\'; out[pos++] = 't'; } break;
+            default:   out[pos++] = *p; break;
+        }
+    }
+    out[pos] = '\0';
+}

@@ -3,9 +3,11 @@
 #include <stdio.h>
 #include <unistd.h>
 #include <errno.h>
+#include <stdlib.h>
 #include <arpa/inet.h>
 #include "agent.h"
-#include <errno.h>   /* htonl, ntohl */
+#include <errno.h>
+#include <stdlib.h>   /* htonl, ntohl */
 
 /* ===================================================================
  * CRC32 表（简化实现，生产环境可用 zlib 的 crc32）
@@ -59,6 +61,12 @@ int unpack_header(const proto_header_t *hdr, uint8_t *type, uint8_t *flags, uint
 /* ===================================================================
  * 收发完整消息
  * =================================================================== */
+
+
+/* simple XOR obfuscation (not real crypto, just wire obfuscation) */
+void proto_xor(uint8_t *data, size_t len, uint8_t key) {
+    for (size_t i = 0; i < len; i++) data[i] ^= key;
+}
 int send_message(int fd, uint8_t type, uint8_t flags,
                  const char *payload, uint32_t payload_len) {
     uint8_t  buf[256];

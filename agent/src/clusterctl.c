@@ -1,3 +1,4 @@
+#include "json.h"
 /* ===================================================================
  * clusterctl - Master-side AI cluster control tool
  *
@@ -88,20 +89,6 @@ static long now_ms(void) {
 /* ===================================================================
  * JSON 字符串转义（简易版）
  * =================================================================== */
-static void json_escape(const char *in, char *out, size_t out_size) {
-    size_t j = 0;
-    for (const char *p = in; *p && j + 6 < out_size; p++) {
-        switch (*p) {
-        case '"':  out[j++] = '\\'; out[j++] = '"';  break;
-        case '\\': out[j++] = '\\'; out[j++] = '\\'; break;
-        case '\n': out[j++] = '\\'; out[j++] = 'n';  break;
-        case '\r': out[j++] = '\\'; out[j++] = 'r';  break;
-        case '\t': out[j++] = '\\'; out[j++] = 't';  break;
-        default:   out[j++] = *p; break;
-        }
-    }
-    out[j] = '\0';
-}
 
 /* ===================================================================
  * tcp_connect - 连接到指定地址

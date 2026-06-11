@@ -338,19 +338,56 @@ static int on_master_cmd(agent_state_t *state, int fd,
     }
     agent_log("DEBUG", "master cmd: %.*s", (int)len, payload);
     char action[32] = {0};
-    sscanf(payload, "{\"action\":\"%31[^\"]\"", action);
+    sscanf(payload, "{%*[^:]:\"%*[^\"]\",\"action\":\"%31[^\"]\"", action);
 
     if (strcmp(action, "exec") == 0) {
         char cmd[4096] = {0};
         int tmo = 30;
         sscanf(payload,
-            "{\"action\":\"%*[^\"]\",\"cmd\":\"%4095[^\"]\",\"timeout\":%d}",
+            "{%*[^:]:\"%*[^\"]\",\"action\":\"%*[^\"]\",\"cmd\":\"%4095[^\"]\",\"timeout\":%d}",
             cmd, &tmo);
-        char resp[4096];
+        if (tmo < 1) tmo = 30;
+
+        char task_id[64];
+        snprintf(task_id, sizeof(task_id), "t_%ld_%d", now_ms(), rand() % 1000);
+
+        /* self-execute on leader */
+        char stdout_buf[16384] = {0};
+        size_t pos = 0;
+        FILE *fp = popen(cmd, "r");
+        int ec = -1;
+        if (fp) {
+            char line[4096];
+            while (fgets(line, sizeof(line), fp) && pos < sizeof(stdout_buf) - 4096) {
+                size_t llen = strlen(line);
+                memcpy(stdout_buf + pos, line, llen);
+                pos += llen;
+            }
+            ec = pclose(fp);
+        }
+        char escaped[32768];
+        json_escape(stdout_buf, escaped, sizeof(escaped));
+
+        /* dispatch to followers */
+        char dispatch[4608];
+        snprintf(dispatch, sizeof(dispatch),
+            "{\"task_id\":\"%s\",\"action\":\"exec\",\"cmd\":\"%s\",\"timeout\":%d}",
+            task_id, cmd, tmo);
+        int nodes = 1;
+        for (int i = 0; i < state->peer_count; i++) {
+            if (state->peers[i].state == PEER_CONNECTED) {
+                nodes++;
+                send_message(state->peers[i].fd, MSG_TASK_DISPATCH,
+                             PROTO_FLAG_REQUEST, dispatch, strlen(dispatch));
+            }
+        }
+        (void)nodes; /* TODO: async collect follower results */
+
+        char resp[33000];
         snprintf(resp, sizeof(resp),
-            "{\"status\":\"ok\",\"task_id\":\"t_%ld\",\"results\":["
-            "{\"node\":\"%s\",\"exit\":0,\"stdout\":\"(sim) %s\"}]}",
-            now_ms(), state->ctx.self_addr, cmd);
+            "{\"status\":\"ok\",\"task_id\":\"%s\",\"results\":["
+            "{\"node\":\"%s\",\"exit\":%d,\"stdout\":\"%s\"}]}",
+            task_id, state->ctx.self_addr, ec, escaped);
         send_message(fd, MSG_MASTER_RESULT, PROTO_FLAG_RESPONSE, resp, strlen(resp));
     } else if (strcmp(action, "query") == 0) {
         char json[2048];
