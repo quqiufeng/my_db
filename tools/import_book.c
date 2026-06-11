@@ -1529,7 +1529,8 @@ int main(int argc, char* argv[]) {
         printf("\n");
         printf("Options:\n");
         printf("  --skip-vectors   跳过向量生成（更快，但无语义搜索）\n");
-        printf("  --only-vectors   仅重新生成向量，跳过文本解析（需已导入过）\n");
+        printf("  --only-vectors   仅重新导出已有向量（需已生成过）\n");
+        printf("  --generate-vectors 为已导入但无向量的页面生成向量\n");
         printf("\n");
         printf("Examples:\n");
         printf("  %s /memory ~/book.mobi /books/my_book\n", argv[0]);
@@ -1548,6 +1549,7 @@ int main(int argc, char* argv[]) {
     
     int flag_skip_vectors = 0;
     int flag_only_vectors = 0;
+    int flag_generate_vectors = 0;
     
     // 解析 flags
     for (int i = 1; i < argc; i++) {
@@ -1555,6 +1557,8 @@ int main(int argc, char* argv[]) {
             flag_skip_vectors = 1;
         } else if (strcmp(argv[i], "--only-vectors") == 0) {
             flag_only_vectors = 1;
+        } else if (strcmp(argv[i], "--generate-vectors") == 0) {
+            flag_generate_vectors = 1;
         }
     }
     
@@ -1562,7 +1566,7 @@ int main(int argc, char* argv[]) {
     int pos_count = 0;
     const char* pos_args[4];
     for (int i = 1; i < argc && pos_count < 4; i++) {
-        if (strcmp(argv[i], "--skip-vectors") == 0 || strcmp(argv[i], "--only-vectors") == 0) {
+        if (strcmp(argv[i], "--skip-vectors") == 0 || strcmp(argv[i], "--only-vectors") == 0 || strcmp(argv[i], "--generate-vectors") == 0) {
             continue;
         }
         pos_args[pos_count++] = argv[i];
@@ -1577,10 +1581,10 @@ int main(int argc, char* argv[]) {
     }
     
     const char* cache_dir = pos_args[0];
-    const char* book_path = flag_only_vectors ? NULL : pos_args[1];
+    const char* book_path = (flag_only_vectors || flag_generate_vectors) ? NULL : pos_args[1];
     const char* ns = NULL;
     const char* output_dir = "/opt/books";
-    int next_pos = flag_only_vectors ? 1 : 2;
+    int next_pos = (flag_only_vectors || flag_generate_vectors) ? 1 : 2;
     
     // 智能解析可选参数
     if (pos_count > next_pos) {
@@ -1595,7 +1599,7 @@ int main(int argc, char* argv[]) {
     }
     
     // --only-vectors 需要 namespace
-    if (flag_only_vectors && !ns) {
+    if ((flag_only_vectors || flag_generate_vectors) && !ns) {
         fprintf(stderr, "--only-vectors requires a namespace (e.g., /books/my_book)\n");
         return 1;
     }
@@ -1640,6 +1644,133 @@ int main(int argc, char* argv[]) {
         g_embedder = NULL;
         cache_close(exp_cache);
         return (exported >= 0) ? 0 : 1;
+    }
+    
+    // --generate-vectors: 为已导入但无向量的页面生成向量
+    if (flag_generate_vectors) {
+        printf("Generate-vectors mode: scanning for pages without vectors...\n");
+        printf("Namespace: %s\n", ns);
+        printf("Cache: %s\n", cache_dir);
+        printf("\n");
+        
+        if (!ns) {
+            fprintf(stderr, "--generate-vectors requires a namespace (e.g., /books/my_book)\n");
+            return 1;
+        }
+        
+        // Extract book name from namespace
+        char ns_book_name2[128];
+        const char* last_slash2 = strrchr(ns, '/');
+        strncpy(ns_book_name2, last_slash2 ? last_slash2 + 1 : ns, sizeof(ns_book_name2) - 1);
+        ns_book_name2[sizeof(ns_book_name2) - 1] = '\0';
+        
+        cache_t* gen_cache = cache_open(cache_dir, 4ULL * 1024 * 1024 * 1024);
+        if (!gen_cache) {
+            fprintf(stderr, "Failed to open cache: %s\n", cache_dir);
+            return 1;
+        }
+        printf("Cache opened: %s\n", cache_dir);
+        
+        g_embedder = onnx_embedder_init(MODEL_PATH, VOCAB_PATH, MODEL_SEQ_LEN, EMBEDDING_DIM);
+        if (!g_embedder) {
+            fprintf(stderr, "Failed to load embedding model (%s)\n", onnx_embedder_error());
+            cache_close(gen_cache);
+            return 1;
+        }
+        printf("Embedding model loaded\n");
+        
+        // Iterate cache to find pages without vectors
+        size_t ns_len2 = strlen(ns);
+        cache_iter_t* iter2 = cache_iter_create(gen_cache);
+        if (!iter2) {
+            onnx_embedder_free(g_embedder);
+            g_embedder = NULL;
+            cache_close(gen_cache);
+            return 1;
+        }
+        
+        int gen_count = 0;
+        int skip_count = 0;
+        const char* k2;
+        const char* v2;
+        while (cache_iter_next(iter2, &k2, &v2) == 1) {
+            if (strncmp(k2, ns, ns_len2) != 0) continue;
+            if (!strstr(k2, "/page_")) continue;
+            
+            // Check if page already has a vector
+            size_t existing_dim = 0;
+            const float* existing_vec = cache_get_vector(gen_cache, k2, &existing_dim);
+            if (existing_vec && existing_dim > 0) {
+                skip_count++;
+                continue;
+            }
+            
+            // Parse value JSON to get md_file
+            const char* md_found = strstr(v2, "\"md_file\":\"");
+            if (!md_found) continue;
+            md_found += 11; // skip past "md_file":"
+            const char* md_end = strchr(md_found, '"');
+            if (!md_end) continue;
+            
+            char md_path[1024];
+            size_t md_len = md_end - md_found;
+            if (md_len >= sizeof(md_path)) md_len = sizeof(md_path) - 1;
+            memcpy(md_path, md_found, md_len);
+            md_path[md_len] = '\0';
+            
+            // Read markdown content (skip YAML front matter)
+            FILE* md_fp = fopen(md_path, "r");
+            if (!md_fp) continue;
+            
+            // Read file, skip front matter (between --- lines)
+            char md_content[16384];
+            size_t md_content_len = 0;
+            char line[1024];
+            int in_front = 0;
+            int front_skipped = 0;
+            while (fgets(line, sizeof(line), md_fp) && md_content_len < sizeof(md_content) - 1) {
+                if (strcmp(line, "---\n") == 0 || strcmp(line, "---\r\n") == 0) {
+                    if (!front_skipped) { front_skipped = 1; in_front = 1; continue; }
+                    if (in_front) { in_front = 0; continue; }
+                }
+                if (!in_front) {
+                    size_t line_len = strlen(line);
+                    if (md_content_len + line_len < sizeof(md_content)) {
+                        memcpy(md_content + md_content_len, line, line_len);
+                        md_content_len += line_len;
+                    }
+                }
+            }
+            fclose(md_fp);
+            md_content[md_content_len] = '\0';
+            
+            if (md_content_len < 10) continue;
+            
+            // Generate vector
+            float vec[EMBEDDING_DIM];
+            memset(vec, 0, sizeof(vec));
+            if (onnx_embedder_encode(g_embedder, md_content, vec) == 0) {
+                // Store vector in cache
+                cache_set_vector(gen_cache, k2, v2, vec, EMBEDDING_DIM, 0);
+                gen_count++;
+            }
+        }
+        cache_iter_destroy(iter2);
+        
+        printf("\nVector generation complete: %d generated, %d already had vectors\n", gen_count, skip_count);
+        
+        // Export vectors and build HNSW
+        if (gen_count > 0 || skip_count > 0) {
+            int exported = export_vectors(gen_cache, cache_dir, ns, ns_book_name2);
+            if (exported > 0) {
+                printf("\nDone: %d vectors exported for %s\n", exported, ns);
+            }
+        }
+        
+        onnx_embedder_free(g_embedder);
+        g_embedder = NULL;
+        cache_close(gen_cache);
+        return 0;
     }
     
     // 确定文件类型
