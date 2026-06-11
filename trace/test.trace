@@ -1,3 +1,0 @@
-probe cpu { freq 99 duration 10 }
-probe "lj_gc_step" { collect(call_count) collect(duration_ns: hist) collect(caller) }
-probe "malloc" when bytes > 4096 { collect(bytes: sum) collect(backtrace) }
