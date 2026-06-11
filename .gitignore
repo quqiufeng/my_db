@@ -86,3 +86,8 @@ tools/vector_search
 tools/dataflow
 tools/dataflow_asan
 tools/cross_search.sh.bak
+
+# Agent build artifacts
+agent/agent
+agent/build/
+agent/*.o
