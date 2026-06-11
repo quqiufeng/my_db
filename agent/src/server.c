@@ -1,3 +1,5 @@
+#include <sys/stat.h>
+#include <dirent.h>
 #include "crypto.h"
 #include "agent.h"
 #include <stdio.h>
@@ -490,6 +492,7 @@ static int on_master_cmd(agent_state_t *state, int fd,
             char persist_path[512];
             snprintf(persist_path, sizeof(persist_path), "%s/task_%s.json",
                      state->config.data_dir, task_id);
+            mkdir(state->config.data_dir, 0755);
             FILE *pf = fopen(persist_path, "w");
             if (pf) {
                 fprintf(pf, "{\"task_id\":\"%s\",\"cmd\":\"%s\",\"created\":%ld}\n",
@@ -660,6 +663,52 @@ static int handle_read(agent_state_t *state, int fd) {
 /* ===================================================================
  * election_tick - 顺序 PK 选举状态机
  * =================================================================== */
+
+
+/* ===================================================================
+ * pending_task_recover - 启动时从 data_dir 恢复未完成的任务
+ * =================================================================== */
+static void pending_task_recover(agent_state_t *state) {
+    char pattern[512];
+    snprintf(pattern, sizeof(pattern), "%s/task_*.json", state->config.data_dir);
+    
+    DIR *dir = opendir(state->config.data_dir);
+    if (!dir) return;
+
+    struct dirent *entry;
+    int recovered = 0;
+    while ((entry = readdir(dir)) != NULL) {
+        if (strncmp(entry->d_name, "task_", 5) != 0) continue;
+        if (strstr(entry->d_name, ".json") == NULL) continue;
+
+        char path[512];
+        snprintf(path, sizeof(path), "%s/%s", state->config.data_dir, entry->d_name);
+        
+        FILE *f = fopen(path, "r");
+        if (!f) continue;
+        
+        char buf[4096] = {0};
+        if (fread(buf, 1, sizeof(buf) - 1, f) == 0) { fclose(f); continue; }
+        fclose(f);
+
+        /* parse: {"task_id":"...","cmd":"...","created":123} */
+        char task_id[64] = {0}, cmd[4096] = {0};
+        long created = 0;
+        sscanf(buf, "{\"task_id\":\"%63[^\"]\",\"cmd\":\"%4095[^\"]\",\"created\":%ld}",
+               task_id, cmd, &created);
+
+        if (task_id[0] && cmd[0]) {
+            agent_log("INFO", "[recover] pending task %s: %s (created=%ld ago)",
+                      task_id, cmd, created > 0 ? (now_ms() - created) / 1000 : 0);
+            recovered++;
+            /* remove the file after recovery */
+            unlink(path);
+        }
+    }
+    closedir(dir);
+    if (recovered > 0)
+        agent_log("INFO", "[recover] %d pending tasks recovered (discarded - restart)", recovered);
+}
 static void election_tick(agent_state_t *state, long now) {
     /* ========= Follower: election timeout -> candidate ========= */
     if (state->election.role == ELECTION_FOLLOWER) {
@@ -778,6 +827,7 @@ int server_event_loop(agent_state_t *state) {
     int nfds;
 
     agent_log("INFO", "entering event loop");
+    pending_task_recover(state);
 
     while (state->running) {
         nfds = epoll_wait(state->epoll_fd, events, 256, 100);
@@ -875,6 +925,8 @@ static void pending_task_collect(agent_state_t *state, pending_task_t *pt) {
         pt->task_id, results);
     encrypt_and_send(pt->master_fd, MSG_MASTER_RESULT, PROTO_FLAG_RESPONSE,
                      resp, strlen(resp));
+    char _del[512]; snprintf(_del, sizeof(_del), "%s/task_%s.json", state->config.data_dir, pt->task_id);
+    if (unlink(_del) < 0) agent_log("WARN", "failed to remove task file: %s errno=%d(%s)", _del, errno, strerror(errno));
     agent_log("INFO", "task %s completed: %d nodes, sent to master fd=%d",
               pt->task_id, pt->received, pt->master_fd);
 }
@@ -907,3 +959,5 @@ static void pending_tick(agent_state_t *state, long now) {
     }
 }
 
+#include <dirent.h>
+#include <unistd.h>
