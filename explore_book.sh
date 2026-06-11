@@ -104,7 +104,7 @@
 #   ./explore_book.sh /books/elon_musk read chapters/12-SpaceX/page_0000
 #
 # 示例 3: 跨书搜索（不指定 --repo）
-#   ./tools/cache_query "concurrency" --type search --analysis-dir /book/cache --max-results 10
+#   ./tools/cache_query "concurrency" --type search --analysis-dir /book/cache --cache-dir /book/cache --max-results 10
 #   → 同时在所有已导入书籍中搜索
 #
 # 示例 4: 浏览章节
@@ -236,7 +236,7 @@ cmd_overview() {
     
     local meta_key="${NAMESPACE}/_meta"
     local result
-    result=$("$CACHE_QUERY" "$meta_key" --type exact --pretty 2>&1 | extract_json)
+    result=$("$CACHE_QUERY" "$meta_key" --type exact --cache-dir /book/cache --pretty 2>&1 | extract_json)
     
     echo "$result" | python3 -c "
 import sys, json
@@ -287,50 +287,68 @@ cmd_search() {
     
     # 执行语义搜索（向量索引在 /memory/vectors/ 中）
     local search_result
-    search_result=$("$CACHE_QUERY" "$query" --repo "$NAMESPACE" --type search --analysis-dir /book/cache --max-results "$max_results" --pretty 2>&1 | extract_json)
+    search_result=$("$CACHE_QUERY" "$query" --repo "$NAMESPACE" --type search --analysis-dir /book/cache --cache-dir /book/cache --max-results "$max_results" --pretty 2>&1 | extract_json)
     
-    echo "$search_result" | python3 -c "
+    echo "$search_result" | python3 -c '
 import sys, json
 d = json.load(sys.stdin)
-results = d.get('results', [])
+results = d.get("results", [])
 
 if not results:
-    print('未找到相关结果。')
-    print('可能原因：')
-    print('  1. 向量未生成（检查 import_book 是否成功）')
-    print('  2. 查询词与书籍内容不匹配')
-    print('  3. GPU 环境未配置（检查 LD_LIBRARY_PATH）')
+    print("未找到相关结果。")
+    print("可能原因：")
+    print("  1. 向量未生成（检查 import_book 是否成功）")
+    print("  2. 查询词与书籍内容不匹配")
+    print("  3. GPU 环境未配置（检查 LD_LIBRARY_PATH）")
     sys.exit(0)
 
-print('找到 ' + str(len(results)) + ' 个相关页面：\n')
+print("找到 " + str(len(results)) + " 个相关页面：\n")
 
 for i, r in enumerate(results, 1):
-    name = r.get('name', 'N/A')
-    score = r.get('score', 0)
-    content = r.get('content', '')
-    
-    # 生成预览片段（前 120 个字符）
-    preview = content[:120].replace('\n', ' ').strip()
-    if len(content) > 120:
-        preview += '...'
-    
-    # 从完整 key 中提取 page_key (去掉 namespace 前缀)
+    name = r.get("name", "N/A")
+    score = r.get("score", 0)
     page_key = name
-    ns_prefix = '/books/'
+    ns_prefix = "/books/"
     if name.startswith(ns_prefix):
-        parts = name.split('/', 3)
+        parts = name.split("/", 3)
         if len(parts) >= 4:
-            page_key = parts[3] if parts[3].startswith('chapters/') else 'chapters/' + parts[3]
-    
-    parts = name.split('/')
-    book_ns = '/books/' + parts[2] if len(parts) > 2 else '/books/unknown'
-    
-    print(str(i) + '. [' + str(round(score, 3)) + '] ' + name)
+            page_key = parts[3] if parts[3].startswith("chapters/") else "chapters/" + parts[3]
+    parts = name.split("/")
+    book_ns = "/books/" + parts[2] if len(parts) > 2 else "/books/unknown"
+    preview = ""
+    try:
+        import subprocess, json as j
+        cache_query_path = "/opt/my_db/tools/cache_query"
+        kv_result = subprocess.run(
+            [cache_query_path, name, "--type", "exact", "--cache-dir", "/book/cache", "--pretty"],
+            capture_output=True, text=True, timeout=5
+        )
+        out = kv_result.stdout
+        s = out.find("{")
+        e = out.rfind("}")
+        if s >= 0 and e > s:
+            kv_data = j.loads(out[s:e+1])
+            for res in kv_data.get("results", []):
+                c = res.get("content", {})
+                if isinstance(c, dict):
+                    preview = c.get("preview", "")
+                elif isinstance(c, str):
+                    preview = c[:120]
+    except:
+        pass
+    print(str(i) + ". [" + str(round(score, 3)) + "] " + name)
     if preview:
-        print('   Preview: ' + preview)
-    print('   Read: ./explore_book.sh ' + book_ns + ' read ' + page_key)
+        p = preview
+        for esc in ["\\n", "\\r", "\\t", "\\\""]:
+            p = p.replace(esc, " ")
+        if len(p) > 120:
+            p = p[:120] + "..."
+        p = p.strip()
+        if p:
+            print("   Preview: " + p)
+    print("   Read: ./explore_book.sh " + book_ns + " read " + page_key)
     print()
-"
+'
     
     echo ""
     log "To read a page, use:"
@@ -463,10 +481,10 @@ cmd_read() {
     
     # 查询 KV Cache 获取 md_file 路径
     local result
-    result=$("$CACHE_QUERY" "$full_key" --type exact --pretty 2>&1 | extract_json)
+    result=$("$CACHE_QUERY" "$full_key" --type exact --cache-dir /book/cache --pretty 2>&1 | extract_json)
     
     local md_file
-    md_file=$(echo "$result" | python3 -c 'import sys,json; d=json.load(sys.stdin); r=d.get("results",[]); print(r[0].get("content",{}).get("md_file","")) if r else ""' 2>/dev/null)
+    md_file=$(echo "$result" | grep -oP '"md_file":"[^"]*"' | head -1 | sed 's/"md_file":"//;s/"//g')
     
     # 如果上面的方法失败，直接用 grep
     if [[ -z "$md_file" ]]; then
@@ -529,16 +547,17 @@ cmd_chapter() {
         local result
         result=$("$CACHE_QUERY" "$meta_key" --type exact --pretty 2>&1 | extract_json)
         
-        echo "$result" | python3 -c "
+        echo "$result" | python3 << 'HEREDOC_PYTHON'
 import sys, json
 d = json.load(sys.stdin)
 results = d.get('results', [])
 if results:
     r = results[0]
     chapters = r.get('chapters', 0)
-    print(f'总章节数: {chapters}')
+    print('总章节数: ' + str(chapters))
     print()
-" 2>/dev/null
+HEREDOC_PYTHON
+        2>/dev/null
         
         # 扫描目录结构
         local book_name=$(basename "$NAMESPACE")
