@@ -297,9 +297,90 @@ static int on_ok(agent_state_t *state, int fd,
     (void)state; (void)fd; (void)payload; (void)len;
     return 0;
 }
+
+/* ========== Task dispatch ========== */
+static int on_task_dispatch(agent_state_t *state, int fd,
+                            const char *payload, uint32_t len) {
+    (void)fd;
+    agent_log("DEBUG", "task dispatch: %.*s", (int)len, payload);
+    char resp[2048];
+    snprintf(resp, sizeof(resp),
+        "{\"status\":\"ok\",\"node\":\"%s\",\"msg\":\"simulated\"}",
+        state->ctx.self_addr);
+    send_message(fd, MSG_TASK_RESULT, PROTO_FLAG_RESPONSE, resp, strlen(resp));
+    return 0;
+}
+
+static int on_task_result(agent_state_t *state, int fd,
+                          const char *payload, uint32_t len) {
+    agent_log("DEBUG", "task result from fd=%d: %.*s", fd, (int)len, payload);
+    return 0;
+}
+
+static int on_status_report(agent_state_t *state, int fd,
+                            const char *payload, uint32_t len) {
+    peer_t *peer = peer_find_by_fd(state, fd);
+    if (peer) {
+        json_to_session_ctx(payload, &peer->remote_ctx);
+        peer->last_heartbeat = now_ms();
+        peer->heartbeat_miss = 0;
+    }
+    return 0;
+}
+
+/* ========== Master command channel ========== */
+static int on_master_cmd(agent_state_t *state, int fd,
+                         const char *payload, uint32_t len) {
+    if (strcmp(state->ctx.role, "leader") != 0) {
+        char resp[256];
+        snprintf(resp, sizeof(resp),
+            "{\"error\":\"not_leader\",\"leader\":\"%s\"}",
+            state->ctx.leader_addr);
+        send_message(fd, MSG_MASTER_RESULT, PROTO_FLAG_RESPONSE, resp, strlen(resp));
+        return 0;
+    }
+    agent_log("DEBUG", "master cmd: %.*s", (int)len, payload);
+    char action[32] = {0};
+    sscanf(payload, "{\"action\":\"%31[^\"]\"", action);
+
+    if (strcmp(action, "exec") == 0) {
+        char cmd[4096] = {0};
+        int tmo = 30;
+        sscanf(payload,
+            "{\"action\":\"%*[^\"]\",\"cmd\":\"%4095[^\"]\",\"timeout\":%d}",
+            cmd, &tmo);
+        char resp[4096];
+        snprintf(resp, sizeof(resp),
+            "{\"status\":\"ok\",\"task_id\":\"t_%ld\",\"results\":["
+            "{\"node\":\"%s\",\"exit\":0,\"stdout\":\"(sim) %s\"}]}",
+            now_ms(), state->ctx.self_addr, cmd);
+        send_message(fd, MSG_MASTER_RESULT, PROTO_FLAG_RESPONSE, resp, strlen(resp));
+    } else if (strcmp(action, "query") == 0) {
+        char json[2048];
+        session_ctx_to_json(&state->ctx, json, sizeof(json));
+        send_message(fd, MSG_MASTER_RESULT, PROTO_FLAG_RESPONSE, json, strlen(json));
+    } else {
+        char resp[256];
+        snprintf(resp, sizeof(resp), "{\"error\":\"unknown_action\",\"action\":\"%s\"}", action);
+        send_message(fd, MSG_MASTER_RESULT, PROTO_FLAG_RESPONSE, resp, strlen(resp));
+    }
+    return 0;
+}
+
+static int on_master_status(agent_state_t *state, int fd,
+                            const char *payload, uint32_t len) {
+    (void)payload; (void)len;
+    char json[2048];
+    session_ctx_to_json(&state->ctx, json, sizeof(json));
+    send_message(fd, MSG_MASTER_STATUS, PROTO_FLAG_RESPONSE, json, strlen(json));
+    return 0;
+}
+
 /* ===================================================================
  * handle_message - 消息分发
  * =================================================================== */
+
+
 static int handle_message(agent_state_t *state, int fd,
                           uint8_t type, uint8_t flags,
                           char *payload, uint32_t len) {
@@ -307,12 +388,17 @@ static int handle_message(agent_state_t *state, int fd,
     switch (type) {
     case MSG_MASTER_HELLO:  return on_master_hello(state, fd, payload, len);
     case MSG_MASTER_QUERY:  return on_master_query(state, fd, payload, len);
+    case MSG_MASTER_CMD:    return on_master_cmd(state, fd, payload, len);
+    case MSG_MASTER_STATUS: return on_master_status(state, fd, payload, len);
     case MSG_ELECTION_VOTE_REQ:  return on_election_vote_req(state, fd, payload, len);
     case MSG_ELECTION_VOTE_RESP: return on_election_vote_resp(state, fd, payload, len);
     case MSG_COORD:         return on_coord(state, fd, payload, len);
     case MSG_OK:            return on_ok(state, fd, payload, len);
     case MSG_HEARTBEAT:     return on_heartbeat(state, fd, payload, len);
     case MSG_HEARTBEAT_ACK: return on_heartbeat_ack(state, fd, payload, len);
+    case MSG_TASK_DISPATCH: return on_task_dispatch(state, fd, payload, len);
+    case MSG_TASK_RESULT:   return on_task_result(state, fd, payload, len);
+    case MSG_STATUS_REPORT: return on_status_report(state, fd, payload, len);
     default:
         agent_log("WARN", "unknown message type: 0x%02X", type);
         return 0;
@@ -524,6 +610,16 @@ int server_event_loop(agent_state_t *state) {
 
             if (events[i].events & EPOLLIN)
                 handle_read(state, fd);
+
+            /* drain any remaining data before processing error/hup */
+            if (events[i].events & EPOLLIN) {
+                uint8_t _tmp[256];
+                int _n;
+                while ((_n = read(fd, _tmp, sizeof(_tmp))) > 0) {}
+                if (_n < 0 && errno != EAGAIN) {
+                    /* read error, will be handled by EPOLLERR below */
+                }
+            }
 
             if (events[i].events & (EPOLLERR | EPOLLHUP)) {
                 peer_t *peer = peer_find_by_fd(state, fd);
