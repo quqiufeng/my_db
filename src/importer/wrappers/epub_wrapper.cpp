@@ -483,6 +483,20 @@ API int epub_extract_text(void* handle, char** out_text, size_t* out_len) {
                 temp_chapters.push_back(ch);
             }
             
+            // 如果 <title> 是纯数字（如 Kobo 格式），从 nav.xhtml 获取真实标题
+            if (!ch_title.empty()) {
+                bool is_numeric = true;
+                for (char c : ch_title) {
+                    if (c != ' ' && c != '\n' && c != '\r' && c != '\t' && (c < '0' || c > '9')) {
+                        is_numeric = false; break;
+                    }
+                }
+                if (is_numeric && temp_chapters.size() > 0) {
+                    // 标记最后一个章节的标题为待替换
+                    temp_chapters.back().title[0] = '\0';
+                }
+            }
+            
             if (!chapter_text.empty()) {
                 full_text += chapter_text;
                 full_text += "\n\n";
@@ -495,6 +509,35 @@ API int epub_extract_text(void* handle, char** out_text, size_t* out_len) {
     
     xmlFreeDoc(opf_doc);
     
+    // 3.5 从 XHTML 内容中提取真实章节标题
+    // 对于标题是纯数字的章节，从章节文本中提取 "Chapter X:" 开头的行作为标题
+    {
+        size_t text_pos = 0;
+        for (size_t ci = 0; ci < temp_chapters.size(); ci++) {
+            auto& ch = temp_chapters[ci];
+            if (ch.title[0] == '\0') {
+                // 从 full_text 的 text_pos 位置找 "Chapter " 开头的行
+                std::string search = "Chapter ";
+                size_t pos = full_text.find(search, text_pos);
+                if (pos != std::string::npos && pos < text_pos + 2000) {
+                    size_t end = full_text.find('\n', pos);
+                    if (end == std::string::npos) end = pos + 100;
+                    std::string title = full_text.substr(pos, end - pos);
+                    // Trim
+                    size_t s = title.find_first_not_of(" \n\r\t");
+                    size_t e = title.find_last_not_of(" \n\r\t");
+                    if (s != std::string::npos && e != std::string::npos) {
+                        free(ch.title);
+                        ch.title = strdup(title.substr(s, e - s + 1).c_str());
+                    }
+                }
+            }
+            // 更新到下一章节偏移
+            if (ci + 1 < temp_chapters.size()) {
+                text_pos = temp_chapters[ci + 1].offset;
+            }
+        }
+    }
     // 4. 保存结果
     h->text_cache_len = full_text.length();
     h->text_cache = (char*)malloc(h->text_cache_len + 1);
