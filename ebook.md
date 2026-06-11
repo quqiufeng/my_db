@@ -89,13 +89,20 @@
 
 **用法**：
 ```bash
-./tools/import_book <cache_dir> <book_file> [namespace] [output_dir]
+./tools/import_book <cache_dir> <book_file> [namespace] [output_dir] [options]
 ```
+
+**选项**：
+| 参数 | 说明 |
+|------|------|
+| `--skip-vectors` | 跳过向量生成（更快，但无语义搜索） |
+| `--only-vectors` | 仅重新导出已有向量（需已生成过） |
+| `--generate-vectors` | 为已导入但无向量的页面生成向量 |
 
 **参数说明**：
 | 参数 | 必需 | 说明 |
 |------|------|------|
-| `cache_dir` | 是 | KV Cache 目录，如 `/memory` |
+| `cache_dir` | 是 | KV Cache 目录，如 `/book/cache` |
 | `book_file` | 是 | 电子书文件路径 |
 | `namespace` | 否 | 命名空间，如 `/books/ddia`。默认从文件名生成 |
 | `output_dir` | 否 | Markdown 输出目录，默认 `/opt/books` |
@@ -103,18 +110,21 @@
 **示例**：
 ```bash
 # 基本导入
-./tools/import_book /memory ~/book.mobi
+./tools/import_book /book/cache ~/book.mobi
 
 # 指定命名空间
-./tools/import_book /memory ~/book.mobi /books/my_book
+./tools/import_book /book/cache ~/book.mobi /books/my_book
 
-# 指定输出目录
-./tools/import_book /memory ~/paper.pdf /books/paper /data/books
+# 快速导入（跳过向量生成）
+./tools/import_book /book/cache ~/book.epub --skip-vectors
+
+# 仅为已有页面生成向量（需先导入文本）
+./tools/import_book /book/cache /books/my_book --generate-vectors
 
 # 完整示例：导入 Elon Musk 传记
 LD_LIBRARY_PATH=$(pwd):/opt/TensorRT-10/lib:$LD_LIBRARY_PATH \
   ./tools/import_book \
-  /memory \
+  /book/cache \
   "/home/dministrator/硅谷钢铁侠.azw3" \
   /books/elon_musk \
   /opt/books
@@ -133,7 +143,7 @@ LD_LIBRARY_PATH=$(pwd):/opt/TensorRT-10/lib:$LD_LIBRARY_PATH \
 
 **KV Cache 存储结构**：
 ```
-/memory/
+/book/cache/
 ├── cache.bin                    # 原始数据
 ├── index.bin                    # 索引文件
 └── vectors/
@@ -324,7 +334,7 @@ elon_musk/
 ```bash
 ./tools/cache_query "concurrency" \
   --type search \
-  --analysis-dir /memory \
+  --analysis-dir /book/cache \
   --max-results 10
 ```
 
@@ -343,7 +353,7 @@ elon_musk/
 
 **查看所有命名空间**：
 ```bash
-strings /memory/cache.bin | grep "^/books/" | sort -u
+strings /book/cache/cache.bin | grep "^/books/" | sort -u
 ```
 
 ---
@@ -548,10 +558,10 @@ strings /memory/cache.bin | grep "^/books/" | sort -u
 **排查命令**：
 ```bash
 # 检查向量文件是否存在
-ls -la /memory/vectors/*.hnsw
+ls -la /book/cache/vectors/*.hnsw
 
 # 检查 GPU 是否可用
-./tools/cache_query "test" --type search --analysis-dir /memory
+./tools/cache_query "test" --type search --analysis-dir /book/cache
 # 如果看到 "CUDA not available, falling back to CPU"，说明 GPU 未配置
 ```
 
@@ -602,7 +612,7 @@ ls -la libmydb.so
 | `src/vector_engine.c` | 语义搜索引擎 |
 | `src/cache/cache.c` | KV Cache 实现 |
 | `/opt/models/jina-embeddings-v2-base-code/` | Jina v2 嵌入模型 |
-| `/memory/` | KV Cache 数据目录 |
+| `/book/cache/` | KV Cache 数据目录 |
 | `/opt/books/` | Markdown 输出目录 |
 
 ---
@@ -788,16 +798,16 @@ ldd tools/import_book | grep onnx
 
 # 3. 验证 TensorRT 可用
 export LD_LIBRARY_PATH=/opt/TensorRT-10/lib:$(pwd):$LD_LIBRARY_PATH
-./tools/import_book /memory ~/test.epub /books/test
+./tools/import_book /book/cache ~/test.epub /books/test
 # 应看到："Using TensorRT GPU acceleration (FP32 for Jina)"
 
 # 4. 验证 HNSW 索引生成
-ls -la /memory/vectors/*.hnsw
+ls -la /book/cache/vectors/*.hnsw
 # 应存在 .hnsw 文件
 
 # 5. 验证语义搜索
 ./explore_book.sh /books/test search "test query"
-# 应返回相关结果，而非 "Vector engine not initialized"
+# 应返回相关结果
 ```
 
 ---
@@ -821,7 +831,7 @@ make clean && make tools/import_book
 
 # 3. 验证 V2 API 生效（导入时观察日志）
 export LD_LIBRARY_PATH=/opt/TensorRT-10/lib:$(pwd):$LD_LIBRARY_PATH
-./import_book.sh /memory ~/test.epub /books/test
+./import_book.sh /book/cache ~/test.epub /books/test
 
 # 期望输出（首次编译 engine，耗时较长）：
 #   [INFO] Building TensorRT engine...
@@ -829,8 +839,8 @@ export LD_LIBRARY_PATH=/opt/TensorRT-10/lib:$(pwd):$LD_LIBRARY_PATH
 #   Batch embedding: N batches of 32 pages each
 
 # 4. 验证 batch 生效（engine 缓存后再次导入，应更快）
-rm -rf /memory/vectors/* /opt/books/test
-time ./import_book.sh /memory ~/test.epub /books/test
+rm -rf /book/cache/vectors/* /opt/books/test
+time ./import_book.sh /book/cache ~/test.epub /books/test
 # 第二次导入应看到：
 #   Batch embedding: X batches of 32 pages each
 #   real ~11s（AZW3 838页）
@@ -1374,13 +1384,13 @@ cd src/importer/wrappers && make
 export LD_LIBRARY_PATH=/opt/TensorRT-10/lib:$(pwd):$LD_LIBRARY_PATH
 
 # 3. 导入四本测试书
-./tools/import_book /memory ~/book.epub /books/epub
-./tools/import_book /memory ~/book.azw3 /books/azw3
-./tools/import_book /memory ~/book.mobi /books/mobi
-./tools/import_book /memory ~/book.pdf /books/pdf
+./tools/import_book /book/cache ~/book.epub /books/epub
+./tools/import_book /book/cache ~/book.azw3 /books/azw3
+./tools/import_book /book/cache ~/book.mobi /books/mobi
+./tools/import_book /book/cache ~/book.pdf /books/pdf
 
 # 4. 验证向量文件
-ls -la /memory/vectors/*.hnsw
+ls -la /book/cache/vectors/*.hnsw
 
 # 5. 测试语义搜索
 ./explore_book.sh /books/mobi search "your query"
@@ -1518,7 +1528,7 @@ if (!flag_skip_vectors) {
 | 3 | cache.bin 4GB | 500MB | 4GB | 8x 容量 |
 | 4 | `--generate-vectors` 模式 | 无此功能 | 批量生成 | — |
 | 5 | `--only-vectors` 增量模式 | 无此功能 | 重新导出 | — |
-| 6 | KV Cache 独立路径 | `/memory/` | `/book/cache/` | 不冲突 |
+| 6 | KV Cache 独立路径 | `/book/cache/` | `/book/cache/` | 不冲突 |
 
 ---
 
