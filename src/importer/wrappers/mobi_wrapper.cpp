@@ -98,38 +98,168 @@ static void extract_text_from_html(const char* data, size_t size, std::string& r
     bool in_tag = false;
     bool in_style = false;
     bool in_script = false;
+    bool in_pre = false;
     
     for (size_t i = 0; i < size; i++) {
-        char c = data[i];
+        unsigned char c = (unsigned char)data[i];
         
-        // 检查是否进入 style 标签
-        if (!in_tag && i + 6 < size && strncasecmp(data + i, "<style", 6) == 0) {
-            in_style = true;
+        // Check for style/script start
+        if (!in_tag && !in_style && !in_script) {
+            size_t remain = size - i;
+            if (remain > 6 && strncasecmp(data + i, "<style", 6) == 0 &&
+                (data[i+6] == '>' || data[i+6] == ' ')) {
+                in_style = true; continue;
+            }
+            if (remain > 7 && strncasecmp(data + i, "<script", 7) == 0 &&
+                (data[i+7] == '>' || data[i+7] == ' ')) {
+                in_script = true; continue;
+            }
         }
-        if (in_style && i + 7 < size && strncasecmp(data + i, "</style", 7) == 0) {
-            in_style = false;
-            in_tag = true;  // 跳过 </style>
-            continue;
+        // Check for style/script end
+        if (in_style && c == '<' && size - i > 8 &&
+            strncasecmp(data + i, "</style", 7) == 0) {
+            in_style = false; i += 7; continue;
         }
-        
-        // 检查是否进入 script 标签
-        if (!in_tag && i + 7 < size && strncasecmp(data + i, "<script", 7) == 0) {
-            in_script = true;
+        if (in_script && c == '<' && size - i > 9 &&
+            strncasecmp(data + i, "</script", 8) == 0) {
+            in_script = false; i += 8; continue;
         }
-        if (in_script && i + 8 < size && strncasecmp(data + i, "</script", 8) == 0) {
-            in_script = false;
-            in_tag = true;  // 跳过 </script>
-            continue;
-        }
-        
         if (in_style || in_script) continue;
         
         if (c == '<') {
             in_tag = true;
-        } else if (c == '>') {
+            // Read tag name
+            size_t j = i + 1;
+            bool is_close = (data[j] == '/');
+            if (is_close) j++;
+            while (j < size && data[j] != '>' && data[j] != ' ' && data[j] != '\t') j++;
+            std::string tag(data + (is_close ? i + 2 : i + 1), j - (is_close ? i + 2 : i + 1));
+            for (auto& ch : tag) ch = tolower(ch);
+            
+            // Find tag end
+            const char* end_ptr = (const char*)memchr(data + i, '>', size - i);
+            if (!end_ptr) { result += c; continue; }
+            
+            // Heading conversion
+            if (tag == "h1" || tag == "h2" || tag == "h3" ||
+                tag == "h4" || tag == "h5" || tag == "h6") {
+                if (!is_close) {
+                    if (!result.empty() && result.back() != '\n') result += '\n';
+                    int h = tag[1] - '0';
+                    for (int k = 0; k < h; k++) result += '#';
+                    result += ' ';
+                } else {
+                    result += '\n';
+                }
+                i = end_ptr - data; in_tag = false; continue;
+            }
+            
+            // Block elements: wrap with newlines
+            if (tag == "p" || tag == "div") {
+                if (!is_close && !result.empty() && result.back() != '\n') result += '\n';
+                if (is_close) result += '\n';
+                i = end_ptr - data; in_tag = false; continue;
+            }
+            if (tag == "br" || tag == "br/") {
+                result += '\n';
+                i = end_ptr - data; in_tag = false; continue;
+            }
+            
+            // Inline formatting
+            if (tag == "b" || tag == "strong") {
+                result += is_close ? "**" : "**";
+                i = end_ptr - data; in_tag = false; continue;
+            }
+            if (tag == "i" || tag == "em") {
+                result += is_close ? "*" : "*";
+                i = end_ptr - data; in_tag = false; continue;
+            }
+            if (tag == "code" || tag == "tt") {
+                result += is_close ? "`" : "`";
+                i = end_ptr - data; in_tag = false; continue;
+            }
+            
+            // Code block
+            if (tag == "pre") {
+                in_pre = !is_close;
+                if (!is_close) result += "\n```\n";
+                else result += "\n```\n";
+                i = end_ptr - data; in_tag = false; continue;
+            }
+            
+            // Lists
+            if (tag == "li") {
+                if (!is_close) result += "\n- ";
+                i = end_ptr - data; in_tag = false; continue;
+            }
+            if (tag == "ul" || tag == "ol") {
+                if (!is_close && !result.empty() && result.back() != '\n') result += '\n';
+                i = end_ptr - data; in_tag = false; continue;
+            }
+            
+            // Blockquote
+            if (tag == "blockquote") {
+                if (!is_close) result += "\n> ";
+                else result += "\n";
+                i = end_ptr - data; in_tag = false; continue;
+            }
+            
+            // Link: just keep [text](url) marker
+            if (tag == "a") {
+                if (!is_close) {
+                    // Check for href
+                    std::string attr_start = "href=\"";
+                    const char* href_pos = (const char*)memchr(data + i, 'h', end_ptr - (data + i));
+                    if (href_pos) {
+                        const char* val_start = (const char*)memchr(href_pos + 5, '"', end_ptr - (href_pos + 5));
+                        if (val_start) {
+                            const char* val_end = (const char*)memchr(val_start + 1, '"', end_ptr - (val_start + 1));
+                            // Just output [ and let the ](url) be reconstructed
+                        }
+                    }
+                    result += "[";
+                } else {
+                    result += "]";
+                }
+                i = end_ptr - data; in_tag = false; continue;
+            }
+            
+            // Unknown tag: skip
+            i = end_ptr - data;
             in_tag = false;
-            result += ' ';
-        } else if (!in_tag) {
+            continue;
+        }
+        
+        if (c == '>') {
+            in_tag = false;
+            continue;
+        }
+        
+        // Text content
+        if (!in_tag && !in_pre) {
+            // HTML entities
+            if (c == '&' && size - i > 3) {
+                if (strncmp(data + i, "&amp;", 5) == 0) { result += '&'; i += 4; continue; }
+                if (strncmp(data + i, "&lt;", 4) == 0) { result += '<'; i += 3; continue; }
+                if (strncmp(data + i, "&gt;", 4) == 0) { result += '>'; i += 3; continue; }
+                if (strncmp(data + i, "&quot;", 6) == 0) { result += '"'; i += 5; continue; }
+                if (strncmp(data + i, "&nbsp;", 6) == 0) { result += ' '; i += 5; continue; }
+                if (strncmp(data + i, "&apos;", 6) == 0) { result += '\''; i += 5; continue; }
+                if (data[i+1] == '#') {
+                    char* end = nullptr;
+                    long code = strtol(data + i + 2, &end, 10);
+                    if (end && *end == ';' && code > 0x20 && code < 0x10000) {
+                        char utf8[8]; int len = 0;
+                        if (code < 0x80) utf8[len++] = code;
+                        else if (code < 0x800) { utf8[len++] = 0xC0 | (code >> 6); utf8[len++] = 0x80 | (code & 0x3F); }
+                        else { utf8[len++] = 0xE0 | (code >> 12); utf8[len++] = 0x80 | ((code >> 6) & 0x3F); utf8[len++] = 0x80 | (code & 0x3F); }
+                        result.append(utf8, len);
+                        i = end - data; continue;
+                    }
+                }
+            }
+            result += c;
+        } else if (in_pre) {
             result += c;
         }
     }
@@ -459,34 +589,9 @@ API int mobi_get_chapter_text(void* handle, int chapter_index, char** out_text, 
         return -1;
     }
     
-    // 转换为纯文本
+    // Convert to Markdown using shared extract_text_from_html
     std::string result;
-    bool in_tag = false;
-    bool in_style = false;
-    
-    for (size_t i = posoff; i < end_offset && i < data_size; i++) {
-        char c = data[i];
-        
-        if (!in_tag && i + 6 < data_size && strncasecmp(data + i, "<style", 6) == 0) {
-            in_style = true;
-        }
-        if (in_style && i + 7 < data_size && strncasecmp(data + i, "</style", 7) == 0) {
-            in_style = false;
-            in_tag = true;
-            continue;
-        }
-        
-        if (in_style) continue;
-        
-        if (c == '<') {
-            in_tag = true;
-        } else if (c == '>') {
-            in_tag = false;
-            result += ' ';
-        } else if (!in_tag) {
-            result += c;
-        }
-    }
+    extract_text_from_html(data + posoff, end_offset - posoff, result);
     
     if (result.empty()) {
         *out_text = nullptr;
@@ -498,13 +603,13 @@ API int mobi_get_chapter_text(void* handle, int chapter_index, char** out_text, 
     *out_text = (char*)malloc(*out_len + 1);
     if (!*out_text) return -1;
     
-    // 逐字节复制，避免 std::string::c_str() 在 \0 处截断
     for (size_t i = 0; i < *out_len; i++) {
         (*out_text)[i] = result[i];
     }
     (*out_text)[*out_len] = '\0';
     return 0;
 }
+
 
 /**
  * 释放章节文本
