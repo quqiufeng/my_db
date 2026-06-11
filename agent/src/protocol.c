@@ -2,7 +2,9 @@
 #include <string.h>
 #include <stdio.h>
 #include <unistd.h>
-#include <arpa/inet.h>   /* htonl, ntohl */
+#include <arpa/inet.h>
+#include "agent.h"
+#include <errno.h>   /* htonl, ntohl */
 
 /* ===================================================================
  * CRC32 表（简化实现，生产环境可用 zlib 的 crc32）
@@ -71,14 +73,36 @@ int send_message(int fd, uint8_t type, uint8_t flags,
     /* 构造帧头 */
     pack_header(&hdr, type, flags, payload_len);
 
-    /* 发送帧头 */
-    ret = (int)write(fd, &hdr, PROTO_HEADER_LEN);
-    if (ret != PROTO_HEADER_LEN) return -1;
+    /* 发送帧头（循环直到全部发完） */
+    {
+        size_t remain = PROTO_HEADER_LEN;
+        const uint8_t *ptr = (const uint8_t *)&hdr;
+        while (remain > 0) {
+            ret = (int)write(fd, ptr, remain);
+            if (ret < 0) {
+                if (errno == EAGAIN || errno == EWOULDBLOCK) return -1;
+                return -1;
+            }
+            ptr    += ret;
+            remain -= ret;
+        }
+    }
 
     /* 发送 payload */
     if (payload_len > 0) {
-        ret = (int)write(fd, payload, payload_len);
-        if (ret != (int)payload_len) return -1;
+        {
+        size_t remain = payload_len;
+        const uint8_t *ptr = (const uint8_t *)payload;
+        while (remain > 0) {
+            ret = (int)write(fd, ptr, remain);
+            if (ret < 0) {
+                if (errno == EAGAIN || errno == EWOULDBLOCK) return -1;
+                return -1;
+            }
+            ptr    += ret;
+            remain -= ret;
+        }
+    }
     }
 
     /* 计算并发送 CRC（从 type 到 payload 末尾） */
@@ -101,8 +125,19 @@ int send_message(int fd, uint8_t type, uint8_t flags,
     crc_buf[2] = (crc >>  8) & 0xFF;
     crc_buf[3] = (crc >>  0) & 0xFF;
 
-    ret = (int)write(fd, crc_buf, PROTO_CRC_LEN);
-    if (ret != PROTO_CRC_LEN) return -1;
+    {
+        size_t remain = PROTO_CRC_LEN;
+        const uint8_t *ptr = crc_buf;
+        while (remain > 0) {
+            ret = (int)write(fd, ptr, remain);
+            if (ret < 0) {
+                if (errno == EAGAIN || errno == EWOULDBLOCK) return -1;
+                return -1;
+            }
+            ptr    += ret;
+            remain -= ret;
+        }
+    }
 
     return 0;
 }
@@ -114,9 +149,21 @@ int recv_message(int fd, uint8_t *type, uint8_t *flags,
     uint32_t       crc_recv, crc_calc;
     int            ret;
 
-    /* 读取帧头 */
-    ret = (int)read(fd, &hdr, PROTO_HEADER_LEN);
-    if (ret != PROTO_HEADER_LEN) return -1;
+    /* 读取帧头（循环直到全部读完） */
+    {
+        size_t remain = PROTO_HEADER_LEN;
+        uint8_t *ptr = (uint8_t *)&hdr;
+        while (remain > 0) {
+            ret = (int)read(fd, ptr, remain);
+            if (ret < 0) {
+                if (errno == EAGAIN || errno == EWOULDBLOCK) return -1;
+                return -1;
+            }
+            if (ret == 0) return -1;
+            ptr    += ret;
+            remain -= ret;
+        }
+    }
 
     /* 解析帧头 */
     uint32_t len;
@@ -129,16 +176,38 @@ int recv_message(int fd, uint8_t *type, uint8_t *flags,
     if (len > PROTO_MAX_PAYLOAD)
         len = PROTO_MAX_PAYLOAD;
 
-    /* 读取 payload */
+    /* 读取 payload（循环直到全部读完） */
     if (len > 0 && payload) {
-        ret = (int)read(fd, payload, len);
-        if (ret != (int)len) return -1;
+        size_t remain = len;
+        uint8_t *ptr = (uint8_t *)payload;
+        while (remain > 0) {
+            ret = (int)read(fd, ptr, remain);
+            if (ret < 0) {
+                if (errno == EAGAIN || errno == EWOULDBLOCK) return -1;
+                return -1;
+            }
+            if (ret == 0) return -1;
+            ptr    += ret;
+            remain -= ret;
+        }
         payload[len] = '\0';
     }
 
-    /* 读取 CRC */
-    ret = (int)read(fd, crc_buf, PROTO_CRC_LEN);
-    if (ret != PROTO_CRC_LEN) return -1;
+    /* 读取 CRC（循环直到全部读完） */
+    {
+        size_t remain = PROTO_CRC_LEN;
+        uint8_t *ptr = crc_buf;
+        while (remain > 0) {
+            ret = (int)read(fd, ptr, remain);
+            if (ret < 0) {
+                if (errno == EAGAIN || errno == EWOULDBLOCK) return -1;
+                return -1;
+            }
+            if (ret == 0) return -1;
+            ptr    += ret;
+            remain -= ret;
+        }
+    }
 
     /* 校验 CRC */
     crc_recv = ((uint32_t)crc_buf[0] << 24) |

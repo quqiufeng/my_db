@@ -30,8 +30,9 @@ int peer_create_list(void *vstate, const char *ip_list, int default_port) {
     state->peers         = calloc(count, sizeof(peer_t));
     if (!state->peers) return -1;
 
-    /* 更新集群规模（包括自己） */
-    state->ctx.cluster_size = count + 1;
+    /* 更新集群规模（仅在未通过 --cluster-size 显式设置时）*/
+    if (state->ctx.cluster_size <= 1)
+        state->ctx.cluster_size = count + 1;
 
     token = strtok_r(buf, ",", &saveptr);
     while (token && state->peer_count < count) {

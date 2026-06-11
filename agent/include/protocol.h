@@ -46,14 +46,12 @@ extern "C" {
  * =================================================================== */
 typedef enum {
     /* --- 集群内部（0x01-0x0F） --- */
-    MSG_HEARTBEAT        = 0x01,   /* Follower → Leader：心跳 + 状态 */
-    MSG_HEARTBEAT_ACK    = 0x02,   /* Leader → Follower：心跳确认 */
-    MSG_VOTE             = 0x03,   /* 节点 → 节点：投票 */
-    MSG_COORD            = 0x04,   /* 胜出者 → 所有人：宣布新 Leader */
-       /* 节点 → 节点：PK 挑战 */
-    MSG_PK_CHALLENGE     = 0x06,
-    MSG_PK_RESULT        = 0x07,
-    MSG_OK               = 0x05,   /* 节点 → 节点：确认接受 */
+    MSG_HEARTBEAT        = 0x01,   /* Leader → Follower：心跳 */
+    MSG_HEARTBEAT_ACK    = 0x02,   /* Follower → Leader：心跳确认 */
+    MSG_ELECTION_VOTE_REQ = 0x03,  /* Candidate → Peer：请求投票 */
+    MSG_ELECTION_VOTE_RESP = 0x04, /* Peer → Candidate：投票响应 */
+    MSG_COORD            = 0x05,   /* 胜出者 → 所有人：宣布新 Leader */
+    MSG_OK               = 0x06,   /* 节点 → 节点：确认接受 */
 
     /* --- 任务通道（0x10-0x1F） --- */
     MSG_TASK_DISPATCH    = 0x10,   /* Leader → Follower：下发任务 */

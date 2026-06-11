@@ -105,6 +105,7 @@ static void print_usage(const char *prog) {
         "  --bind <addr>    Bind address (default: 0.0.0.0)\n"
         "  --datadir <dir>  Data directory (default: /tmp/agent)\n"
         "  --idx <n>        Node index in peer list (0-based)\n"
+        "  --cluster-size <n>  Total nodes in cluster (default: peer_count+1)\n"
         "  --foreground     Run in foreground (don't daemonize)\n"
         "  -h               Show this help\n",
         prog);
@@ -128,6 +129,8 @@ static int parse_args(agent_state_t *state, int argc, char **argv) {
             strncpy(state->config.bind_addr, argv[++i], sizeof(state->config.bind_addr) - 1);
         } else if (strcmp(argv[i], "--datadir") == 0 && i + 1 < argc) {
             strncpy(state->config.data_dir, argv[++i], sizeof(state->config.data_dir) - 1);
+        } else if (strcmp(argv[i], "--cluster-size") == 0 && i + 1 < argc) {
+            state->config.cluster_size = atoi(argv[++i]);
         } else if (strcmp(argv[i], "--idx") == 0 && i + 1 < argc) {
             state->config.node_index = atoi(argv[++i]);
         } else if (strcmp(argv[i], "--foreground") == 0) {
@@ -180,7 +183,8 @@ int main(int argc, char **argv) {
 
     /* 更新会话上下文 */
     update_session_ctx(&g_agent);
-    election_init(&g_agent.election, g_agent.config.node_id, 0, 0);
+    election_init(&g_agent.election, g_agent.config.node_id, g_agent.config.node_index, 0);
+    election_init_timer(&g_agent.election, now_ms());
 
     g_agent.election.my_index = g_agent.config.node_index;
     /* 后台运行 */
@@ -200,6 +204,13 @@ int main(int argc, char **argv) {
         }
         agent_log("INFO", "configured %d peers", n);
     }
+
+    /* 设置集群总大小，供 election_tick 中的多数票判断使用 */
+    /* 必须在 parse_ip_list 之后，因为 peer_create_list 会设置 cluster_size = peer_count + 1 */
+    if (g_agent.config.cluster_size > 0)
+        g_agent.ctx.cluster_size = g_agent.config.cluster_size;
+    else
+        g_agent.ctx.cluster_size = g_agent.peer_count + 1;
 
     /* 初始化服务器 */
     if (server_init(&g_agent) < 0)

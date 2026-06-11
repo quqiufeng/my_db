@@ -21,6 +21,7 @@ typedef struct {
     char     node_id[64];          /* --id   节点 ID */
     char     data_dir[256];        /* --datadir 数据目录 */
     int              node_index;        /* --idx 在节点列表中的位置 */
+    int              cluster_size;      /* --cluster-size 集群节点总数（含自己） */
     char     bind_addr[64];        /* 绑定地址（默认 0.0.0.0） */
     int      daemonize;            /* 是否后台运行 */
 } agent_config_t;

@@ -3,79 +3,75 @@
 #include <stdlib.h>
 #include <stdio.h>
 
-void election_init(election_t *e, const char *node_id, int my_index, int epoch) {
+/* 选举超时范围（毫秒）*/
+#define ELECTION_TIMEOUT_MIN  1500
+#define ELECTION_TIMEOUT_MAX  3000
+#define HEARTBEAT_INTERVAL    1000
+
+/* 生成 [min, max] 区间内的随机数 */
+static int rand_range(int min, int max) {
+    if (max <= min) return min;
+    return min + rand() % (max - min + 1);
+}
+
+void election_init(election_t *e, const char *node_id, int my_index, int term) {
     memset(e, 0, sizeof(*e));
-    e->phase           = ELECTION_IDLE;
-    e->epoch           = epoch;
-    e->my_index        = my_index;
-    e->pk_timeout_ms   = 5000;
-    e->wait_timeout_ms = 0;  /* 按 index 动态计算 */
-    e->candidate_idx   = -1;
-    e->opponent_idx    = -1;
-    e->waiting_for     = -1;
-    e->candidate_val   = -1;
-    e->wait_start      = 0;
+    e->role              = ELECTION_FOLLOWER;
+    e->term              = term;
+    e->voted_for         = -1;
+    e->my_index          = my_index;
+    e->leader_addr[0]    = '\0';
+    e->leader_term       = -1;
+    e->election_deadline = 0;
+    e->heartbeat_interval = HEARTBEAT_INTERVAL;
     strncpy(e->my_id, node_id, sizeof(e->my_id) - 1);
 }
 
-void election_start(election_t *e, long now_ms) {
-    e->phase         = ELECTION_RUNNING;
-    e->epoch++;
-    e->candidate_idx = -1;   /* 调用者设置 */
-    e->opponent_idx  = -1;
-    e->candidate_val = -1;
-    e->waiting_for   = -1;
-    e->deadline      = now_ms + e->pk_timeout_ms;
+/* 首次启动时调用，初始化 election_deadline */
+void election_init_timer(election_t *e, long now_ms) {
+    election_reset_timer(e, now_ms);
 }
 
-int election_generate_val(election_t *e) {
-    int val = rand() % 11;
-    if (e->candidate_idx == e->my_index)
-        e->candidate_val = val;
-    return val;
+void election_reset_timer(election_t *e, long now_ms) {
+    int timeout = rand_range(ELECTION_TIMEOUT_MIN, ELECTION_TIMEOUT_MAX);
+    e->election_base_ms = timeout;
+    e->election_deadline = now_ms + timeout;
 }
 
-int election_my_turn(const election_t *e, int my_index) {
-    return (e->candidate_idx == my_index && e->opponent_idx >= 0);
+void election_become_follower(election_t *e, int term, long now_ms) {
+    e->role      = ELECTION_FOLLOWER;
+    e->term      = term;
+    e->voted_for = -1;
+    e->votes_received = 0;
+    e->leader_addr[0] = '\0';
+    election_reset_timer(e, now_ms);
 }
 
-int election_is_my_battle(const election_t *e, int my_index) {
-    return (e->candidate_idx == my_index || e->opponent_idx == my_index);
+void election_become_candidate(election_t *e, long now_ms, int total) {
+    e->role           = ELECTION_CANDIDATE;
+    e->term++;   /* 递增任期 */
+    e->voted_for      = e->my_index;  /* 投给自己 */
+    e->votes_received = 1;             /* 自己的票 */
+    e->total_voters   = total;
+    e->vote_deadline  = now_ms + 3000;  /* 最多等 3 秒收票 */
+    e->leader_addr[0] = '\0';
+    election_reset_timer(e, now_ms);
 }
 
-int election_handle_result(election_t *e, long now_ms, int opponent_val,
-                           int *winner, int *loser, int *done) {
-    (void)now_ms;
-    *winner = -1;
-    *loser  = -1;
-    *done   = 0;
-
-    if (e->candidate_val >= opponent_val) {
-        *winner = e->candidate_idx;
-        *loser  = e->opponent_idx;
-    } else {
-        *winner = e->opponent_idx;
-        *loser  = e->candidate_idx;
-    }
-    return 0;
-}
-
-int election_advance(election_t *e, long now_ms, int winner_idx) {
-    e->candidate_idx = winner_idx;
-    e->opponent_idx++;
-    e->waiting_for = -1;
-    e->deadline    = now_ms + e->pk_timeout_ms;
-    return 1;
-}
-
-void election_finish(election_t *e, const char *leader_addr) {
-    strncpy(e->leader_addr, leader_addr, sizeof(e->leader_addr) - 1);
-    e->leader_epoch = e->epoch;
-    e->phase        = ELECTION_DONE;
+void election_become_leader(election_t *e) {
+    e->role         = ELECTION_LEADER;
+    e->leader_term  = e->term;
+    e->voted_for    = -1;
+    e->votes_received = 0;
+    e->last_heartbeat = 0;  /* 触发立即发心跳 */
 }
 
 int election_check_timeout(const election_t *e, long now_ms) {
-    if (e->phase != ELECTION_RUNNING)
-        return 0;
-    return (now_ms >= e->deadline) ? 1 : 0;
+    if (e->election_deadline == 0) return 0;
+    return (now_ms >= e->election_deadline) ? 1 : 0;
+}
+
+int election_is_majority(int votes, int total) {
+    /* 多数 = floor(n/2) + 1，对包含自己的集群 */
+    return votes >= (total / 2) + 1;
 }

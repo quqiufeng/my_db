@@ -72,7 +72,7 @@ int epoll_init(agent_state_t *state) {
     state->epoll_fd = epfd;
 
     struct epoll_event ev;
-    ev.events  = EPOLLIN | EPOLLET;
+    ev.events  = EPOLLIN;
     ev.data.fd = state->listen_fd;
     if (epoll_ctl(epfd, EPOLL_CTL_ADD, state->listen_fd, &ev) < 0) {
         agent_log("ERROR", "epoll_ctl ADD listen_fd failed: %s", strerror(errno));
@@ -117,7 +117,7 @@ static int accept_connection(agent_state_t *state) {
         agent_log("INFO", "accept connection from %s:%d", ip, ntohs(addr.sin_port));
 
         struct epoll_event ev;
-        ev.events  = EPOLLIN | EPOLLET;
+        ev.events  = EPOLLIN;
         ev.data.fd = connfd;
         if (epoll_ctl(state->epoll_fd, EPOLL_CTL_ADD, connfd, &ev) < 0) {
             agent_log("ERROR", "epoll_ctl ADD conn failed: %s", strerror(errno));
@@ -162,165 +162,55 @@ static int on_master_query(agent_state_t *state, int fd,
     return 0;
 }
 
-/* 收到 PK 挑战：我是被挑战方 */
-static int on_pk_challenge(agent_state_t *state, int fd,
-                           const char *payload, uint32_t len) {
+
+/* 收到 VoteReq：Candidate 请求投票 */
+static int on_election_vote_req(agent_state_t *state, int fd,
+                                const char *payload, uint32_t len) {
     (void)len;
-    int candidate_idx = -1, opponent_idx = -1, candidate_val = -1, epoch = 0;
-    sscanf(payload,
-        "%*[^{]{%*[^:]:%d,%*[^:]:%d,%*[^:]:%d,%*[^:]:%d",
-        &candidate_idx, &opponent_idx, &candidate_val, &epoch);
-
-    if (epoch != state->election.epoch) {
-        agent_log("WARN", "pk_challenge ignored: epoch mismatch (%d vs %d)",
-                  epoch, state->election.epoch);
+    int req_term = 0;
+    char candidate_addr[128] = {0};
+    sscanf(payload, "{\"term\":%d,\"candidate\":\"%127[^\"]\"}", &req_term, candidate_addr);
+    if (req_term < state->election.term) {
+        char resp[64];
+        snprintf(resp, sizeof(resp), "{\"term\":%d,\"vote_granted\":0}", state->election.term);
+        send_message(fd, MSG_ELECTION_VOTE_RESP, PROTO_FLAG_RESPONSE, resp, strlen(resp));
         return 0;
     }
-
-    /* 我是不是本轮对手？ */
-    if (opponent_idx != state->election.my_index) {
-        agent_log("WARN", "pk_challenge not for me (opponent=%d, I'm %d)",
-                  opponent_idx, state->election.my_index);
+    if (state->election.role == ELECTION_LEADER && req_term == state->election.term) {
+        char resp[64];
+        snprintf(resp, sizeof(resp), "{\"term\":%d,\"vote_granted\":0}", state->election.term);
+        send_message(fd, MSG_ELECTION_VOTE_RESP, PROTO_FLAG_RESPONSE, resp, strlen(resp));
         return 0;
     }
-
-    agent_log("DEBUG", "pk_challenge: cand=%d val=%d vs me(%d)", 
-              candidate_idx, candidate_val, state->election.my_index);
-
-    /* 记录擂主信息 */
-    state->election.candidate_idx = candidate_idx;
-    state->election.candidate_val = candidate_val;
-    state->election.opponent_idx  = opponent_idx;
-
-    /* 生成我的随机数并回复 */
-    int my_val = election_generate_val(&state->election);
-    char reply[256];
-    snprintf(reply, sizeof(reply),
-        "{\"candidate_idx\":%d,\"opponent_idx\":%d,\"val\":%d,\"epoch\":%d}",
-        candidate_idx, state->election.my_index, my_val, state->election.epoch);
-    send_message(fd, MSG_PK_RESULT, PROTO_FLAG_RESPONSE, reply, strlen(reply));
-
+    if (req_term > state->election.term)
+        election_become_follower(&state->election, req_term, now_ms());
+    if (state->election.voted_for == -1) {
+        state->election.voted_for = -2;
+        char resp[64];
+        snprintf(resp, sizeof(resp), "{\"term\":%d,\"vote_granted\":1}", req_term);
+        send_message(fd, MSG_ELECTION_VOTE_RESP, PROTO_FLAG_RESPONSE, resp, strlen(resp));
+        agent_log("DEBUG", "vote granted for term %d candidate %s", req_term, candidate_addr);
+    } else {
+        char resp[64];
+        snprintf(resp, sizeof(resp), "{\"term\":%d,\"vote_granted\":0}", state->election.term);
+        send_message(fd, MSG_ELECTION_VOTE_RESP, PROTO_FLAG_RESPONSE, resp, strlen(resp));
+    }
     return 0;
 }
 
-/* 收到 PK 结果：我是挑战方 */
-static int on_pk_result(agent_state_t *state, int fd,
-                        const char *payload, uint32_t len) {
+/* 收到 VoteResp：投票响应 */
+static int on_election_vote_resp(agent_state_t *state, int fd,
+                                 const char *payload, uint32_t len) {
     (void)fd; (void)len;
-    int candidate_idx = -1, opponent_idx = -1, opponent_val = -1, epoch = 0;
-    sscanf(payload,
-        "%*[^{]{%*[^:]:%d,%*[^:]:%d,%*[^:]:%d,%*[^:]:%d",
-        &candidate_idx, &opponent_idx, &opponent_val, &epoch);
-
-    if (epoch != state->election.epoch) {
-        agent_log("WARN", "pk_result ignored: epoch mismatch");
-        return 0;
+    int resp_term = 0, vote_granted = 0;
+    sscanf(payload, "{\"term\":%d,\"vote_granted\":%d}", &resp_term, &vote_granted);
+    if (resp_term != state->election.term) return 0;
+    if (state->election.role != ELECTION_CANDIDATE) return 0;
+    if (vote_granted) {
+        state->election.votes_received++;
+        agent_log("DEBUG", "got vote, now %d/%d", 
+                  state->election.votes_received, state->election.total_voters);
     }
-
-    /* 我必须是擂主 */
-    if (candidate_idx != state->election.my_index)
-        return 0;
-
-    agent_log("DEBUG", "pk_result: me(candidate=%d val=%d) vs opponent=%d val=%d",
-              candidate_idx, state->election.candidate_val,
-              opponent_idx, opponent_val);
-
-    /* 判断胜负 */
-    int winner, loser, done;
-    election_handle_result(&state->election, now_ms(), opponent_val,
-                           &winner, &loser, &done);
-
-    char winner_addr[128] = {0};
-    char loser_addr[128]  = {0};
-
-    if (winner == state->election.my_index) {
-        /* 我赢了，找下一个对手 */
-        snprintf(winner_addr, sizeof(winner_addr), "%s", state->ctx.self_addr);
-        snprintf(loser_addr, sizeof(loser_addr), "%s",
-                 state->peers[loser].addr);
-
-        int next = find_next_online_opponent(state, opponent_idx + 1);
-        if (next < 0) {
-            /* 没有更多对手了！我当选 Leader */
-            agent_log("INFO", "I WON the election! No more opponents.");
-            election_finish(&state->election, state->ctx.self_addr);
-            strncpy(state->ctx.role, "leader", sizeof(state->ctx.role) - 1);
-            state->ctx.epoch = state->election.epoch;
-
-            /* 广播 MSG_COORD 给所有人 */
-            char coord[256];
-            snprintf(coord, sizeof(coord),
-                "{\"leader\":\"%s\",\"epoch\":%d}",
-                state->ctx.self_addr, state->election.epoch);
-            for (int i = 0; i < state->peer_count; i++) {
-                if (state->peers[i].state == PEER_CONNECTED)
-                    send_message(state->peers[i].fd, MSG_COORD,
-                                 PROTO_FLAG_REQUEST, coord, strlen(coord));
-            }
-
-            /* 向 Master 报备 */
-            for (int i = 0; i < state->master_count; i++) {
-                char report[2048];
-                snprintf(report, sizeof(report),
-                    "{\"type\":\"master_leader\",\"leader\":\"%s\",\"epoch\":%d,"
-                    "\"cluster_size\":%d}",
-                    state->ctx.self_addr, state->ctx.epoch, state->ctx.cluster_size);
-                send_message(state->master_fds[i], MSG_MASTER_LEADER,
-                             PROTO_FLAG_RESPONSE, report, strlen(report));
-            }
-        } else {
-            /* 挑战下一个对手 */
-            int my_val = election_generate_val(&state->election);
-            char challenge[256];
-            snprintf(challenge, sizeof(challenge),
-                "{\"candidate_idx\":%d,\"opponent_idx\":%d,"
-                "\"val\":%d,\"epoch\":%d}",
-                state->election.my_index, next,
-                my_val, state->election.epoch);
-            send_message(state->peers[next].fd, MSG_PK_CHALLENGE,
-                         PROTO_FLAG_REQUEST, challenge, strlen(challenge));
-
-            state->election.opponent_idx = next;
-            state->election.waiting_for  = state->peers[next].fd;
-            state->election.deadline     = now_ms() + state->election.pk_timeout_ms;
-            agent_log("DEBUG", "advance: I(winner) challenge peer[%d]", next);
-        }
-    } else {
-        /* 对手赢了，由对手继续挑战下一个 */
-        snprintf(loser_addr, sizeof(loser_addr), "%s", state->ctx.self_addr);
-        snprintf(winner_addr, sizeof(winner_addr), "%s",
-                 state->peers[winner].addr);
-
-        /* 跳过败者，从胜者下一个开始找 */
-        int next = find_next_online_opponent(state, winner + 1);
-        if (next < 0) {
-            /* 对手直接获胜 */
-            char coord[256];
-            snprintf(coord, sizeof(coord),
-                "{\"leader\":\"%s\",\"epoch\":%d}",
-                state->peers[winner].addr, state->election.epoch);
-            for (int i = 0; i < state->peer_count; i++) {
-                if (state->peers[i].state == PEER_CONNECTED)
-                    send_message(state->peers[i].fd, MSG_COORD,
-                                 PROTO_FLAG_REQUEST, coord, strlen(coord));
-            }
-            /* 更新我自己的状态 */
-            state->election.phase = ELECTION_DONE;
-            snprintf(state->election.leader_addr, sizeof(state->election.leader_addr), "%s", state->peers[winner].addr);
-            snprintf(state->ctx.leader_addr, sizeof(state->ctx.leader_addr), "%s", state->peers[winner].addr);
-            state->ctx.epoch = state->election.epoch;
-            strncpy(state->ctx.role, "follower", sizeof(state->ctx.role) - 1);
-        } else {
-            /* 通知胜者去挑战下一个 */
-            char handover[256];
-            snprintf(handover, sizeof(handover),
-                "{\"winner_idx\":%d,\"next_opponent_idx\":%d,\"epoch\":%d}",
-                winner, next, state->election.epoch);
-            send_message(state->peers[winner].fd, MSG_PK_CHALLENGE,
-                         PROTO_FLAG_REQUEST, handover, strlen(handover));
-        }
-    }
-
     return 0;
 }
 
@@ -328,41 +218,43 @@ static int on_pk_result(agent_state_t *state, int fd,
 static int on_coord(agent_state_t *state, int fd,
                     const char *payload, uint32_t len) {
     (void)fd; (void)len;
-    char leader_addr[64] = {0};
+    char leader_addr[128] = {0};
     int  epoch = 0;
-    sscanf(payload, "%*[^{]{%*[^:]:\"%63[^\"]\",%*[^:]:%d", leader_addr, &epoch);
-
-    if (epoch < state->election.epoch) return 0;  /* 旧消息 */
-
+    sscanf(payload, "{%*[^:]:\"%127[^\"]\",%*[^:]:%d}", leader_addr, &epoch);
+    if (epoch < state->election.term) return 0;
     agent_log("INFO", "LEADER ELECTED: %s epoch=%d", leader_addr, epoch);
-
-    state->election.phase = ELECTION_DONE;
+    election_become_follower(&state->election, epoch, now_ms());
     snprintf(state->election.leader_addr, sizeof(state->election.leader_addr), "%s", leader_addr);
-    state->election.leader_epoch = epoch;
+    state->election.leader_term = epoch;
     snprintf(state->ctx.leader_addr, sizeof(state->ctx.leader_addr), "%s", leader_addr);
     state->ctx.epoch = epoch;
-
-    if (strcmp(leader_addr, state->ctx.self_addr) == 0) {
+    if (strcmp(leader_addr, state->ctx.self_addr) == 0)
         strncpy(state->ctx.role, "leader", sizeof(state->ctx.role) - 1);
-    } else {
+    else
         strncpy(state->ctx.role, "follower", sizeof(state->ctx.role) - 1);
-    }
-
     return 0;
 }
 
-/* 心跳 */
+/* 收到 Leader 心跳 */
 static int on_heartbeat(agent_state_t *state, int fd,
                         const char *payload, uint32_t len) {
     (void)len;
-    session_ctx_t remote;
-    if (json_to_session_ctx(payload, &remote) == 0) {
-        peer_t *peer = peer_find_by_addr(state, remote.self_addr);
-        if (peer) {
-            peer->remote_ctx = remote;
-            peer->last_heartbeat = now_ms();
-            peer->heartbeat_miss = 0;
-        }
+    int hb_term = 0;
+    char leader_addr[128] = {0};
+    sscanf(payload, "{\"term\":%d,\"leader\":\"%127[^\"]\"}", &hb_term, leader_addr);
+    if (hb_term < state->election.term) return 0;
+    if (hb_term > state->election.term || state->election.role == ELECTION_CANDIDATE)
+        election_become_follower(&state->election, hb_term, now_ms());
+    snprintf(state->election.leader_addr, sizeof(state->election.leader_addr), "%s", leader_addr);
+    state->election.leader_term = hb_term;
+    snprintf(state->ctx.leader_addr, sizeof(state->ctx.leader_addr), "%s", leader_addr);
+    state->ctx.epoch = hb_term;
+    strncpy(state->ctx.role, "follower", sizeof(state->ctx.role) - 1);
+    election_reset_timer(&state->election, now_ms());
+    peer_t *peer = peer_find_by_fd(state, fd);
+    if (peer) {
+        peer->last_heartbeat = now_ms();
+        peer->heartbeat_miss = 0;
     }
     send_message(fd, MSG_HEARTBEAT_ACK, PROTO_FLAG_RESPONSE, "{}", 2);
     return 0;
@@ -371,7 +263,7 @@ static int on_heartbeat(agent_state_t *state, int fd,
 static int on_heartbeat_ack(agent_state_t *state, int fd,
                             const char *payload, uint32_t len) {
     (void)state; (void)fd; (void)payload; (void)len;
-    return 0;  /* 暂不处理 */
+    return 0;
 }
 
 static int on_ok(agent_state_t *state, int fd,
@@ -379,7 +271,6 @@ static int on_ok(agent_state_t *state, int fd,
     (void)state; (void)fd; (void)payload; (void)len;
     return 0;
 }
-
 /* ===================================================================
  * handle_message - 消息分发
  * =================================================================== */
@@ -390,8 +281,8 @@ static int handle_message(agent_state_t *state, int fd,
     switch (type) {
     case MSG_MASTER_HELLO:  return on_master_hello(state, fd, payload, len);
     case MSG_MASTER_QUERY:  return on_master_query(state, fd, payload, len);
-    case MSG_PK_CHALLENGE:  return on_pk_challenge(state, fd, payload, len);
-    case MSG_PK_RESULT:     return on_pk_result(state, fd, payload, len);
+    case MSG_ELECTION_VOTE_REQ:  return on_election_vote_req(state, fd, payload, len);
+    case MSG_ELECTION_VOTE_RESP: return on_election_vote_resp(state, fd, payload, len);
     case MSG_COORD:         return on_coord(state, fd, payload, len);
     case MSG_OK:            return on_ok(state, fd, payload, len);
     case MSG_HEARTBEAT:     return on_heartbeat(state, fd, payload, len);
@@ -430,7 +321,7 @@ static int handle_peer_connect(agent_state_t *state, int fd) {
 
         /* 改为监听可读事件 */
         struct epoll_event ev;
-        ev.events  = EPOLLIN | EPOLLET;
+        ev.events  = EPOLLIN;
         ev.data.fd = fd;
         epoll_ctl(state->epoll_fd, EPOLL_CTL_MOD, fd, &ev);
     }
@@ -474,187 +365,104 @@ static int handle_read(agent_state_t *state, int fd) {
 }
 
 /* ===================================================================
- * election_sequential_pk - 顺序 PK 选举状态机
+ * election_tick - 顺序 PK 选举状态机
  * =================================================================== */
 /* ===================================================================
- * election_sequential_pk - 顺序 PK 选举状态机
+ * election_tick - 顺序 PK 选举状态机
  * =================================================================== */
-static void election_sequential_pk(agent_state_t *state, long now) {
-    static long self_promotion_start[256];
-    static int  self_promotion_ok = 0;
-    (void)self_promotion_start;
-
-    /* ========= 首次或重选 ========= */
-    if (state->election.phase == ELECTION_IDLE &&
-        state->peer_count > 0) {
-
-        int has_leader = (state->election.leader_addr[0] != '\0');
-        int leader_alive = 0;
-
-        /* 如果有 Leader，检查它是否还活着 */
-        if (has_leader) {
+static void election_tick(agent_state_t *state, long now) {
+    /* ========= Follower: election timeout -> candidate ========= */
+    if (state->election.role == ELECTION_FOLLOWER) {
+        if (state->election.leader_addr[0] != '\0')
+            return;
+        if (election_check_timeout(&state->election, now)) {
+            int total = state->ctx.cluster_size;
+            agent_log("INFO", "election timeout, becoming candidate for term %d (total=%d)",
+                      state->election.term + 1, total);
+            election_become_candidate(&state->election, now, total);
+            state->election.leader_term = -1;
+            char req[256];
+            snprintf(req, sizeof(req),
+                "{\"term\":%d,\"candidate\":\"%s\"}",
+                state->election.term, state->ctx.self_addr);
             for (int i = 0; i < state->peer_count; i++) {
-                if (strcmp(state->peers[i].addr, state->election.leader_addr) == 0 &&
-                    state->peers[i].state == PEER_CONNECTED &&
-                    state->peers[i].heartbeat_miss < 3) {
-                    leader_alive = 1;
-                    break;
-                }
-            }
-        }
-
-        /* Leader 活着，什么都不做 */
-        if (has_leader && leader_alive)
-            return;
-
-        /* Leader 死了或没有 Leader */
-        if (has_leader && !leader_alive)
-            agent_log("WARN", "leader lost, starting election");
-
-        /* 节点 0：立即发起选举 */
-        if (state->election.my_index == 0) {
-            if (!has_leader || !leader_alive) {
-                agent_log("INFO", "I'm peer[0], starting sequential election");
-                election_start(&state->election, now);
-                election_generate_val(&state->election);
-
-                int first = find_next_online_opponent(state, 1);
-                if (first >= 0) {
-                    char challenge[256];
-                    snprintf(challenge, sizeof(challenge),
-                        "{\"candidate_idx\":0,\"opponent_idx\":%d,"
-                        "\"val\":%d,\"epoch\":%d}",
-                        first, state->election.candidate_val,
-                        state->election.epoch);
-                    send_message(state->peers[first].fd, MSG_PK_CHALLENGE,
-                                 PROTO_FLAG_REQUEST, challenge, strlen(challenge));
-                    state->election.opponent_idx = first;
-                    state->election.waiting_for  = state->peers[first].fd;
-                    state->election.deadline     = now + state->election.pk_timeout_ms;
-                    agent_log("INFO", "election: I(peer[0]) challenge peer[%d]", first);
-                } else {
-                    agent_log("INFO", "no online peers, I'm leader by default");
-                    election_finish(&state->election, state->ctx.self_addr);
-                    strncpy(state->ctx.role, "leader", sizeof(state->ctx.role) - 1);
-                    state->ctx.epoch = state->election.epoch;
-                }
-            }
-        }
-        /* 非 0 节点：记录等待开始时间，但不阻塞 */
-        else if (!has_leader) {
-            /* 如果还没记录过等待开始时间，记下 */
-            if (!self_promotion_ok) {
-                /* 每个节点只需要检查自己是不是该自升了 */
-                self_promotion_ok = 1;
-            }
-        }
-        return;
-    }
-
-    /* ========= PK 超时处理：挑战者跳过不响应的对手 ========= */
-    if (state->election.phase == ELECTION_RUNNING &&
-        state->election.waiting_for >= 0 &&
-        now >= state->election.deadline) {
-
-        int opponent = state->election.opponent_idx;
-        agent_log("WARN", "PK timeout waiting for peer[%d], skipping", opponent);
-
-        if (state->election.my_index == state->election.candidate_idx) {
-            int next = find_next_online_opponent(state, opponent + 1);
-            if (next >= 0) {
-                int my_val = election_generate_val(&state->election);
-                char challenge[256];
-                snprintf(challenge, sizeof(challenge),
-                    "{\"candidate_idx\":%d,\"opponent_idx\":%d,"
-                    "\"val\":%d,\"epoch\":%d}",
-                    state->election.my_index, next,
-                    my_val, state->election.epoch);
-                send_message(state->peers[next].fd, MSG_PK_CHALLENGE,
-                             PROTO_FLAG_REQUEST, challenge, strlen(challenge));
-                state->election.opponent_idx = next;
-                state->election.waiting_for  = state->peers[next].fd;
-                state->election.deadline     = now + state->election.pk_timeout_ms;
-            } else {
-                /* 所有对手都跳过了，我赢 */
-                agent_log("INFO", "all opponents skipped, I'm leader!");
-                election_finish(&state->election, state->ctx.self_addr);
-                strncpy(state->ctx.role, "leader", sizeof(state->ctx.role) - 1);
-                state->ctx.epoch = state->election.epoch;
-
-                char coord[256];
-                snprintf(coord, sizeof(coord),
-                    "{\"leader\":\"%s\",\"epoch\":%d}",
-                    state->ctx.self_addr, state->election.epoch);
-                for (int i = 0; i < state->peer_count; i++) {
-                    if (state->peers[i].state == PEER_CONNECTED)
-                        send_message(state->peers[i].fd, MSG_COORD,
-                                     PROTO_FLAG_REQUEST, coord, strlen(coord));
-                }
+                if (state->peers[i].state == PEER_CONNECTED)
+                    send_message(state->peers[i].fd, MSG_ELECTION_VOTE_REQ,
+                                 PROTO_FLAG_REQUEST, req, strlen(req));
             }
         }
     }
-
-    /* ========= 自升兜底：非 0 节点长时间等不到挑战 ========= */
-    /* 只有完全空闲（无 Leader、无正在进行的选举）时才触发 */
-    if (state->election.phase == ELECTION_IDLE &&
-        state->election.leader_addr[0] == '\0' &&
-        state->election.my_index > 0 &&
-        state->peer_count > 0) {
-
-        /* 找到第一个比我小的在线节点 */
-        int smaller_online = 0;
-        for (int i = 0; i < state->election.my_index && i < state->peer_count; i++) {
-            if (state->peers[i].state == PEER_CONNECTED) {
-                smaller_online = 1;
-                break;
+    /* ========= Candidate: check majority or timeout ========= */
+    if (state->election.role == ELECTION_CANDIDATE) {
+        if (election_is_majority(state->election.votes_received, state->election.total_voters)) {
+            agent_log("INFO", "I WON the election! term=%d votes=%d/%d",
+                      state->election.term,
+                      state->election.votes_received,
+                      state->election.total_voters);
+            election_become_leader(&state->election);
+            state->election.leader_term = state->election.term;
+            snprintf(state->election.leader_addr, sizeof(state->election.leader_addr),
+                     "%s", state->ctx.self_addr);
+            strncpy(state->ctx.role, "leader", sizeof(state->ctx.role) - 1);
+            state->ctx.epoch = state->election.term;
+            /* broadcast COORD */
+            char coord[256];
+            snprintf(coord, sizeof(coord),
+                "{\"leader\":\"%s\",\"epoch\":%d}",
+                state->ctx.self_addr, state->election.term);
+            for (int i = 0; i < state->peer_count; i++) {
+                if (state->peers[i].state == PEER_CONNECTED)
+                    send_message(state->peers[i].fd, MSG_COORD,
+                                 PROTO_FLAG_REQUEST, coord, strlen(coord));
+            }
+            /* Master report */
+            for (int i = 0; i < state->master_count; i++) {
+                char report[2048];
+                snprintf(report, sizeof(report),
+                    "{\"type\":\"master_leader\",\"leader\":\"%s\",\"epoch\":%d,"
+                    "\"cluster_size\":%d}",
+                    state->ctx.self_addr, state->ctx.epoch, state->ctx.cluster_size);
+                send_message(state->master_fds[i], MSG_MASTER_LEADER,
+                             PROTO_FLAG_RESPONSE, report, strlen(report));
+            }
+            return;
+        }
+        if (now >= state->election.vote_deadline) {
+            agent_log("WARN", "vote timeout, votes=%d/%d, restarting election",
+                      state->election.votes_received,
+                      state->election.total_voters);
+            int total = state->ctx.cluster_size;
+            election_become_candidate(&state->election, now, total);
+            char req[256];
+            snprintf(req, sizeof(req),
+                "{\"term\":%d,\"candidate\":\"%s\"}",
+                state->election.term, state->ctx.self_addr);
+            for (int i = 0; i < state->peer_count; i++) {
+                if (state->peers[i].state == PEER_CONNECTED)
+                    send_message(state->peers[i].fd, MSG_ELECTION_VOTE_REQ,
+                                 PROTO_FLAG_REQUEST, req, strlen(req));
             }
         }
-
-        /* 如果前面有节点在线，他们应该会发起选举，我不用管 */
-        if (smaller_online)
-            return;
-
-        /* 前面没有在线节点，我应该自升为候选 */
-        /* 但给一个初始延迟，避免启动瞬间就自升 */
-        static long promote_check_time = 0;
-        if (promote_check_time == 0)
-            promote_check_time = now;
-
-        int wait_min = 5 * (state->election.my_index + 1);  /* peer[1]=10min, peer[2]=15min... */
-        if (now - promote_check_time > wait_min * 60 * 1000) {
-            agent_log("INFO", "self-promote after timeout: I(peer[%d]) take over!",
-                      state->election.my_index);
-            election_start(&state->election, now);
-            election_generate_val(&state->election);
-
-            int next = find_next_online_opponent(state, state->election.my_index + 1);
-            if (next >= 0) {
-                char challenge[256];
-                snprintf(challenge, sizeof(challenge),
-                    "{\"candidate_idx\":%d,\"opponent_idx\":%d,"
-                    "\"val\":%d,\"epoch\":%d}",
-                    state->election.my_index, next,
-                    state->election.candidate_val, state->election.epoch);
-                send_message(state->peers[next].fd, MSG_PK_CHALLENGE,
-                             PROTO_FLAG_REQUEST, challenge, strlen(challenge));
-                state->election.opponent_idx = next;
-                state->election.waiting_for  = state->peers[next].fd;
-                state->election.deadline     = now + state->election.pk_timeout_ms;
-            } else {
-                agent_log("INFO", "no online peers after me, I'm leader!");
-                election_finish(&state->election, state->ctx.self_addr);
-                strncpy(state->ctx.role, "leader", sizeof(state->ctx.role) - 1);
-                state->ctx.epoch = state->election.epoch;
+    }
+    /* ========= Leader: send heartbeat ========= */
+    if (state->election.role == ELECTION_LEADER) {
+        if (now - state->election.last_heartbeat >= state->election.heartbeat_interval) {
+            state->election.last_heartbeat = now;
+            char hb[256];
+            snprintf(hb, sizeof(hb),
+                "{\"term\":%d,\"leader\":\"%s\"}",
+                state->election.term, state->ctx.self_addr);
+            for (int i = 0; i < state->peer_count; i++) {
+                if (state->peers[i].state == PEER_CONNECTED)
+                    send_message(state->peers[i].fd, MSG_HEARTBEAT,
+                                 PROTO_FLAG_REQUEST, hb, strlen(hb));
             }
-            promote_check_time = 0;  /* 重置，防止重复触发 */
         }
     }
 }
 
-/* ===================================================================
- * heartbeat_send - Follower 向 Leader 发心跳
- * =================================================================== */
 static void heartbeat_send(agent_state_t *state, long now) {
+    (void)state; (void)now;
     static long last_send = 0;
     if (now - last_send < 3000) return;
     last_send = now;
@@ -706,7 +514,7 @@ int server_event_loop(agent_state_t *state) {
         long now = now_ms();
         peer_check_timeout(state, now, 9000);
         peer_reconnect(state, now);
-        election_sequential_pk(state, now);
+        election_tick(state, now);
         heartbeat_send(state, now);
     }
 
