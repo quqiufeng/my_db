@@ -16,7 +16,7 @@
 #   5. 兼容新旧导入格式（有/无 chapters/ 子目录）
 #
 # 依赖：
-#   - KV Cache 记忆系统（/memory/）
+#   - KV Cache 记忆系统（/book/cache/）
 #   - tools/cache_query （C 实现，支持向量搜索）
 #   - 电子书 Markdown 文件（由 import_book 生成）
 #
@@ -104,7 +104,7 @@
 #   ./explore_book.sh /books/elon_musk read chapters/12-SpaceX/page_0000
 #
 # 示例 3: 跨书搜索（不指定 --repo）
-#   ./tools/cache_query "concurrency" --type search --analysis-dir /memory --max-results 10
+#   ./tools/cache_query "concurrency" --type search --analysis-dir /book/cache --max-results 10
 #   → 同时在所有已导入书籍中搜索
 #
 # 示例 4: 浏览章节
@@ -119,7 +119,7 @@
 #
 # 1. 命名空间获取：
 #    如果不确定 namespace，可以查看已导入的书籍：
-#    strings /memory/cache.bin | grep "^/books/" | sort -u
+#    strings /book/cache/cache.bin | grep "^/books/" | sort -u
 #
 # 2. 搜索依赖向量缓存：
 #    语义搜索需要 import_book 成功生成向量文件（vectors/*.jina.bin.hnsw）。
@@ -140,7 +140,7 @@
 #    如果看到 "CUDA not available, falling back to CPU"，搜索会变慢但仍可用。
 #
 # 6. 向量文件位置：
-#    向量索引文件位于 /memory/vectors/books_{name}.jina.bin.hnsw
+#    向量索引文件位于 /book/cache/vectors/books_{name}.jina.bin.hnsw
 #    搜索时 --analysis-dir 指向 /memory/ 目录
 #
 # =============================================================================
@@ -205,8 +205,9 @@ if [[ $# -lt 2 ]]; then
     echo "Usage: $0 <namespace> <command> [options]"
     echo ""
     echo "Commands:"
+    echo "  list                  列出所有已导入书籍"
     echo "  overview              书籍概览"
-    echo '  search "<query>"      语义搜索（向量检索）'
+    echo '  search "<query>"      语义搜索（向量检索，带内容预览）'
     echo "  read <page_key>       读取页面内容（Markdown）"
     echo "  chapter [name]        列出章节或查看章节页面"
     echo "  toc                   目录结构"
@@ -286,7 +287,7 @@ cmd_search() {
     
     # 执行语义搜索（向量索引在 /memory/vectors/ 中）
     local search_result
-    search_result=$("$CACHE_QUERY" "$query" --repo "$NAMESPACE" --type search --analysis-dir /memory --max-results "$max_results" --pretty 2>&1 | extract_json)
+    search_result=$("$CACHE_QUERY" "$query" --repo "$NAMESPACE" --type search --analysis-dir /book/cache --max-results "$max_results" --pretty 2>&1 | extract_json)
     
     echo "$search_result" | python3 -c "
 import sys, json
@@ -306,6 +307,12 @@ print('找到 ' + str(len(results)) + ' 个相关页面：\n')
 for i, r in enumerate(results, 1):
     name = r.get('name', 'N/A')
     score = r.get('score', 0)
+    content = r.get('content', '')
+    
+    # 生成预览片段（前 120 个字符）
+    preview = content[:120].replace('\n', ' ').strip()
+    if len(content) > 120:
+        preview += '...'
     
     # 从完整 key 中提取 page_key (去掉 namespace 前缀)
     page_key = name
@@ -319,6 +326,8 @@ for i, r in enumerate(results, 1):
     book_ns = '/books/' + parts[2] if len(parts) > 2 else '/books/unknown'
     
     print(str(i) + '. [' + str(round(score, 3)) + '] ' + name)
+    if preview:
+        print('   Preview: ' + preview)
     print('   Read: ./explore_book.sh ' + book_ns + ' read ' + page_key)
     print()
 "
@@ -572,6 +581,74 @@ if results:
     fi
 }
 
+cmd_list_books() {
+    log "Listing all imported books..."
+    echo ""
+    
+    local count=0
+    # 从 cache.bin 中扫描所有 /books/ 开头的 _meta 条目
+    if command -v strings &>/dev/null && [[ -f "/memory/cache.bin" ]]; then
+        # 直接读取 markdown 输出目录
+        if [[ -d "/opt/books" ]]; then
+            echo "Books in /opt/books/:"
+            echo ""
+            for book_dir in /opt/books/*/; do
+                local book_name=$(basename "$book_dir")
+                local meta_file="${book_dir}_meta.json"
+                local title=""
+                local author=""
+                local pages=0
+                local chapters=0
+                
+                if [[ -f "$meta_file" ]]; then
+                    title=$(python3 -c "import json; d=json.load(open('$meta_file')); print(d.get('title',''))" 2>/dev/null)
+                    author=$(python3 -c "import json; d=json.load(open('$meta_file')); print(d.get('author',''))" 2>/dev/null)
+                    pages=$(python3 -c "import json; d=json.load(open('$meta_file')); print(d.get('pages',0))" 2>/dev/null)
+                    chapters=$(python3 -c "import json; d=json.load(open('$meta_file')); print(d.get('chapters',0))" 2>/dev/null)
+                else
+                    # 统计实际页面数
+                    chapters=$(find "$book_dir" -maxdepth 2 -type d 2>/dev/null | wc -l)
+                    chapters=$((chapters - 1))
+                    pages=$(find "$book_dir" -name "page_*.md" 2>/dev/null | wc -l)
+                fi
+                
+                if [[ -z "$title" ]]; then
+                    title="$book_name"
+                fi
+                if [[ -z "$author" ]]; then
+                    author="-"
+                fi
+                
+                count=$((count + 1))
+                printf "  %-30s %-20s %4d pages  %3d chapters\n" "$title" "$author" "$pages" "$chapters"
+                echo "    explore_book.sh /books/${book_name} overview"
+                echo ""
+            done
+        fi
+        
+        # 也从 KV Cache 列出
+        local cache_books=$(strings /book/cache/cache.bin 2>/dev/null | grep "^/books/" | grep "/_meta\$" | sort -u | head -20)
+        if [[ -n "$cache_books" ]]; then
+            echo ""
+            log "Books in KV Cache:"
+            echo "$cache_books" | head -10
+        fi
+    else
+        # Fallback: 直接列目录
+        if [[ -d "/opt/books" ]]; then
+            ls -1 "/opt/books/"
+        else
+            warn "No book directory found at /opt/books/"
+        fi
+    fi
+    
+    if [[ $count -eq 0 ]]; then
+        warn "No books found"
+        log "To import a book:"
+        echo "  ./tools/import_book /memory <book_file>"
+    fi
+}
+
 cmd_toc() {
     log "Table of Contents: $NAMESPACE"
     echo ""
@@ -673,12 +750,16 @@ main() {
         toc|t)
             cmd_toc
             ;;
+        list|ls|l)
+            cmd_list_books
+            ;;
         help|--help|-h)
             echo "Usage: $0 <namespace> <command> [options]"
             echo ""
             echo "Commands:"
+            echo "  list                  列出所有已导入书籍"
             echo "  overview              书籍概览"
-            echo '  search "<query>"      语义搜索（向量检索）'
+            echo '  search "<query>"      语义搜索（向量检索，带内容预览）'
             echo "  read <page_key>       读取页面内容（Markdown）"
             echo "  chapter [name]        列出章节或查看章节页面"
             echo "  toc                   目录结构"

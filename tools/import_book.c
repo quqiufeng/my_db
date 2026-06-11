@@ -33,6 +33,7 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
+#include <time.h>
 #include <errno.h>
 #include <math.h>
 #include <omp.h>  // OpenMP for parallel chapter processing
@@ -719,6 +720,7 @@ static chapter_result_t* process_chapter(const char* md_dir, const char* chapter
     
     result->item_count = item_count;
     result->total_pages = total_pages;
+
     
     // 批量生成向量
     if (g_embedder && item_count > 0) {
@@ -809,7 +811,10 @@ static int write_chapter_results(cache_t* cache, const char* namespace,
     char value[4096];
     
     // 创建章节目录（最终目录，用于 KV Cache 记录）
-    mkdir_p(result->chapter_md_dir);
+    // 如果使用 tmpfs，最终目录在后面 mv 时自动创建
+    if (!tmp_md_dir) {
+        mkdir_p(result->chapter_md_dir);
+    }
     
     // 保存章节元数据到 KV Cache
     snprintf(key, sizeof(key), "%s/chapters/%s/_meta", namespace, result->chapter_dirname);
@@ -1243,13 +1248,21 @@ static int import_book(cache_t* cache, const char* namespace,
             }
             
             // 将 tmpfs 中的文件批量移动到最终目录
+            // 先删除可能存在的旧 chapters 目录（来自之前失败的导入或 write_chapter_results 的 mkdir_p）
             printf("  Moving files from tmpfs to %s...\n", md_dir);
             char src_chapters[1024];
             char dst_chapters[1024];
             snprintf(src_chapters, sizeof(src_chapters), "%s/chapters", tmp_md_dir);
             snprintf(dst_chapters, sizeof(dst_chapters), "%s/chapters", md_dir);
-            if (move_dir(src_chapters, dst_chapters) != 0) {
-                fprintf(stderr, "Warning: Failed to move files from tmpfs, fallback to direct write next time\n");
+            // 删除已存在的目标目录，避免 mv 失败
+            char rm_cmd[2048];
+            snprintf(rm_cmd, sizeof(rm_cmd), "rm -rf %s 2>/dev/null; mv %s %s", dst_chapters, src_chapters, dst_chapters);
+            if (system(rm_cmd) != 0) {
+                // fallback: cp + rm
+                snprintf(rm_cmd, sizeof(rm_cmd), "cp -r %s %s && rm -rf %s", src_chapters, md_dir, src_chapters);
+                if (system(rm_cmd) != 0) {
+                    fprintf(stderr, "Warning: Failed to move files from tmpfs\n");
+                }
             }
             
             free(results);
@@ -1304,6 +1317,24 @@ static int export_vectors(cache_t* cache, const char* cache_dir,
     
     size_t ns_len = strlen(namespace);
     
+    // 先统计总页数（用于进度显示）
+    int total_pages_approx = 0;
+    cache_iter_t* count_iter = cache_iter_create(cache);
+    if (count_iter) {
+        const char* k;
+        const char* v;
+        while (cache_iter_next(count_iter, &k, &v) == 1) {
+            if (strncmp(k, namespace, ns_len) != 0) continue;
+            if (strstr(k, "/_meta")) continue;
+            if (!strstr(k, "/page_")) continue;
+            total_pages_approx++;
+        }
+        cache_iter_destroy(count_iter);
+    }
+    if (total_pages_approx > 0) {
+        printf("  Found %d pages, collecting vectors...\n", total_pages_approx);
+    }
+    
     cache_iter_t* iter = cache_iter_create(cache);
     if (!iter) {
         free(entries);
@@ -1312,6 +1343,12 @@ static int export_vectors(cache_t* cache, const char* cache_dir,
     
     const char* key;
     const char* value;
+    int progress_counter = 0;
+    int next_progress = 0;
+    int progress_step = (total_pages_approx > 100) ? total_pages_approx / 20 : 1;  // 5% intervals
+    
+    clock_t progress_start = clock();
+    
     while (cache_iter_next(iter, &key, &value) == 1) {
         // 只收集属于本书的 key
         if (strncmp(key, namespace, ns_len) != 0) continue;
@@ -1330,6 +1367,19 @@ static int export_vectors(cache_t* cache, const char* cache_dir,
             entries = new_entries;
         }
         
+        // 进度显示（每 5% 输出一次）
+        progress_counter++;
+        if (total_pages_approx > 0 && progress_counter >= next_progress) {
+            int pct = (progress_counter * 100) / total_pages_approx;
+            if (pct > 100) pct = 100;
+            double elapsed = (double)(clock() - progress_start) / CLOCKS_PER_SEC;
+            double rate = (elapsed > 0) ? progress_counter / elapsed : 0;
+            printf("\r    Progress: %d/%d (%d%%) - %.0f vectors/s  ",
+                   progress_counter, total_pages_approx, pct, rate);
+            fflush(stdout);
+            next_progress = progress_counter + progress_step;
+        }
+        
         entries[count].name = strdup(key);
         entries[count].vector = malloc(sizeof(float) * dim);
         if (entries[count].vector) {
@@ -1338,6 +1388,12 @@ static int export_vectors(cache_t* cache, const char* cache_dir,
         count++;
     }
     cache_iter_destroy(iter);
+    
+    if (count > 0 && total_pages_approx > 0) {
+        double elapsed = (double)(clock() - progress_start) / CLOCKS_PER_SEC;
+        printf("\r    Progress: %d/%d (100%%) - %.1fs total          \n", 
+               count, total_pages_approx, elapsed);
+    }
     
     if (count == 0) {
         free(entries);
@@ -1463,18 +1519,23 @@ static void* load_epub_lib(void) {
 
 int main(int argc, char* argv[]) {
     if (argc < 3) {
-        printf("Usage: %s <cache_dir> <book_file> [namespace] [output_dir]\n", argv[0]);
+        printf("Usage: %s <cache_dir> <book_file> [namespace] [output_dir] [options]\n", argv[0]);
         printf("\n");
         printf("Arguments:\n");
-        printf("  cache_dir   KV Cache 目录 (如 /memory)\n");
+        printf("  cache_dir   KV Cache 目录 (默认 /book/cache)\n");
         printf("  book_file   电子书文件 (.mobi, .azw, .azw3, .pdf, .epub)\n");
         printf("  namespace   命名空间 (可选，默认从文件名生成)\n");
         printf("  output_dir  Markdown 输出目录 (可选，默认 /opt/books)\n");
         printf("\n");
+        printf("Options:\n");
+        printf("  --skip-vectors   跳过向量生成（更快，但无语义搜索）\n");
+        printf("  --only-vectors   仅重新生成向量，跳过文本解析（需已导入过）\n");
+        printf("\n");
         printf("Examples:\n");
         printf("  %s /memory ~/book.mobi /books/my_book\n", argv[0]);
         printf("  %s /memory ~/paper.pdf\n", argv[0]);
-        printf("  %s /memory ~/paper.pdf /books/paper /data/books\n", argv[0]);
+        printf("  %s /memory ~/paper.pdf --skip-vectors\n", argv[0]);
+        printf("  %s /memory /books/my_book --only-vectors\n", argv[0]);
         printf("\n");
         printf("Output structure:\n");
         printf("  /opt/books/{book_name}/\n");
@@ -1485,23 +1546,100 @@ int main(int argc, char* argv[]) {
         return 1;
     }
     
-    const char* cache_dir = argv[1];
-    const char* book_path = argv[2];
+    int flag_skip_vectors = 0;
+    int flag_only_vectors = 0;
+    
+    // 解析 flags
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--skip-vectors") == 0) {
+            flag_skip_vectors = 1;
+        } else if (strcmp(argv[i], "--only-vectors") == 0) {
+            flag_only_vectors = 1;
+        }
+    }
+    
+    // 过滤 flags 后的位置参数
+    int pos_count = 0;
+    const char* pos_args[4];
+    for (int i = 1; i < argc && pos_count < 4; i++) {
+        if (strcmp(argv[i], "--skip-vectors") == 0 || strcmp(argv[i], "--only-vectors") == 0) {
+            continue;
+        }
+        pos_args[pos_count++] = argv[i];
+    }
+    
+    if (pos_count < 2) {
+        printf("Usage: %s <cache_dir> <book_file> [namespace] [output_dir] [options]\n", argv[0]);
+        printf("  Use --help for details\n");
+        cache_t* dummy = NULL; // avoid unused warning
+        (void)dummy;
+        return 1;
+    }
+    
+    const char* cache_dir = pos_args[0];
+    const char* book_path = flag_only_vectors ? NULL : pos_args[1];
     const char* ns = NULL;
     const char* output_dir = "/opt/books";
+    int next_pos = flag_only_vectors ? 1 : 2;
     
     // 智能解析可选参数
-    if (argc > 3) {
-        if (argv[3][0] == '/') {
-            // 以 / 开头，视为 namespace
-            ns = argv[3];
-            if (argc > 4) {
-                output_dir = argv[4];
+    if (pos_count > next_pos) {
+        if (pos_args[next_pos][0] == '/') {
+            ns = pos_args[next_pos];
+            if (pos_count > next_pos + 1) {
+                output_dir = pos_args[next_pos + 1];
             }
         } else {
-            // 不以 / 开头，视为 output_dir
-            output_dir = argv[3];
+            output_dir = pos_args[next_pos];
         }
+    }
+    
+    // --only-vectors 需要 namespace
+    if (flag_only_vectors && !ns) {
+        fprintf(stderr, "--only-vectors requires a namespace (e.g., /books/my_book)\n");
+        return 1;
+    }
+    
+    // --only-vectors: 跳过文本解析，直接导出向量
+    if (flag_only_vectors) {
+        printf("Only-vectors mode: skipping text parsing\n");
+        printf("Namespace: %s\n", ns);
+        printf("Cache: %s\n", cache_dir);
+        printf("\n");
+        
+        // 从 namespace 提取 book_name
+        char ns_book_name[128];
+        const char* last_slash = strrchr(ns, '/');
+        strncpy(ns_book_name, last_slash ? last_slash + 1 : ns, sizeof(ns_book_name) - 1);
+        ns_book_name[sizeof(ns_book_name) - 1] = '\0';
+        
+        // 只导出向量，不重新导入文本
+        cache_t* exp_cache = cache_open(cache_dir, 4ULL * 1024 * 1024 * 1024);
+        if (!exp_cache) {
+            fprintf(stderr, "Failed to open cache: %s\n", cache_dir);
+            return 1;
+        }
+        printf("Cache opened: %s\n", cache_dir);
+        
+        g_embedder = onnx_embedder_init(MODEL_PATH, VOCAB_PATH, MODEL_SEQ_LEN, EMBEDDING_DIM);
+        if (!g_embedder) {
+            fprintf(stderr, "Failed to load embedding model (%s)\n", onnx_embedder_error());
+            cache_close(exp_cache);
+            return 1;
+        }
+        printf("Embedding model loaded\n");
+        
+        int exported = export_vectors(exp_cache, cache_dir, ns, ns_book_name);
+        if (exported > 0) {
+            printf("\nDone: %d vectors exported for %s\n", exported, ns);
+        } else {
+            printf("\nNo vectors found for %s\n", ns);
+        }
+        
+        onnx_embedder_free(g_embedder);
+        g_embedder = NULL;
+        cache_close(exp_cache);
+        return (exported >= 0) ? 0 : 1;
     }
     
     // 确定文件类型
@@ -1515,7 +1653,7 @@ int main(int argc, char* argv[]) {
     }
     
     // 打开 KV Cache
-    cache_t* cache = cache_open(cache_dir, 500 * 1024 * 1024);  // 500MB
+    cache_t* cache = cache_open(cache_dir, 4ULL * 1024 * 1024 * 1024);  // 4GB (align with cache_import.c)
     if (!cache) {
         fprintf(stderr, "Failed to open cache: %s\n", cache_dir);
         return 1;
@@ -1742,8 +1880,15 @@ int main(int argc, char* argv[]) {
             char dst_chapters2[1024];
             snprintf(src_chapters2, sizeof(src_chapters2), "%s/chapters", tmp_md_dir);
             snprintf(dst_chapters2, sizeof(dst_chapters2), "%s/chapters", md_dir);
-            if (move_dir(src_chapters2, dst_chapters2) != 0) {
-                fprintf(stderr, "Warning: Failed to move files from tmpfs\n");
+            // 先删除已存在的目标目录，避免 mv 跨文件系统失败
+            char rm_cmd2[2048];
+            snprintf(rm_cmd2, sizeof(rm_cmd2), "rm -rf %s 2>/dev/null; mv %s %s", dst_chapters2, src_chapters2, dst_chapters2);
+            if (system(rm_cmd2) != 0) {
+                // fallback: cp + rm
+                snprintf(rm_cmd2, sizeof(rm_cmd2), "cp -r %s %s && rm -rf %s", src_chapters2, md_dir, src_chapters2);
+                if (system(rm_cmd2) != 0) {
+                    fprintf(stderr, "Warning: Failed to move files from tmpfs\n");
+                }
             }
             rmdir(tmp_md_dir);
             
@@ -1914,9 +2059,15 @@ int main(int argc, char* argv[]) {
     cache_sync(cache);
     
     // 导出向量供 vector_engine 使用
-    int exported = export_vectors(cache, cache_dir, namespace, book_name);
-    if (exported > 0) {
-        printf("  Exported %d vectors for semantic search\n", exported);
+    if (flag_skip_vectors) {
+        printf("  Skipping vector export (--skip-vectors)\n");
+        printf("  Run later: %s %s %s --only-vectors\n", 
+               argv[0], cache_dir, namespace);
+    } else {
+        int exported = export_vectors(cache, cache_dir, namespace, book_name);
+        if (exported > 0) {
+            printf("  Exported %d vectors for semantic search\n", exported);
+        }
     }
     
     printf("\n========================================\n");

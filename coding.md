@@ -1479,7 +1479,7 @@ stdbuf -oL ./tools/cache_import /opt/code_caches/php_cache /code/php --cache-dir
 
 ---
 
-*文档版本：2026-06-10*（系统级修复 9 项：protected_regular / GPU扩展名 / batch_embedder流式 / chunks导入5000x / dataflow导入15x / Makefile污染 / call_graph哈希 / exclude-dir参数 / cache mmap扩容）
+*文档版本：2026-06-11*（系统级修复 9 项 + 对齐 ebook 导入 cache 大小：protected_regular / GPU扩展名 / batch_embedder流式 / chunks导入5000x / dataflow导入15x / Makefile污染 / call_graph哈希 / exclude-dir参数 / cache mmap扩容）
 *适用于：analyze_repo.sh + ai_code_search.sh + ai_code_search_large.sh 最新版本*
 ---
 
@@ -1704,6 +1704,8 @@ file tools/call_graph
 ```c
 g_cache = cache_open(cache_dir, 4ULL * 1024 * 1024 * 1024);
 ```
+
+> **对齐**: 同一修复已同步应用到电子书导入工具 `import_book.c`（从 500MB→4GB），确保多本大书共存时不触发 LRU 淘汰。详见 [ebook.md](ebook.md) 问题 15。
 
 ---
 
