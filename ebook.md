@@ -342,19 +342,20 @@ elon_musk/
 
 ## 已导入书籍
 
+```bash
+strings /book/cache/cache.bin | grep "^/books/" | grep "/_meta" | sort -u
+```
+
+## 已导入书籍
+
 当前系统已导入以下书籍：
 
-| 命名空间 | 书名 | 格式 | 章节数 | 页数 | 向量数 |
-|----------|------|------|--------|------|--------|
-| `/books/硅谷钢铁侠` | 硅谷钢铁侠 | AZW3 | 23 | 838 | 2,094 |
-| `/books/Data.Engineering.for.Cybersecurity.2025.7` | Data Engineering for Cybersecurity | MOBI | 25 | 633 | 1,515 |
-| `/books/designing-data-intensive-applications` | Designing Data-Intensive Applications | PDF | 30 | 4,193 | 4,197 |
-| `/books/OReilly.The.Staff.Engineer's.Path.2022.9` | The Staff Engineer's Path | EPUB | 21 | 1,433 | 1,433 |
-
-**查看所有命名空间**：
-```bash
-strings /book/cache/cache.bin | grep "^/books/" | sort -u
-```
+| 命名空间 | 书名 | 格式 | 章节数 | 页数 | 向量 |
+|----------|------|------|:------:|:----:|:----:|
+| `/books/耶路撒冷三千年` | 耶路撒冷三千年 | MOBI | 274 | 2,474 | ✅ |
+| `/books/一站式学习C编程` | 一站式学习C编程(升级版) | MOBI | 158 | 3,508 | ✅ |
+| `/books/Software.Design.for.Python.Programmers.2026.1` | Software Design for Python Programmers | PDF | 27 | 2,618 | ✅ |
+| `/books/Web.Development.with.Django.6.3rd.2026.3` | Web Development with Django 6 (3rd ed.) | EPUB | 22 | 649 | ✅ |
 
 ---
 
