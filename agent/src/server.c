@@ -116,6 +116,32 @@ static int accept_connection(agent_state_t *state) {
         inet_ntop(AF_INET, &addr.sin_addr, ip, sizeof(ip));
         agent_log("INFO", "accept connection from %s:%d", ip, ntohs(addr.sin_port));
 
+        /* try to match inbound connection to a peer by IP */
+        {
+            int matched = 0;
+            for (int i = 0; i < state->peer_count && !matched; i++) {
+                if (strcmp(state->peers[i].ip, ip) != 0) continue;
+                if (state->peers[i].state == PEER_CONNECTED && state->peers[i].fd >= 0)
+                    continue;  /* already have a working connection */
+                if (state->peers[i].fd >= 0) {
+                    epoll_ctl(state->epoll_fd, EPOLL_CTL_DEL, state->peers[i].fd, NULL);
+                    close(state->peers[i].fd);
+                }
+                state->peers[i].fd = connfd;
+                state->peers[i].state = PEER_CONNECTED;
+                state->peers[i].heartbeat_miss = 0;
+                state->peers[i].last_heartbeat = now_ms();
+                agent_log("INFO", "peer %s connected (inbound, fd=%d)",
+                          state->peers[i].addr, connfd);
+                matched = 1;
+            }
+            if (!matched) {
+                agent_log("DEBUG", "closing redundant inbound from %s (no matching peer)", ip);
+                close(connfd);
+                continue;
+            }
+        }
+
         struct epoll_event ev;
         ev.events  = EPOLLIN;
         ev.data.fd = connfd;
