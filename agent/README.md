@@ -1,7 +1,9 @@
 # Agent — AI 驱动的 Linux 集群控制引擎
 
-> **面向 AI 编程助手的集群控制工具。** 纯 C 语言，一个二进制文件，SCP 部署，零依赖，自组织选举，自动故障恢复。
+> **面向 AI 编程助手的集群控制工具。** 纯 C 语言，一个二进制文件，SCP 部署，零依赖，**Raft 自组织选举**，自动故障恢复。
 > 让 AI 像操作一台机器一样操作整个集群——部署、命令执行、文件分发、服务管理，全部通过结构化 JSON 接口完成。
+
+> ⚠️ **当前状态：核心选举已完成，任务调度和 Master 指令功能待实现。**
 
 ## 设计理念
 
@@ -70,9 +72,9 @@
 │   │  └────────────┘  │     │  └────────────┘  │                 │
 │   └──────────────────┘     └──────────────────┘                 │
 │                                                                  │
-│   ◄── 心跳 + 状态上报 (Follower → Leader)                       │
+│   ◄── 心跳 (Leader → Follower) + 状态上报 (Follower → Leader)   │
 │   ◄── 对端建连（-ip 参数指定全部对端列表）                        │
-│   ◄── 选举投票（随机数 PK）                                       │
+│   ◄── Raft 选举投票                                               │
 │                                                                  │
 │   ③ Leader 选出后 → 主动向 Master 报备 "我是 Leader, epoch=N"     │
 └──────────────────────────────────────────────────────────────────┘
@@ -97,10 +99,10 @@
 | **纯 C 语言** | C11 标准，静态编译，单个二进制 ≈ 500KB，零运行时依赖 |
 | **一键部署** | `deploy -ip 192.168.1.10,192.168.1.11,192.168.1.12`，AI 一条命令拉起整个集群 |
 | **零配置发现** | 启动时 `-ip` 参数传入全部对端 IP，Agent 开机即知全部邻居 |
-| **Leader 选举** | 随机数 PK 内嵌，集群自组织，无需 etcd/Consul/ZooKeeper |
+| **Leader 选举** | **Raft 风格**：任期、多数派、随机超时、自动选举恢复，无需 etcd/Consul/ZooKeeper |
 | **三层控制** | Master ⇄ Leader ⇄ Follower，Master 仅连 Leader，降低连接压力 |
 | **Leader 主动报备** | Leader 选出后主动向 Master 报告，Master 等待期间自动阻塞 |
-| **状态聚合** | Follower 定时上报状态给 Leader，Master 查询 Leader 即可获取全貌 |
+| **状态聚合** | Follower 定时上报状态给 Leader，Master 查询 Leader 即可获取全貌 ⏳ 待实现 |
 | **高可用** | Leader 故障自动感知 → 重新选举 → 新 Leader 向 Master 报备 → 服务自愈 |
 | **统一协议** | 全链路走 TCP 自定义二进制协议，不引入 HTTP 等额外协议栈 |
 
@@ -225,18 +227,13 @@ agent/
 │
 ├── src/
 │   ├── main.c            # 入口：参数解析 → daemonize → 启动
-│   ├── server.c          # TCP 监听 + 连接管理（epoll）
+│   ├── server.c          # TCP 监听 + 连接管理（epoll）+ 消息分发
 │   ├── peer.c            # 对端管理：连接、重连、保活
-│   ├── election.c        # 随机数 PK 选举算法
-│   ├── heartbeat.c       # 心跳检测 + 超时判定
-│   ├── status.c          # 状态采集 + 上报
-│   ├── task.c            # 任务下发 + 执行 + 结果回传
-│   ├── protocol.c        # 二进制帧编解码
-│   ├── master.c          # clusterctl 主控逻辑（Master 端）
-│   │                    #   -connect 等待 Leader 报备
-│   │                    #   -exec / status 命令（TCP）
-│   ├── deploy.c          # SCP + SSH 批量部署（Master 端）
-│   └── json.c            # 轻量 JSON 构造/解析器
+│   ├── election.c        # Raft 选举算法（Follower/Candidate/Leader）
+│   ├── protocol.c        # 二进制帧编解码（循环读写）
+│   ├── json.c            # 轻量 JSON 构造/解析器
+│   ├── clusterctl.c      # Master 端 CLI：-connect / -exec / status
+│   └── deploy.c          # SCP + SSH 批量部署（Master 端）
 │
 ├── include/
 │   ├── agent.h           # 公共类型 + 接口声明
@@ -326,20 +323,21 @@ Master 发送 `MSG_MASTER_QUERY` 后，Agent 将当前会话上下文序列化�
 
 | 消息类型 | 值 | 方向 | 用途 |
 |---------|-----|------|------|
-| `MSG_HEARTBEAT` | 0x01 | Follower → Leader | 心跳 + 状态数据 |
-| `MSG_HEARTBEAT_ACK` | 0x02 | Leader → Follower | 心跳确认 |
-| `MSG_VOTE` | 0x03 | 节点 → 节点 | 投票（node_id + 随机数） |
-| `MSG_COORD` | 0x04 | 胜出者 → 所有人 | 宣布新 Leader |
-| `MSG_OK` | 0x05 | 节点 → 节点 | 确认接受 |
-| `MSG_TASK_DISPATCH` | 0x10 | Leader → Follower | 下发任务 |
-| `MSG_TASK_RESULT` | 0x11 | Follower → Leader | 任务结果 |
-| `MSG_STATUS_REPORT` | 0x12 | Follower → Leader | 状态上报 |
+| `MSG_HEARTBEAT` | 0x01 | **Leader → Follower** | 心跳保活 |
+| `MSG_HEARTBEAT_ACK` | 0x02 | Follower → Leader | 心跳确认 |
+| `MSG_ELECTION_VOTE_REQ` | 0x03 | Candidate → Peer | 请求投票 |
+| `MSG_ELECTION_VOTE_RESP` | 0x04 | Peer → Candidate | 投票响应 |
+| `MSG_COORD` | 0x05 | 胜出者 → 所有人 | 宣布新 Leader |
+| `MSG_OK` | 0x06 | 节点 → 节点 | 确认接受 |
+| `MSG_TASK_DISPATCH` | 0x10 | Leader → Follower | ⏳ 待实现 |
+| `MSG_TASK_RESULT` | 0x11 | Follower → Leader | ⏳ 待实现 |
+| `MSG_STATUS_REPORT` | 0x12 | Follower → Leader | ⏳ 待实现 |
 | `MSG_MASTER_HELLO` | 0x20 | Master → Agent | Master 连接声明 |
-| `MSG_MASTER_LEADER` | 0x21 | **Leader → Master** | **Leader 主动报备** |
-| `MSG_MASTER_CMD` | 0x22 | Master → Leader | Master 下发指令 |
-| `MSG_MASTER_QUERY` | 0x24 | Master → 任一 Agent | 查询对方身份 + 状态 |
+| `MSG_MASTER_LEADER` | 0x21 | Leader → Master | Leader 主动报备 ✅ 已实现 |
+| `MSG_MASTER_CMD` | 0x22 | Master → Leader | ⏳ 待实现 |
+| `MSG_MASTER_QUERY` | 0x24 | Master → 任一 Agent | 查询身份 + 状态 |
 | `MSG_MASTER_STATUS` | 0x25 | Agent → Master | 返回身份 + 状态 |
-| `MSG_MASTER_RESULT` | 0x23 | Leader → Master | 任务执行结果 |
+| `MSG_MASTER_RESULT` | 0x23 | Leader → Master | ⏳ 待实现 |
 
 ### Payload 格式（JSON）
 
@@ -479,7 +477,7 @@ Master 发送 `MSG_MASTER_QUERY` 后，Agent 将当前会话上下文序列化�
 ```bash
 cd agent
 make                # 编译 agent 二进制
-make tools          # 编译 deploy / clusterctl
+make clusterctl deploy  # 编译 deploy / clusterctl
 make test           # 运行单元测试
 ```
 
@@ -487,18 +485,17 @@ make test           # 运行单元测试
 
 ```bash
 # 终端 1
-./agent --port 9527 --id node1 -ip 127.0.0.1:9527,127.0.0.1:9528,127.0.0.1:9529
+./agent --foreground --bind 127.0.0.1 --port 9527 -ip 127.0.0.1:9528,127.0.0.1:9529 --idx 0 --id node0 --cluster-size 3
 
 # 终端 2
-./agent --port 9528 --id node2 -ip 127.0.0.1:9527,127.0.0.1:9528,127.0.0.1:9529
+./agent --foreground --bind 127.0.0.1 --port 9528 -ip 127.0.0.1:9527,127.0.0.1:9529 --idx 1 --id node1 --cluster-size 3
 
 # 终端 3
-./agent --port 9529 --id node3 -ip 127.0.0.1:9527,127.0.0.1:9528,127.0.0.1:9529
-
-# 终端 4 — Master 连接（会自动等待 Leader 报备）
-./clusterctl --connect 127.0.0.1:9527 status
-./clusterctl --connect 127.0.0.1:9527 exec "uptime"
+./agent --foreground --bind 127.0.0.1 --port 9529 -ip 127.0.0.1:9527,127.0.0.1:9528 --idx 2 --id node2 --cluster-size 3
 ```
+
+> ⚠️ `--cluster-size` 用于正确计算多数派（N/2+1）。各节点需要完整的 `-ip` 列表以建立双向连接。
+> `--foreground` 让进程在前台运行，便于观察日志。去掉则自动 daemonize。
 
 > **注意**：实际部署时 `-ip` 只需传 IP 列表（如 `-ip 192.168.1.10,192.168.1.11,192.168.1.12`），端口统一由 `--port` 指定。
 > 本地模拟因多节点同机，需要用 `ip:port` 格式区分。
@@ -538,7 +535,7 @@ make test           # 运行单元测试
 ## 技术栈
 
 - **语言**：C11（严格 ANSI C 兼容子集）
-- **网络**：epoll（边缘触发，单线程事件驱动）
+- **网络**：epoll（水平触发，单线程事件驱动）
 - **协议**：自定义二进制帧头 + JSON payload，全链路统一
 - **序列化**：手写轻量 JSON 构造器（零依赖）
 - **构建**：GNU Make + gcc/clang
@@ -546,12 +543,16 @@ make test           # 运行单元测试
 
 ## 后续规划
 
-- [ ] 选举 + 心跳（核心 MVP）
-- [ ] Leader 向 Master 报备
-- [ ] 状态采集 + 上报
-- [ ] 任务分发 + 结果聚合
-- [ ] `deploy` 批量部署工具
-- [ ] `clusterctl` 命令行（JSON 输出）
+### ✅ 已完成
+- [x] Raft 选举 + 心跳（核心 MVP）
+- [x] Leader 向 Master 报备 (`MSG_MASTER_LEADER`)
+- [x] `deploy` 批量部署工具（SCP + SSH）
+- [x] `clusterctl` 命令行（`--connect`、`status`、`-exec` 框架）
+
+### ⏳ 待实现
+- [ ] 任务调度（Leader 分发 → Follower 执行 → 结果聚合）
+- [ ] Follower 状态采集 + 定时上报
+- [ ] `clusterctl -exec` 完整实现
 - [ ] 任务队列持久化（嵌入式 SQLite）
 - [ ] Tail -f 模式：实时流式查看所有节点日志
 - [ ] TLS 1.3 加密通信
