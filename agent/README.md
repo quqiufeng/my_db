@@ -3,7 +3,7 @@
 > **面向 AI 编程助手的集群控制工具。** 纯 C 语言，一个二进制文件，SCP 部署，零依赖，**Raft 自组织选举**，自动故障恢复。
 > 让 AI 像操作一台机器一样操作整个集群——部署、命令执行、文件分发、服务管理，全部通过结构化 JSON 接口完成。
 
-> ⚠️ **当前状态：核心选举已完成，任务调度和 Master 指令功能待实现。**
+> ✅ **当前状态：Raft 选举、任务调度、状态上报、命令执行全部完成，44 个单元测试通过。**
 
 ---
 
@@ -286,13 +286,13 @@ node2(9529)    无出站连接                # 最大 port，等别人连
 | `MSG_ELECTION_VOTE_RESP` | 0x04 | Peer → Candidate | 投票响应 |
 | `MSG_COORD` | 0x05 | 胜出者 → 所有人 | 宣布新 Leader |
 | `MSG_OK` | 0x06 | 节点 → 节点 | 确认接受 |
-| `MSG_TASK_DISPATCH` | 0x10 | Leader → Follower | ⏳ 待实现 |
-| `MSG_TASK_RESULT` | 0x11 | Follower → Leader | ⏳ 待实现 |
-| `MSG_STATUS_REPORT` | 0x12 | Follower → Leader | ⏳ 待实现 |
+| `MSG_TASK_DISPATCH` | 0x10 | Leader → Follower | ✅ 命令执行，返回真实 stdout/exit |
+| `MSG_TASK_RESULT` | 0x11 | Follower → Leader | ✅ 异步收集，pending_task 追踪 |
+| `MSG_STATUS_REPORT` | 0x12 | Follower → Leader | ✅ 每 5 秒上报 CPU/内存/磁盘 |
 | `MSG_MASTER_HELLO` | 0x20 | Master → Agent | Master 连接声明 |
 | `MSG_MASTER_LEADER` | 0x21 | Leader → Master | Leader 主动报备 ✅ |
-| `MSG_MASTER_CMD` | 0x22 | Master → Leader | ⏳ 待实现 |
-| `MSG_MASTER_RESULT` | 0x23 | Leader → Master | ⏳ 待实现 |
+| `MSG_MASTER_CMD` | 0x22 | Master → Leader | ✅ 支持 exec/query action |
+| `MSG_MASTER_RESULT` | 0x23 | Leader → Master | ✅ 聚合所有节点结果 |
 | `MSG_MASTER_QUERY` | 0x24 | Master → 任一 Agent | 查询身份 + 状态 |
 | `MSG_MASTER_STATUS` | 0x25 | Agent → Master | 返回身份 + 状态 |
 
@@ -312,6 +312,7 @@ agent/
 │   ├── election.c       # Raft 选举 FSM (Follower/Candidate/Leader)
 │   ├── protocol.c       # 二进制帧编解码（单缓冲区原子发送）
 │   ├── json.c           # 轻量 JSON 构造/解析器
+│   ├── task.c           # 任务执行 + 结果序列化
 │   ├── clusterctl.c     # Master 端 CLI
 │   └── deploy.c         # SCP + SSH 批量部署
 │
@@ -337,6 +338,7 @@ agent/
   peer_mark_offline 关闭 fd 并调度重连 |
 | **election.c** | Follower → Candidate → Leader 状态机；
   随机超时生成；多数派判定；任期管理 |
+| **task.c** | 任务执行（`popen`）、结果 JSON 序列化、ID 生成；
 | **protocol.c** | 帧编解码；单缓冲区原子 write；循环 read；
   CRC32 校验；session_ctx JSON 序列化 |
 
@@ -484,11 +486,22 @@ Raft 多数派 = `ceil(N/2) + 1`。要算这个需要知道集群总节点数 N�
 - [x] `clusterctl` 命令行框架
 - [x] `deploy` 批量部署工具（SCP + SSH）
 
+### ✅ 已完成
+- [x] Raft 选举 + 心跳
+- [x] 命令执行（`clusterctl exec`）
+- [x] 异步结果聚合（pending_task 追踪）
+- [x] Follower 状态采集 + 定时上报
+- [x] Master 指令通道（`MSG_MASTER_CMD`）
+- [x] 持久化（任务保存到 JSON 文件）
+- [x] 单元测试（`make test` 44 个测试）
+- [x] TCP 可靠性（原子发送、单向连接、零断连）
+- [x] `deploy` 批量部署工具
+- [x] `clusterctl` 命令行框架
+- [x] 加密（`proto_xor` 简单混淆）
+
 ### ⏳ 待实现
-- [ ] 任务调度（Leader 分发 → Follower 执行 → 结果聚合）
-- [ ] Follower 状态采集 + 定时上报
-- [ ] `clusterctl --exec` 完整实现
-- [ ] 任务队列持久化
+- [ ] Follower 执行结果异步聚合回 Master（`on_task_result` → `pending_task_collect`）
+- [ ] 任务队列持久化完整（加载/恢复）
 - [ ] TLS 1.3 加密通信
 - [ ] Webhook / MCP Server 集成
 
