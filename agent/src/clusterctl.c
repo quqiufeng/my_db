@@ -1,4 +1,5 @@
 #include "json.h"
+#include "crypto.h"
 /* ===================================================================
  * clusterctl - Master-side AI cluster control tool
  *
@@ -185,6 +186,21 @@ static int do_query(int fd, int timeout_sec) {
 
     /* 输出原始 JSON */
     payload[rlen] = '\0';
+
+    /* decrypt if encrypted (high bit set) */
+    if (rlen > 0 && (payload[0] & 0x80)) {
+        uint8_t dec_buf[8192];
+        uint32_t elen = xxtea_encoded_len(rlen - 1);
+        if (elen + 1 <= sizeof(dec_buf)) {
+            dec_buf[0] = payload[0] & 0x7F;
+            memcpy(dec_buf + 1, payload + 1, rlen - 1 > elen ? elen : rlen - 1);
+            if (xxtea_decrypt(dec_buf + 1, elen) == 0) {
+                dec_buf[elen] = '\0';
+                printf("%s\n", (char*)dec_buf + 1);
+                return 0;
+            }
+        }
+    }
     printf("%s\n", payload);
     return 0;
 }
@@ -220,6 +236,21 @@ static int do_exec(int fd, const char *cmd, int timeout_sec) {
     }
 
     payload[rlen] = '\0';
+
+    /* decrypt if encrypted (high bit set) */
+    if (rlen > 0 && (payload[0] & 0x80)) {
+        uint8_t dec_buf[8192];
+        uint32_t elen = xxtea_encoded_len(rlen - 1);
+        if (elen + 1 <= sizeof(dec_buf)) {
+            dec_buf[0] = payload[0] & 0x7F;
+            memcpy(dec_buf + 1, payload + 1, rlen - 1 > elen ? elen : rlen - 1);
+            if (xxtea_decrypt(dec_buf + 1, elen) == 0) {
+                dec_buf[elen] = '\0';
+                printf("%s\n", (char*)dec_buf + 1);
+                return 0;
+            }
+        }
+    }
     printf("%s\n", payload);
     return 0;
 }
@@ -263,7 +294,12 @@ int main(int argc, char **argv) {
     /* ========= 解析参数 ========= */
     int i = 1;
     while (i < argc) {
-        if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
+        if (strcmp(argv[i], "--key") == 0 && i + 1 < argc) {
+            uint8_t _k[16];
+            key_from_string(argv[++i], _k);
+            xxtea_set_key(_k);
+            i++;
+        } else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
             print_usage(argv[0]);
             return 0;
         } else if (strcmp(argv[i], "--connect") == 0 && i + 1 < argc) {

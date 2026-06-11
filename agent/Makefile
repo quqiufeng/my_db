@@ -1,6 +1,6 @@
 CC       ?= gcc
 CFLAGS   ?= -Wall -Wextra -Wpedantic -std=c11 -O2 -g
-CFLAGS   += -Iinclude -D_GNU_SOURCE $(LUA_CFLAGS)
+CFLAGS   += -Iinclude -D_GNU_SOURCE -Wno-unused-parameter $(LUA_CFLAGS)
 LDFLAGS  ?=
 LIBS     ?= -lrt $(LUA_LIBS)
 
@@ -43,7 +43,7 @@ tools: $(BUILD_DIR) $(TOOLS)
 $(BUILD_DIR)/deploy: $(BUILD_DIR)/deploy.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
-$(BUILD_DIR)/clusterctl: $(BUILD_DIR)/clusterctl.o $(BUILD_DIR)/protocol.o $(BUILD_DIR)/json.o
+$(BUILD_DIR)/clusterctl: $(BUILD_DIR)/clusterctl.o $(BUILD_DIR)/protocol.o $(BUILD_DIR)/json.o build/crypto.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS) $(LIBS)
 
 

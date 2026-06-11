@@ -163,6 +163,21 @@ int plugin_init(agent_state_t *state) {
     }
     luaL_openlibs(pm->L);
 
+    /* add cjson to package.path */
+    lua_getglobal(pm->L, "package");
+    if (lua_istable(pm->L, -1)) {
+        lua_getfield(pm->L, -1, "path");
+        const char *cur = lua_tostring(pm->L, -1);
+        if (cur) {
+            char newpath[2048];
+            snprintf(newpath, sizeof(newpath), "/usr/local/lualib/?.so;%s", cur);
+            lua_pushstring(pm->L, newpath);
+            lua_setfield(pm->L, -3, "path");
+        }
+        lua_pop(pm->L, 1);
+    }
+    lua_pop(pm->L, 1);
+
     /* 注册 agent 库 */
     lua_newtable(pm->L);
     luaL_setfuncs(pm->L, agent_lib, 0);

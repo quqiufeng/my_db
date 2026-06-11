@@ -104,6 +104,7 @@ static void print_usage(const char *prog) {
         "  --id <name>      Node ID (default: auto)\n"
         "  --bind <addr>    Bind address (default: 0.0.0.0)\n"
         "  --datadir <dir>  Data directory (default: /tmp/agent)\n"
+        "  --key <string>     Encryption key for secure communication\n"
         "  --plugin-dir <dir>  Lua plugin directory (default: /etc/agent/plugins)\n"
         "  --idx <n>        Node index in peer list (0-based)\n"
         "  --cluster-size <n>  Total nodes in cluster (default: peer_count+1)\n"
@@ -132,6 +133,10 @@ static int parse_args(agent_state_t *state, int argc, char **argv) {
             strncpy(state->config.data_dir, argv[++i], sizeof(state->config.data_dir) - 1);
         } else if (strcmp(argv[i], "--cluster-size") == 0 && i + 1 < argc) {
             state->config.cluster_size = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--key") == 0 && i + 1 < argc) {
+            uint8_t _k[16];
+            key_from_string(argv[++i], _k);
+            xxtea_set_key(_k);
         } else if (strcmp(argv[i], "--plugin-dir") == 0 && i + 1 < argc) {
             strncpy(state->config.plugin_dir, argv[++i], sizeof(state->config.plugin_dir) - 1);
         } else if (strcmp(argv[i], "--idx") == 0 && i + 1 < argc) {

