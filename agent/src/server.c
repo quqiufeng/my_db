@@ -308,9 +308,30 @@ static int on_task_dispatch(agent_state_t *state, int fd,
     return 0;
 }
 
+/* forward declarations for task tracking */
+static pending_task_t *pending_task_find(agent_state_t *state, const char *task_id);
+static pending_task_t *pending_task_new(agent_state_t *state, const char *task_id,
+                                         const char *cmd, int master_fd,
+                                         int total_nodes, int timeout_sec);
+static void pending_task_collect(agent_state_t *state, pending_task_t *pt);
+static void pending_tick(agent_state_t *state, long now);
+
 static int on_task_result(agent_state_t *state, int fd,
                           const char *payload, uint32_t len) {
-    agent_log("DEBUG", "task result from fd=%d: %.*s", fd, (int)len, payload);
+    char task_id[64] = {0};
+    sscanf(payload, "{\"task_id\":\"%63[^\"]\"", task_id);
+    pending_task_t *pt = pending_task_find(state, task_id);
+    if (!pt) {
+        agent_log("DEBUG", "task result for unknown task %s", task_id);
+        return 0;
+    }
+    if (pt->result_count < MAX_TASK_RESULTS) {
+        snprintf(pt->results[pt->result_count++], sizeof(pt->results[0]),
+                 "%.*s", (int)(len < 2000 ? len : 2000), payload);
+    }
+    pt->received++;
+    agent_log("INFO", "task %s: got result (%d/%d)", task_id, pt->received, pt->total_nodes);
+    pending_task_collect(state, pt);
     return 0;
 }
 
@@ -349,46 +370,67 @@ static int on_master_cmd(agent_state_t *state, int fd,
         if (tmo < 1) tmo = 30;
 
         char task_id[64];
-        snprintf(task_id, sizeof(task_id), "t_%ld_%d", now_ms(), rand() % 1000);
+        task_generate_id(task_id, sizeof(task_id));
 
         /* self-execute on leader */
-        char stdout_buf[16384] = {0};
-        size_t pos = 0;
-        FILE *fp = popen(cmd, "r");
-        int ec = -1;
-        if (fp) {
-            char line[4096];
-            while (fgets(line, sizeof(line), fp) && pos < sizeof(stdout_buf) - 4096) {
-                size_t llen = strlen(line);
-                memcpy(stdout_buf + pos, line, llen);
-                pos += llen;
-            }
-            ec = pclose(fp);
+        char self_result[4096] = {0};
+        {
+            task_t task;
+            memset(&task, 0, sizeof(task));
+            snprintf(task.id, sizeof(task.id), "%s", task_id);
+            snprintf(task.cmd, sizeof(task.cmd), "%s", cmd);
+            task.create_time = now_ms();
+            task_result_t tr;
+            task_execute(&task, &tr);
+            snprintf(tr.node_id, sizeof(tr.node_id), "%s", state->ctx.self_addr);
+            task_result_to_json(&tr, self_result, sizeof(self_result));
         }
-        char escaped[32768];
-        json_escape(stdout_buf, escaped, sizeof(escaped));
 
-        /* dispatch to followers */
-        char dispatch[4608];
-        snprintf(dispatch, sizeof(dispatch),
-            "{\"task_id\":\"%s\",\"action\":\"exec\",\"cmd\":\"%s\",\"timeout\":%d}",
-            task_id, cmd, tmo);
-        int nodes = 1;
+        /* count total nodes */
+        int total = 1;
         for (int i = 0; i < state->peer_count; i++) {
-            if (state->peers[i].state == PEER_CONNECTED) {
-                nodes++;
-                send_message(state->peers[i].fd, MSG_TASK_DISPATCH,
-                             PROTO_FLAG_REQUEST, dispatch, strlen(dispatch));
-            }
+            if (state->peers[i].state == PEER_CONNECTED) total++;
         }
-        (void)nodes; /* TODO: async collect follower results */
 
-        char resp[33000];
-        snprintf(resp, sizeof(resp),
-            "{\"status\":\"ok\",\"task_id\":\"%s\",\"results\":["
-            "{\"node\":\"%s\",\"exit\":%d,\"stdout\":\"%s\"}]}",
-            task_id, state->ctx.self_addr, ec, escaped);
-        send_message(fd, MSG_MASTER_RESULT, PROTO_FLAG_RESPONSE, resp, strlen(resp));
+        /* create pending task for async collection */
+        pending_task_t *pt = pending_task_new(state, task_id, cmd, fd, total, tmo);
+        if (pt) {
+            /* store self result */
+            snprintf(pt->results[pt->result_count++], sizeof(pt->results[0]),
+                     "%s", self_result);
+            pending_task_collect(state, pt);
+
+            /* dispatch to followers */
+            char dispatch[4608];
+            snprintf(dispatch, sizeof(dispatch),
+                "{\"task_id\":\"%s\",\"action\":\"exec\",\"cmd\":\"%s\",\"timeout\":%d}",
+                task_id, cmd, tmo);
+            for (int i = 0; i < state->peer_count; i++) {
+                if (state->peers[i].state == PEER_CONNECTED) {
+                    send_message(state->peers[i].fd, MSG_TASK_DISPATCH,
+                                 PROTO_FLAG_REQUEST, dispatch, strlen(dispatch));
+                }
+            }
+            agent_log("INFO", "task %s dispatched to %d nodes, tracking", task_id, total);
+
+            /* save to persistent queue */
+            char persist_path[512];
+            snprintf(persist_path, sizeof(persist_path), "%s/task_%s.json",
+                     state->config.data_dir, task_id);
+            FILE *pf = fopen(persist_path, "w");
+            if (pf) {
+                fprintf(pf, "{\"task_id\":\"%s\",\"cmd\":\"%s\",\"created\":%ld}\n",
+                        task_id, cmd, now_ms());
+                fclose(pf);
+            }
+        } else {
+            /* fallback: respond immediately with self result only */
+            char resp[33000];
+            snprintf(resp, sizeof(resp),
+                "{\"status\":\"ok\",\"task_id\":\"%s\",\"results\":[%s]}",
+                task_id, self_result);
+            send_message(fd, MSG_MASTER_RESULT, PROTO_FLAG_RESPONSE, resp, strlen(resp));
+        }
     } else if (strcmp(action, "query") == 0) {
         char json[2048];
         session_ctx_to_json(&state->ctx, json, sizeof(json));
@@ -699,3 +741,85 @@ int server_event_loop(agent_state_t *state) {
 
     return 0;
 }
+/* ===================================================================
+ * pending_task_find - 按 task_id 查找待收集任务
+ * =================================================================== */
+static pending_task_t *pending_task_find(agent_state_t *state, const char *task_id) {
+    for (int i = 0; i < state->pending_count; i++) {
+        if (strcmp(state->pending_tasks[i].task_id, task_id) == 0 && state->pending_tasks[i].active)
+            return &state->pending_tasks[i];
+    }
+    return NULL;
+}
+
+/* pending_task_new - 创建新的待收集任务 */
+static pending_task_t *pending_task_new(agent_state_t *state, const char *task_id,
+                                         const char *cmd, int master_fd,
+                                         int total_nodes, int timeout_sec) {
+    if (state->pending_count >= MAX_PENDING_TASKS) return NULL;
+    pending_task_t *pt = &state->pending_tasks[state->pending_count++];
+    memset(pt, 0, sizeof(*pt));
+    snprintf(pt->task_id, sizeof(pt->task_id), "%s", task_id);
+    snprintf(pt->cmd, sizeof(pt->cmd), "%s", cmd);
+    pt->master_fd   = master_fd;
+    pt->total_nodes = total_nodes;
+    pt->received    = 1;  /* self result already counted */
+    pt->deadline    = now_ms() + timeout_sec * 1000 + 5000;
+    pt->active      = 1;
+    return pt;
+}
+
+/* pending_task_collect - 聚合已完成任务的结果，发送给 Master */
+static void pending_task_collect(agent_state_t *state, pending_task_t *pt) {
+    if (!pt || !pt->active) return;
+    /* only respond when all nodes responded */
+    if (pt->received < pt->total_nodes) return;
+
+    pt->active = 0;
+    char results[32768] = {0};
+    size_t pos = 0;
+    for (int i = 0; i < pt->result_count && pos < sizeof(results) - 2048; i++) {
+        if (i > 0) results[pos++] = ',';
+        size_t len = strlen(pt->results[i]);
+        memcpy(results + pos, pt->results[i], len);
+        pos += len;
+    }
+
+    char resp[33000];
+    snprintf(resp, sizeof(resp),
+        "{\"status\":\"ok\",\"task_id\":\"%s\",\"results\":[%s]}",
+        pt->task_id, results);
+    send_message(pt->master_fd, MSG_MASTER_RESULT, PROTO_FLAG_RESPONSE,
+                 resp, strlen(resp));
+    agent_log("INFO", "task %s completed: %d nodes, sent to master fd=%d",
+              pt->task_id, pt->received, pt->master_fd);
+}
+
+/* pending_tick - 检查所有待收集任务的状态 */
+static void pending_tick(agent_state_t *state, long now) {
+    for (int i = 0; i < state->pending_count; i++) {
+        pending_task_t *pt = &state->pending_tasks[i];
+        if (!pt->active) continue;
+        /* check timeout */
+        if (now >= pt->deadline) {
+            agent_log("WARN", "task %s timeout (%d/%d nodes responded)",
+                      pt->task_id, pt->received, pt->total_nodes);
+            pt->active = 0;
+            char results[32768] = {0};
+            size_t pos = 0;
+            for (int j = 0; j < pt->result_count && pos < sizeof(results) - 2048; j++) {
+                if (j > 0) results[pos++] = ',';
+                size_t len = strlen(pt->results[j]);
+                memcpy(results + pos, pt->results[j], len);
+                pos += len;
+            }
+            char resp[33000];
+            snprintf(resp, sizeof(resp),
+                "{\"status\":\"partial\",\"task_id\":\"%s\",\"results\":[%s]}",
+                pt->task_id, results);
+            send_message(pt->master_fd, MSG_MASTER_RESULT, PROTO_FLAG_RESPONSE,
+                         resp, strlen(resp));
+        }
+    }
+}
+

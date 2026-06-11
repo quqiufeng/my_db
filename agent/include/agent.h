@@ -29,6 +29,26 @@ typedef struct {
 /* ===================================================================
  * Agent 全局状态
  * =================================================================== */
+
+/* ===================================================================
+ * 任务跟踪（Leader 侧）
+ * =================================================================== */
+#define MAX_PENDING_TASKS 16
+#define MAX_TASK_RESULTS  32
+
+typedef struct {
+    char     task_id[64];         /* 任务 ID */
+    int      master_fd;           /* 等待结果的 Master fd */
+    char     cmd[4096];           /* 原始命令 */
+    int      total_nodes;         /* 应返回节点数 */
+    int      received;            /* 已收到结果数 */
+    long     deadline;            /* 超时时间戳 */
+    int      active;              /* 1=进行中, 0=已完成 */
+
+    /* 收集到的结果 */
+    char     results[MAX_TASK_RESULTS][2048];
+    int      result_count;
+} pending_task_t;
 typedef struct agent_state {
     agent_config_t  config;
 
@@ -54,6 +74,10 @@ typedef struct agent_state {
     /* Master 连接列表 */
     int             master_fds[16];
     int             master_count;
+
+    /* 待收集任务 */
+    pending_task_t  pending_tasks[MAX_PENDING_TASKS];
+    int             pending_count;
 } agent_state_t;
 
 /* 全局单例，在 main.c 中定义 */

@@ -42,19 +42,6 @@ $(BUILD_DIR)/deploy: $(BUILD_DIR)/deploy.o
 $(BUILD_DIR)/clusterctl: $(BUILD_DIR)/clusterctl.o $(BUILD_DIR)/protocol.o $(BUILD_DIR)/json.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS) $(LIBS)
 
-TEST_DIR = tests
-TEST_SRCS = $(wildcard $(TEST_DIR)/*.c)
-TEST_BINS = $(patsubst $(TEST_DIR)/%.c, $(BUILD_DIR)/test_%, $(TEST_SRCS))
-
-test: $(BUILD_DIR) $(TEST_BINS)
-	@for t in $(TEST_BINS); do \
-		echo "  TEST   $$t"; \
-		$$t || exit 1; \
-	done
-
-$(BUILD_DIR)/test_%: $(TEST_DIR)/test_%.c $(filter-out $(BUILD_DIR)/main.o, $(OBJS))
-	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS) $(LIBS)
-	@echo "  CC     $@"
 
 clean:
 	rm -rf $(BUILD_DIR) $(TARGET) $(TOOLS)
@@ -65,3 +52,38 @@ install: $(TARGET)
 	@echo "  INSTALL $(TARGET)"
 
 .PHONY: all tools clean test install
+
+# Test targets
+TEST_DIR = tests
+TEST_BINS = tests/test_election tests/test_protocol tests/test_json
+
+tests/test_election: tests/test_election.c src/election.c
+	  -o  $^ 
+
+tests/test_protocol: tests/test_protocol.c src/protocol.c src/json.c
+	  -o  $^ 
+
+tests/test_json: tests/test_json.c src/json.c
+	  -o  $^ 
+
+test:  
+	for t in ; do ./190561t || exit 1; done
+.PHONY: test
+
+
+# Test targets
+TEST_DIR = tests
+TEST_BINS = tests/test_election tests/test_protocol tests/test_json
+
+tests/test_election: tests/test_election.c src/election.c
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
+tests/test_protocol: tests/test_protocol.c src/protocol.c src/json.c
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
+tests/test_json: tests/test_json.c src/json.c
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
+test: $(TEST_DIR) $(TEST_BINS)
+	for t in $(TEST_BINS); do ./$$t || exit 1; done
+.PHONY: test
