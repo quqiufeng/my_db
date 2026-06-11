@@ -104,6 +104,7 @@ static void print_usage(const char *prog) {
         "  --id <name>      Node ID (default: auto)\n"
         "  --bind <addr>    Bind address (default: 0.0.0.0)\n"
         "  --datadir <dir>  Data directory (default: /tmp/agent)\n"
+        "  --plugin-dir <dir>  Lua plugin directory (default: /etc/agent/plugins)\n"
         "  --idx <n>        Node index in peer list (0-based)\n"
         "  --cluster-size <n>  Total nodes in cluster (default: peer_count+1)\n"
         "  --foreground     Run in foreground (don't daemonize)\n"
@@ -131,6 +132,8 @@ static int parse_args(agent_state_t *state, int argc, char **argv) {
             strncpy(state->config.data_dir, argv[++i], sizeof(state->config.data_dir) - 1);
         } else if (strcmp(argv[i], "--cluster-size") == 0 && i + 1 < argc) {
             state->config.cluster_size = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--plugin-dir") == 0 && i + 1 < argc) {
+            strncpy(state->config.plugin_dir, argv[++i], sizeof(state->config.plugin_dir) - 1);
         } else if (strcmp(argv[i], "--idx") == 0 && i + 1 < argc) {
             state->config.node_index = atoi(argv[++i]);
         } else if (strcmp(argv[i], "--foreground") == 0) {
@@ -185,6 +188,7 @@ int main(int argc, char **argv) {
     update_session_ctx(&g_agent);
     election_init(&g_agent.election, g_agent.config.node_id, g_agent.config.node_index, 0);
     election_init_timer(&g_agent.election, now_ms());
+    plugin_init(&g_agent);
 
     g_agent.election.my_index = g_agent.config.node_index;
     /* 后台运行 */
@@ -231,6 +235,7 @@ int main(int argc, char **argv) {
     server_event_loop(&g_agent);
 
     /* 清理 */
+    plugin_destroy(&g_agent);
     agent_log("INFO", "agent shutting down");
     for (int i = 0; i < g_agent.peer_count; i++) {
         if (g_agent.peers[i].fd >= 0)

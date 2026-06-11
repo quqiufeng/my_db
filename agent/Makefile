@@ -1,8 +1,12 @@
 CC       ?= gcc
 CFLAGS   ?= -Wall -Wextra -Wpedantic -std=c11 -O2 -g
-CFLAGS   += -Iinclude -D_GNU_SOURCE
+CFLAGS   += -Iinclude -D_GNU_SOURCE $(LUA_CFLAGS)
 LDFLAGS  ?=
-LIBS     ?= -lrt
+LIBS     ?= -lrt $(LUA_LIBS)
+
+# LuaJIT plugin support (set LUA_CFLAGS/LUA_LIBS if not default)
+LUA_CFLAGS ?= -I/usr/local/include/luajit-2.1
+LUA_LIBS   ?= -L/usr/local/lib -lluajit-5.1 -lm
 
 SRC_DIR   = src
 INC_DIR   = include

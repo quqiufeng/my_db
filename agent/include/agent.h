@@ -5,6 +5,7 @@
 #include "peer.h"
 #include "election.h"
 #include "task.h"
+#include "plugin.h"
 
 #include <stdint.h>
 
@@ -23,6 +24,7 @@ typedef struct {
     int              node_index;        /* --idx 在节点列表中的位置 */
     int              cluster_size;      /* --cluster-size 集群节点总数（含自己） */
     char     bind_addr[64];        /* 绑定地址（默认 0.0.0.0） */
+    char     plugin_dir[256];        /* --plugin-dir Lua 插件目录 */
     int      daemonize;            /* 是否后台运行 */
 } agent_config_t;
 
@@ -69,6 +71,9 @@ typedef struct agent_state {
 
     /* 运行标志 */
     int             running;
+
+    /* 插件管理器 */
+    plugin_manager_t plugin_mgr;
     long            start_time;     /* 启动时间戳（monotonic） */
 
     /* Master 连接列表 */

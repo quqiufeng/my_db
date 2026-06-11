@@ -476,6 +476,9 @@ static int handle_message(agent_state_t *state, int fd,
     case MSG_TASK_RESULT:   return on_task_result(state, fd, payload, len);
     case MSG_STATUS_REPORT: return on_status_report(state, fd, payload, len);
     default:
+        /* route unhandled messages to plugins */
+        if (plugin_handle_message(state, "unknown", payload, len))
+            return 0;
         agent_log("WARN", "unknown message type: 0x%02X", type);
         return 0;
     }
@@ -544,6 +547,10 @@ static int handle_peer_connect(agent_state_t *state, int fd) {
  * handle_read - 处理可读事件
  * =================================================================== */
 static int handle_read(agent_state_t *state, int fd) {
+    if (fd == state->plugin_mgr.inotify_fd) {
+        plugin_check_hotreload(state);
+        return 0;
+    }
     if (fd == state->listen_fd)
         return accept_connection(state);
 
@@ -672,6 +679,8 @@ static void election_tick(agent_state_t *state, long now) {
     }
 }
 
+static void status_send(agent_state_t *state, long now) { (void)state; (void)now; }
+
 static void heartbeat_send(agent_state_t *state, long now) {
     (void)state; (void)now;
     static long last_send = 0;
@@ -737,6 +746,9 @@ int server_event_loop(agent_state_t *state) {
         peer_reconnect(state, now);
         election_tick(state, now);
         heartbeat_send(state, now);
+        status_send(state, now);
+        pending_tick(state, now);
+        plugin_tick(state, now);
     }
 
     return 0;
