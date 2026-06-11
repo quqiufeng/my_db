@@ -739,7 +739,9 @@ static chapter_result_t* process_chapter(const char* md_dir, const char* chapter
                         texts[j] = result->items[batch_start + j].text;
                     }
                     
-                    int ret = onnx_embedder_encode_batch(g_embedder, texts, bcount, 
+                    int ret;
+                    #pragma omp critical(embedder)
+                    ret = onnx_embedder_encode_batch(g_embedder, texts, bcount, 
                                                          all_vectors + batch_start * EMBEDDING_DIM);
                     free(texts);
                     
@@ -749,6 +751,7 @@ static chapter_result_t* process_chapter(const char* md_dir, const char* chapter
                                bcount * EMBEDDING_DIM * sizeof(float));
                         for (int j = 0; j < bcount; j++) {
                             int idx = batch_start + j;
+                            #pragma omp critical(embedder)
                             if (onnx_embedder_encode(g_embedder, result->items[idx].text, 
                                                      all_vectors + idx * EMBEDDING_DIM) != 0) {
                                 fprintf(stderr, "    Single embedding failed for page %d\n",
