@@ -189,7 +189,12 @@ static int on_election_vote_req(agent_state_t *state, int fd,
     (void)len;
     int req_term = 0;
     char candidate_addr[128] = {0};
-    sscanf(payload, "{\"term\":%d,\"candidate\":\"%127[^\"]\"}", &req_term, candidate_addr);
+    {
+        const char *_p = strstr(payload, "\"term\":");
+        if (_p) req_term = atoi(_p + 7);
+        _p = strstr(payload, "\"candidate\":\"");
+        if (_p) { _p += 13; int _i = 0; while (*_p && *_p != '"' && _i < 127) candidate_addr[_i++] = *_p++; }
+    }
     if (req_term < state->election.term) {
         char resp[64];
         snprintf(resp, sizeof(resp), "{\"term\":%d,\"vote_granted\":0}", state->election.term);
@@ -223,7 +228,12 @@ static int on_election_vote_resp(agent_state_t *state, int fd,
                                  const char *payload, uint32_t len) {
     (void)fd; (void)len;
     int resp_term = 0, vote_granted = 0;
-    sscanf(payload, "{\"term\":%d,\"vote_granted\":%d}", &resp_term, &vote_granted);
+    {
+        const char *_p = strstr(payload, "\"term\":");
+        if (_p) resp_term = atoi(_p + 7);
+        _p = strstr(payload, "\"vote_granted\":");
+        if (_p) vote_granted = atoi(_p + 15);
+    }
     if (resp_term != state->election.term) return 0;
     if (state->election.role != ELECTION_CANDIDATE) return 0;
     if (vote_granted) {
@@ -240,7 +250,12 @@ static int on_coord(agent_state_t *state, int fd,
     (void)fd; (void)len;
     char leader_addr[128] = {0};
     int  epoch = 0;
-    sscanf(payload, "{%*[^:]:\"%127[^\"]\",%*[^:]:%d}", leader_addr, &epoch);
+    {
+        const char *_p = strstr(payload, "\"leader\":\"");
+        if (_p) { _p += 9; int _i = 0; while (*_p && *_p != '"' && _i < 127) leader_addr[_i++] = *_p++; }
+        _p = strstr(payload, "\"epoch\":");
+        if (_p) epoch = atoi(_p + 8);
+    }
     if (epoch < state->election.term) return 0;
     agent_log("INFO", "LEADER ELECTED: %s epoch=%d", leader_addr, epoch);
     election_become_follower(&state->election, epoch, now_ms());
@@ -261,7 +276,12 @@ static int on_heartbeat(agent_state_t *state, int fd,
     (void)len;
     int hb_term = 0;
     char leader_addr[128] = {0};
-    sscanf(payload, "{\"term\":%d,\"leader\":\"%127[^\"]\"}", &hb_term, leader_addr);
+    {
+        const char *_p = strstr(payload, "\"term\":");
+        if (_p) hb_term = atoi(_p + 7);
+        _p = strstr(payload, "\"leader\":\"");
+        if (_p) { _p += 9; int _i = 0; while (*_p && *_p != '"' && _i < 127) leader_addr[_i++] = *_p++; }
+    }
     if (hb_term < state->election.term) return 0;
     if (hb_term > state->election.term || state->election.role == ELECTION_CANDIDATE)
         election_become_follower(&state->election, hb_term, now_ms());
@@ -319,8 +339,23 @@ static int on_task_dispatch(agent_state_t *state, int fd,
 
     char task_id[64] = {0}, cmd[4096] = {0};
     int timeout = 30;
-    sscanf(pp, "{\"task_id\":\"%63[^\"]\",\"action\":\"%*[^\"]\",\"cmd\":\"%4095[^\"]\",\"timeout\":%d}",
-           task_id, cmd, &timeout);
+    /* strstr-based extraction */
+    {
+        const char *_t = strstr(pp, "\"task_id\":\"");
+        if (_t) { _t += 10; int _i = 0; while (*_t && *_t != '"' && _i < 63) task_id[_i++] = *_t++; }
+        const char *_c = strstr(pp, "\"cmd\":\"");
+        if (_c) {
+            _c += 6; int _i = 0;
+            while (*_c && *_c != '"' && _i < 4095) {
+                if (*_c == '\\' && *(_c+1) == '"') { cmd[_i++] = '"'; _c += 2; }
+                else { cmd[_i++] = *_c; _c++; }
+            }
+            cmd[_i] = '\0';
+            char _uc[4096]; json_unescape(cmd, _uc, sizeof(_uc)); memcpy(cmd, _uc, sizeof(cmd));
+        }
+        const char *_to = strstr(pp, "\"timeout\":");
+        if (_to) timeout = atoi(_to + 10);
+    }
     if (task_id[0] == '\0') {
         agent_log("WARN", "task dispatch: bad payload");
         return 0;
@@ -385,7 +420,14 @@ static int encrypt_and_send(int fd, uint8_t type, uint8_t flags,
 static int on_task_result(agent_state_t *state, int fd,
                           const char *payload, uint32_t len) {
     char task_id[64] = {0};
-    sscanf(payload, "{\"task_id\":\"%63[^\"]\"", task_id);
+    {
+        const char *_t = strstr(payload, "\"task_id\":\"");
+        if (_t) {
+            _t += 10; int _i = 0;
+            while (*_t && *_t != '"' && _i < 63) task_id[_i++] = *_t++;
+            task_id[_i] = '\0';
+        }
+    }
     pending_task_t *pt = pending_task_find(state, task_id);
     if (!pt) {
         agent_log("DEBUG", "task result for unknown task %s", task_id);
@@ -475,7 +517,11 @@ static int on_master_cmd(agent_state_t *state, int fd,
     char action[32] = {0};
     {
         const char *_a = strstr(payload, "\"action\":\"");
-        if (_a) sscanf(_a, "\"action\":\"%31[^\"]\"", action);
+        if (_a) {
+            _a += 9; int _i = 0;
+            while (*_a && *_a != '"' && _i < 31) action[_i++] = *_a++;
+            action[_i] = '\0';
+        }
     }
 
     if (strcmp(action, "exec") == 0) {
@@ -745,8 +791,14 @@ static void pending_task_recover(agent_state_t *state) {
         /* parse: {"task_id":"...","cmd":"...","created":123} */
         char task_id[64] = {0}, cmd[4096] = {0};
         long created = 0;
-        sscanf(buf, "{\"task_id\":\"%63[^\"]\",\"cmd\":\"%4095[^\"]\",\"created\":%ld}",
-               task_id, cmd, &created);
+        {
+            const char *_p = strstr(buf, "\"task_id\":\"");
+            if (_p) { _p += 10; int _i = 0; while (*_p && *_p != '"' && _i < 63) task_id[_i++] = *_p++; }
+            _p = strstr(buf, "\"cmd\":\"");
+            if (_p) { _p += 6; int _i = 0; while (*_p && *_p != '"' && _i < 4095) cmd[_i++] = *_p++; }
+            _p = strstr(buf, "\"created\":");
+            if (_p) created = atol(_p + 10);
+        }
 
         if (task_id[0] && cmd[0]) {
             agent_log("INFO", "[recover] pending task %s: %s (created=%ld ago)",
