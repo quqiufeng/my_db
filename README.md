@@ -53,6 +53,49 @@
 └─────────────────────────────────────────────────────────────┘
 ```
 
+
+
+## Agent 集群控制引擎
+
+> **面向 AI 编程助手的 Linux 集群控制工具。** 纯 C 语言，一个二进制文件，SCP 部署，零依赖，**Raft 自组织选举**，自动故障恢复。
+> 让 AI 像操作一台机器一样操作整个集群。
+
+[📄 完整文档 → agent/README.md](agent/README.md)
+
+### 核心能力
+
+| 能力 | 说明 |
+|------|------|
+| **Raft 选举** | 3 节点自动选主，任期/多数派/随机超时，零断连 |
+| **TCP 可靠性** | 单缓冲区原子发送、单向连接、水平触发 epoll |
+| **XXTEA 加密** | `--key` 参数，128-bit 密钥，全程加密 |
+| **命令执行** | `clusterctl exec "cmd"` 端到端，支持引号 |
+| **异步聚合** | pending_task 追踪，全部完成或超时后响应 |
+| **状态上报** | Follower 每 5 秒上报 CPU/内存/磁盘 |
+| **Lua 热更新** | C 底座 + LuaJIT，inotiy 监控，保存即生效 |
+| **动态扩容** | `--join` 连接种子节点，自动发现集群，支持 200+ 节点 |
+
+### 架构
+
+```
+AI ──shell──► clusterctl ──TCP──► Agent 集群 (Leader + Follower)
+               --key xx              --key xx
+               exec "cmd"            Raft 选举 + XXTEA 加密
+```
+
+### 快速示例
+
+```bash
+# 启动 3 节点集群（每个终端一个）
+agent --bind 0.0.0.0 --port 9527 -ip A,B,C --idx 0 --cluster-size 3 --key "mykey"
+
+# 连接并执行命令
+clusterctl --connect 192.168.1.10:9527 --key "mykey" exec "uptime"
+# → {"status":"ok","results":[{"node":"A","exit":0,"stdout":"..."}]}
+```
+
+---
+
 ## 核心子系统
 
 ### 1. 零拷贝存储引擎 [database.md](database.md)
