@@ -211,47 +211,54 @@ node2(9529)    无出站连接                # 最大 port，等别人连
 
 ---
 
-## 选举算法：Raft 风格
+## 选举算法：Raft 投票
 
 ### 角色与术语
 
-| 角色 | 说明 |
-|------|------|
-| **Follower** | 初始状态，等待 Leader 心跳或选举超时 |
-| **Candidate** | 选举超时后自升，发起投票 |
-| **Leader** | 赢得多数票，负责心跳、任务分发 |
+| 角色 | 状态 | 说明 |
+|------|------|------|
+| **Follower** | `ELECTION_FOLLOWER` | 初始状态，等待心跳或超时。收到高 term 消息自动降级为此 |
+| **Candidate** | `ELECTION_CANDIDATE` | 超时后自升，term++，发 VoteReq 收集投票 |
+| **Leader** | `ELECTION_LEADER` | 赢得多数票，发心跳 + COORD + 调度任务 |
 
 | 术语 | 说明 |
 |------|------|
-| **Term（任期）** | 每次选举递增，旧任期消息被忽略 |
-| **选举超时** | 随机 1.5~3.0s，防同时触发 |
-| **多数派** | `ceil(N/2) + 1`，3 节点需要 2 票 |
-| **心跳** | Leader 每秒广播一次，Follower 收到后重置选举定时器 |
+| **Term（任期）** | 每次选举递增（`e->term++`），旧任期消息被 `term < current` 忽略 |
+| **选举超时** | 随机 1.5~3.0s（`ELECTION_TIMEOUT_MIN/MAX`），先到先选 |
+| **多数派** | `N/2 + 1`，3 节点需要 2 票，2 节点需要 2 票 |
+| **投票** | 每个 term 每节点最多投一票（`voted_for == -1` 且先到先得）|
+| **心跳** | Leader 每秒广播，Follower 收到后 `election_reset_timer()` |
 
 ### 选举流程
 
 ```
-1. 触发条件
+1. 角色
+   Follower（追随者）─ 初始状态，等待心跳或超时
+   Candidate（候选者）─ 超时后自升，请求投票
+   Leader（领导者）── 赢得多数票，发心跳 + 调度任务
+
+2. 触发条件
    a. 首次启动，没有已知 Leader
-   b. Follower 选举超时（Leader 心跳超时 3 次 × 9s）
+   b. Follower 选举超时（随机 1.5~3.0s），未收到 Leader 心跳
 
-2. 选举
+3. 选举
    a. Follower → Candidate：term++，投自己一票
-   b. 广播 MSG_ELECTION_VOTE_REQ 给所有已连接 peer
-   c. 每个 Peer 在同一 term 最多投一票（先到先得）
-   d. Candidate 收集投票，达到多数即当选 Leader
-   e. 若 vote_deadline(3s) 内未达到多数，增加 term 重新选举
+   b. 广播 MSG_ELECTION_VOTE_REQ {term, candidate_addr}
+   c. 每个 Peer 在同一 term 最多投一票（voted_for == -1）
+   d. Candidate 收集投票，3s 内达到多数（N/2+1）即当选
+   e. 超时未达到多数 → 递增 term 重新选举
 
-3. 当选
-   a. Leader 广播 MSG_COORD 通知所有人
-   b. Follower 收到后更新 leader_addr，进入稳定状态
-   c. Leader 开始定期发送 MSG_HEARTBEAT（每秒 1 次）
-   d. Follower 收到心跳后重置选举定时器
+4. 当选
+   a. 广播 MSG_COORD {leader, epoch} 通知所有节点
+   b. Follower 收到后更新 leader_addr，重置选举定时器
+   c. Leader 开始每秒发送 MSG_HEARTBEAT {term, leader}
+   d. Follower 收到心跳 → 重置定时器 → 确认 Leader 存活
 
-4. 故障恢复
-   a. Leader 宕机 → Follower 心跳超时 → 重新选举
+5. 故障恢复
+   a. Leader 宕机 → Follower 心跳超时 → 重新选举（term++）
    b. 新 Leader 以更高 term 当选，广播 COORD
-   c. 旧 Leader 恢复后收到更高 term 的消息 → 自动降级为 Follower
+   c. 旧 Leader 恢复后收到高 term 消息 → 自动降级 Follower
+   d. 时钟不同步不影响（epoch 是本地自增计数器）
 ```
 
 ### 示例（3 节点，--cluster-size 3，多数派 = 2）
@@ -466,9 +473,8 @@ ssh root@192.168.1.10 "/tmp/agent -ip 192.168.1.10,192.168.1.11,192.168.1.12 \
 
 ### 为什么选举超时随机化
 
-所有 Follower 同时超时 → 同时成为 Candidate → 同时投票给自己 → 无人获得多数 → 重新选举 → 无限循环。
-
-随机化 1.5~3.0s 保证**几乎不可能**同时超时，第一个超时的 Candidate 有足够时间收集投票。
+Raft 标准做法。所有 Follower 同时超时 → 同时成为 Candidate → 各自投自己 → 无人获得多数 → 无限循环。
+随机化 1.5~3.0s 保证几乎不可能同时超时，先超时的 Candidate 有足够时间收集投票。
 
 ### 为什么 `--cluster-size` 是必需的
 
@@ -480,6 +486,8 @@ Raft 多数派 = `ceil(N/2) + 1`。要算这个需要知道集群总节点数 N�
 - node2（0 peers）→ N=1
 
 不同 N 导致不同多数派，系统无法收敛。所以必须显式指定 `--cluster-size`。
+
+另外每个 term 每节点最多投一票（`voted_for == -1` 检查），保证不会出现同一个 term 里重复投票。
 
 ---
 
