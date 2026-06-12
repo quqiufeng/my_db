@@ -515,15 +515,9 @@ static int on_master_cmd(agent_state_t *state, int fd,
     }
     agent_log("DEBUG", "master cmd: %.*s", (int)len, payload);
     char action[32] = {0};
-    {
-        const char *_a = strstr(payload, "\"action\":\"");
-        if (_a) {
-            _a += 9; int _i = 0;
-            while (*_a && *_a != '"' && _i < 31) action[_i++] = *_a++;
-            action[_i] = '\0';
-        }
-    }
-
+    sscanf(payload, "{%*[^:]:\"%*[^\"]\",\"action\":\"%31[^\"]\"", action);
+    if (action[0] == 0)
+        sscanf(payload, "{\"action\":\"%31[^\"]\"", action);
     if (strcmp(action, "exec") == 0) {
         char cmd[4096] = {0};
         int tmo = 30;
