@@ -35,7 +35,7 @@ typedef struct {
 /* ===================================================================
  * 任务跟踪（Leader 侧）
  * =================================================================== */
-#define MAX_PENDING_TASKS 16
+#define MAX_PENDING_TASKS 64
 #define MAX_TASK_RESULTS  32
 
 typedef struct {
@@ -79,6 +79,8 @@ typedef struct agent_state {
     /* Master 连接列表 */
     int             master_fds[16];
     int             master_count;
+    int             seed_fd;          /* --join 种子连接 fd */
+    int             member_count;     /* 已知成员数 */
 
     /* 待收集任务 */
     pending_task_t  pending_tasks[MAX_PENDING_TASKS];

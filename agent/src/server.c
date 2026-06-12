@@ -1,3 +1,4 @@
+#include "json.h"
 #include <sys/stat.h>
 #include <dirent.h>
 #include "crypto.h"
@@ -400,11 +401,59 @@ static int on_task_result(agent_state_t *state, int fd,
     return 0;
 }
 
+
+/* 收到 Leader 的成员列表同步 */
+static int on_member_sync(agent_state_t *state, int fd,
+                          const char *payload, uint32_t len) {
+    (void)fd; (void)len;
+    int epoch = 0;
+    const char *ep = strstr(payload, "\"epoch\":");
+    if (ep) epoch = atoi(ep + 8);
+    if (epoch < state->election.term) return 0;
+
+    const char *arr = strstr(payload, "\"members\":[");
+    if (!arr) return 0;
+    arr += 11;
+
+    int count = 0;
+    const char *p = arr;
+    while (*p && *p != ']' && count < 256) {
+        if (*p == '"') {
+            p++;
+            char addr[128] = {0};
+            int ai = 0;
+            while (*p && *p != '"' && ai < 126) addr[ai++] = *p++;
+            addr[ai] = '\0';
+
+            if (strcmp(addr, state->ctx.self_addr) == 0) { if (*p) p++; continue; }
+
+            int found = 0;
+            for (int i = 0; i < state->peer_count; i++)
+                if (strcmp(state->peers[i].addr, addr) == 0) { found = 1; break; }
+
+            if (!found && state->peer_count < state->peer_capacity - 1) {
+                peer_t *peer = &state->peers[state->peer_count];
+                memset(peer, 0, sizeof(*peer));
+                snprintf(peer->addr, sizeof(peer->addr), "%s", addr);
+                sscanf(addr, "%63[^:]:%d", peer->ip, &peer->port);
+                peer->state = PEER_DISCONNECTED;
+                peer->fd = -1;
+                state->peer_count++;
+                agent_log("INFO", "discovered peer: %s", addr);
+            }
+            count++;
+        }
+        if (*p) p++;
+    }
+    state->member_count = count + 1;
+    peer_connect_all(state);
+    return 0;
+}
+
 static int on_status_report(agent_state_t *state, int fd,
                             const char *payload, uint32_t len) {
     peer_t *peer = peer_find_by_fd(state, fd);
     if (peer) {
-        json_to_session_ctx(payload, &peer->remote_ctx);
         peer->last_heartbeat = now_ms();
         peer->heartbeat_miss = 0;
     }
@@ -485,8 +534,9 @@ static int on_master_cmd(agent_state_t *state, int fd,
                 task_id, cmd, tmo);
             for (int i = 0; i < state->peer_count; i++)
                 if (state->peers[i].state == PEER_CONNECTED)
-                    send_message(state->peers[i].fd, MSG_TASK_DISPATCH,
-                                 PROTO_FLAG_REQUEST, dispatch, strlen(dispatch));
+                    if (send_message(state->peers[i].fd, MSG_TASK_DISPATCH,
+                                 PROTO_FLAG_REQUEST, dispatch, strlen(dispatch)) < 0)
+                        agent_log("WARN", "task dispatch to peer[%d] failed", i);
             agent_log("INFO", "task %s dispatched to %d nodes", task_id, total);
 
             char persist_path[512];
@@ -550,6 +600,7 @@ static int handle_message(agent_state_t *state, int fd,
     case MSG_TASK_DISPATCH: return on_task_dispatch(state, fd, payload, len);
     case MSG_TASK_RESULT:   return on_task_result(state, fd, payload, len);
     case MSG_STATUS_REPORT: return on_status_report(state, fd, payload, len);
+    case MSG_MEMBER_SYNC:    return on_member_sync(state, fd, payload, len);
     default:
         /* route unhandled messages to plugins */
         if (plugin_handle_message(state, "unknown", payload, len))
@@ -726,8 +777,9 @@ static void election_tick(agent_state_t *state, long now) {
                 state->election.term, state->ctx.self_addr);
             for (int i = 0; i < state->peer_count; i++) {
                 if (state->peers[i].state == PEER_CONNECTED)
-                    send_message(state->peers[i].fd, MSG_ELECTION_VOTE_REQ,
-                                 PROTO_FLAG_REQUEST, req, strlen(req));
+                    if (send_message(state->peers[i].fd, MSG_ELECTION_VOTE_REQ,
+                                 PROTO_FLAG_REQUEST, req, strlen(req)) < 0)
+                        agent_log("DEBUG", "VoteReq send to peer[%d] failed", i);
             }
         }
     }
@@ -778,13 +830,35 @@ static void election_tick(agent_state_t *state, long now) {
                 state->election.term, state->ctx.self_addr);
             for (int i = 0; i < state->peer_count; i++) {
                 if (state->peers[i].state == PEER_CONNECTED)
-                    send_message(state->peers[i].fd, MSG_ELECTION_VOTE_REQ,
-                                 PROTO_FLAG_REQUEST, req, strlen(req));
+                    if (send_message(state->peers[i].fd, MSG_ELECTION_VOTE_REQ,
+                                 PROTO_FLAG_REQUEST, req, strlen(req)) < 0)
+                        agent_log("DEBUG", "VoteReq send to peer[%d] failed", i);
             }
         }
     }
-    /* ========= Leader: send heartbeat ========= */
+    /* ========= Leader: send heartbeat + member list ========= */
     if (state->election.role == ELECTION_LEADER) {
+        /* broadcast member list every 10 heartbeats */
+        {
+            static int _mt = 0;
+            _mt++;
+            if (_mt % 10 == 0) {
+                char _ml[8192] = {0};
+                size_t _mp = 0;
+                _mp += snprintf(_ml + _mp, sizeof(_ml) - _mp, "{\"members\":[");
+                _mp += snprintf(_ml + _mp, sizeof(_ml) - _mp, "\"%s\"", state->ctx.self_addr);
+                for (int _mi = 0; _mi < state->peer_count && _mp < sizeof(_ml) - 64; _mi++) {
+                    _mp += snprintf(_ml + _mp, sizeof(_ml) - _mp, ",\"%s\"", state->peers[_mi].addr);
+                }
+                _mp += snprintf(_ml + _mp, sizeof(_ml) - _mp, "],\"epoch\":%d}", state->election.term);
+                for (int _mi = 0; _mi < state->peer_count; _mi++) {
+                    if (state->peers[_mi].state == PEER_CONNECTED)
+                        send_message(state->peers[_mi].fd, MSG_MEMBER_SYNC,
+                                     PROTO_FLAG_REQUEST, _ml, strlen(_ml));
+                }
+            }
+        }
+
         if (now - state->election.last_heartbeat >= state->election.heartbeat_interval) {
             state->election.last_heartbeat = now;
             char hb[256];

@@ -65,6 +65,7 @@ typedef enum {
     MSG_MASTER_RESULT    = 0x23,   /* Leader → Master：指令结果 */
     MSG_MASTER_QUERY     = 0x24,   /* Master → Agent：查询身份+状态 */
     MSG_MASTER_STATUS    = 0x25,   /* Agent → Master：返回身份+状态 */
+    MSG_MEMBER_SYNC      = 0x26,   /* Leader → All：成员列表同步 */
 } msg_type_t;
 
 /* ===================================================================

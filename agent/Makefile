@@ -80,4 +80,3 @@ tests/test_json: tests/test_json.c src/json.c
 
 test: $(TEST_DIR) $(TEST_BINS)
 	for t in $(TEST_BINS); do ./$$t || exit 1; done
-.PHONY: test

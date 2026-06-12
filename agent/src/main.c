@@ -50,7 +50,6 @@ void agent_init(agent_state_t *state) {
 
     /* 上下文初始化 */
     state->ctx.epoch        = 0;
-    state->ctx.cluster_size = 1;
     state->ctx.uptime_sec   = 0;
     state->start_time       = now_ms();
 
