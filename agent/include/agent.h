@@ -35,8 +35,8 @@ typedef struct {
 /* ===================================================================
  * 任务跟踪（Leader 侧）
  * =================================================================== */
-#define MAX_PENDING_TASKS 64
-#define MAX_TASK_RESULTS  32
+#define MAX_PENDING_TASKS 256
+#define MAX_TASK_RESULTS  64
 
 typedef struct {
     char     task_id[64];         /* 任务 ID */

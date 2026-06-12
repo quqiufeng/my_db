@@ -28,7 +28,10 @@ int peer_create_list(void *vstate, const char *ip_list, int default_port) {
     state->peer_count    = 0;
     state->peer_capacity = count;
     state->peers         = calloc(count, sizeof(peer_t));
-    if (!state->peers) return -1;
+    if (!state->peers) {
+        agent_log("ERROR", "calloc(%d peers) failed", count);
+        return -1;
+    }
 
     /* 更新集群规模（仅在未通过 --cluster-size 显式设置时）*/
     if (state->ctx.cluster_size <= 1)

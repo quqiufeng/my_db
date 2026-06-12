@@ -6,6 +6,7 @@
 #include <time.h>
 #include <fcntl.h>
 #include <stdarg.h>
+#include <signal.h>
 
 /* ===================================================================
  * 全局单例
@@ -58,6 +59,12 @@ void agent_init(agent_state_t *state) {
 
     /* 随机数种子 */
     srand((unsigned int)(now_ms() ^ getpid()));
+}
+
+/* 优雅退出信号处理 */
+static void handle_signal(int sig) {
+    (void)sig;
+    g_agent.running = 0;
 }
 
 int daemonize_process(void) {
@@ -183,6 +190,8 @@ static void update_session_ctx(agent_state_t *state) {
 int main(int argc, char **argv) {
     /* 初始化 */
     agent_init(&g_agent);
+    signal(SIGINT, handle_signal);
+    signal(SIGTERM, handle_signal);
 
     /* 解析参数 */
     if (parse_args(&g_agent, argc, argv) < 0)

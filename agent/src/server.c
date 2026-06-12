@@ -1,5 +1,8 @@
 #include "json.h"
 #include <sys/stat.h>
+
+/* 来自 main.c 的退出标志 */
+
 #include <dirent.h>
 #include "crypto.h"
 #include "agent.h"
@@ -145,6 +148,16 @@ static int accept_connection(agent_state_t *state) {
             continue;
         }
     }
+    /* 优雅关闭：断开所有连接 */
+    agent_log("INFO", "shutting down...");
+    for (int i = 0; i < state->peer_count; i++) {
+        if (state->peers[i].fd >= 0) {
+            epoll_ctl(state->epoll_fd, EPOLL_CTL_DEL, state->peers[i].fd, NULL);
+            close(state->peers[i].fd);
+        }
+    }
+    if (state->listen_fd >= 0) close(state->listen_fd);
+    plugin_destroy(state);
     return 0;
 }
 
@@ -169,6 +182,16 @@ static int on_master_hello(agent_state_t *state, int fd,
             state->ctx.self_addr, state->ctx.epoch, state->ctx.cluster_size);
         send_message(fd, MSG_MASTER_LEADER, PROTO_FLAG_RESPONSE, report, strlen(report));
     }
+    /* 优雅关闭：断开所有连接 */
+    agent_log("INFO", "shutting down...");
+    for (int i = 0; i < state->peer_count; i++) {
+        if (state->peers[i].fd >= 0) {
+            epoll_ctl(state->epoll_fd, EPOLL_CTL_DEL, state->peers[i].fd, NULL);
+            close(state->peers[i].fd);
+        }
+    }
+    if (state->listen_fd >= 0) close(state->listen_fd);
+    plugin_destroy(state);
     return 0;
 }
 
@@ -179,6 +202,16 @@ static int on_master_query(agent_state_t *state, int fd,
     char json[2048];
     session_ctx_to_json(&state->ctx, json, sizeof(json));
     send_message(fd, MSG_MASTER_STATUS, PROTO_FLAG_RESPONSE, json, strlen(json));
+    /* 优雅关闭：断开所有连接 */
+    agent_log("INFO", "shutting down...");
+    for (int i = 0; i < state->peer_count; i++) {
+        if (state->peers[i].fd >= 0) {
+            epoll_ctl(state->epoll_fd, EPOLL_CTL_DEL, state->peers[i].fd, NULL);
+            close(state->peers[i].fd);
+        }
+    }
+    if (state->listen_fd >= 0) close(state->listen_fd);
+    plugin_destroy(state);
     return 0;
 }
 
@@ -220,6 +253,16 @@ static int on_election_vote_req(agent_state_t *state, int fd,
         snprintf(resp, sizeof(resp), "{\"term\":%d,\"vote_granted\":0}", state->election.term);
         send_message(fd, MSG_ELECTION_VOTE_RESP, PROTO_FLAG_RESPONSE, resp, strlen(resp));
     }
+    /* 优雅关闭：断开所有连接 */
+    agent_log("INFO", "shutting down...");
+    for (int i = 0; i < state->peer_count; i++) {
+        if (state->peers[i].fd >= 0) {
+            epoll_ctl(state->epoll_fd, EPOLL_CTL_DEL, state->peers[i].fd, NULL);
+            close(state->peers[i].fd);
+        }
+    }
+    if (state->listen_fd >= 0) close(state->listen_fd);
+    plugin_destroy(state);
     return 0;
 }
 
@@ -241,6 +284,16 @@ static int on_election_vote_resp(agent_state_t *state, int fd,
         agent_log("DEBUG", "got vote, now %d/%d", 
                   state->election.votes_received, state->election.total_voters);
     }
+    /* 优雅关闭：断开所有连接 */
+    agent_log("INFO", "shutting down...");
+    for (int i = 0; i < state->peer_count; i++) {
+        if (state->peers[i].fd >= 0) {
+            epoll_ctl(state->epoll_fd, EPOLL_CTL_DEL, state->peers[i].fd, NULL);
+            close(state->peers[i].fd);
+        }
+    }
+    if (state->listen_fd >= 0) close(state->listen_fd);
+    plugin_destroy(state);
     return 0;
 }
 
@@ -267,6 +320,16 @@ static int on_coord(agent_state_t *state, int fd,
         strncpy(state->ctx.role, "leader", sizeof(state->ctx.role) - 1);
     else
         strncpy(state->ctx.role, "follower", sizeof(state->ctx.role) - 1);
+    /* 优雅关闭：断开所有连接 */
+    agent_log("INFO", "shutting down...");
+    for (int i = 0; i < state->peer_count; i++) {
+        if (state->peers[i].fd >= 0) {
+            epoll_ctl(state->epoll_fd, EPOLL_CTL_DEL, state->peers[i].fd, NULL);
+            close(state->peers[i].fd);
+        }
+    }
+    if (state->listen_fd >= 0) close(state->listen_fd);
+    plugin_destroy(state);
     return 0;
 }
 
@@ -297,18 +360,48 @@ static int on_heartbeat(agent_state_t *state, int fd,
         peer->heartbeat_miss = 0;
     }
     send_message(fd, MSG_HEARTBEAT_ACK, PROTO_FLAG_RESPONSE, "{}", 2);
+    /* 优雅关闭：断开所有连接 */
+    agent_log("INFO", "shutting down...");
+    for (int i = 0; i < state->peer_count; i++) {
+        if (state->peers[i].fd >= 0) {
+            epoll_ctl(state->epoll_fd, EPOLL_CTL_DEL, state->peers[i].fd, NULL);
+            close(state->peers[i].fd);
+        }
+    }
+    if (state->listen_fd >= 0) close(state->listen_fd);
+    plugin_destroy(state);
     return 0;
 }
 
 static int on_heartbeat_ack(agent_state_t *state, int fd,
                             const char *payload, uint32_t len) {
     (void)state; (void)fd; (void)payload; (void)len;
+    /* 优雅关闭：断开所有连接 */
+    agent_log("INFO", "shutting down...");
+    for (int i = 0; i < state->peer_count; i++) {
+        if (state->peers[i].fd >= 0) {
+            epoll_ctl(state->epoll_fd, EPOLL_CTL_DEL, state->peers[i].fd, NULL);
+            close(state->peers[i].fd);
+        }
+    }
+    if (state->listen_fd >= 0) close(state->listen_fd);
+    plugin_destroy(state);
     return 0;
 }
 
 static int on_ok(agent_state_t *state, int fd,
                  const char *payload, uint32_t len) {
     (void)state; (void)fd; (void)payload; (void)len;
+    /* 优雅关闭：断开所有连接 */
+    agent_log("INFO", "shutting down...");
+    for (int i = 0; i < state->peer_count; i++) {
+        if (state->peers[i].fd >= 0) {
+            epoll_ctl(state->epoll_fd, EPOLL_CTL_DEL, state->peers[i].fd, NULL);
+            close(state->peers[i].fd);
+        }
+    }
+    if (state->listen_fd >= 0) close(state->listen_fd);
+    plugin_destroy(state);
     return 0;
 }
 
@@ -390,6 +483,16 @@ static int on_task_dispatch(agent_state_t *state, int fd,
         "{\"task_id\":\"%s\",\"status\":\"ok\",\"node\":\"%s\",\"exit\":%d,\"stdout\":\"%s\"}",
         task_id, state->ctx.self_addr, exit_code, escaped);
     encrypt_and_send(fd, MSG_TASK_RESULT, PROTO_FLAG_RESPONSE, resp, strlen(resp));
+    /* 优雅关闭：断开所有连接 */
+    agent_log("INFO", "shutting down...");
+    for (int i = 0; i < state->peer_count; i++) {
+        if (state->peers[i].fd >= 0) {
+            epoll_ctl(state->epoll_fd, EPOLL_CTL_DEL, state->peers[i].fd, NULL);
+            close(state->peers[i].fd);
+        }
+    }
+    if (state->listen_fd >= 0) close(state->listen_fd);
+    plugin_destroy(state);
     return 0;
 }
 
@@ -440,6 +543,16 @@ static int on_task_result(agent_state_t *state, int fd,
     pt->received++;
     agent_log("INFO", "task %s: got result (%d/%d)", task_id, pt->received, pt->total_nodes);
     pending_task_collect(state, pt);
+    /* 优雅关闭：断开所有连接 */
+    agent_log("INFO", "shutting down...");
+    for (int i = 0; i < state->peer_count; i++) {
+        if (state->peers[i].fd >= 0) {
+            epoll_ctl(state->epoll_fd, EPOLL_CTL_DEL, state->peers[i].fd, NULL);
+            close(state->peers[i].fd);
+        }
+    }
+    if (state->listen_fd >= 0) close(state->listen_fd);
+    plugin_destroy(state);
     return 0;
 }
 
@@ -489,6 +602,16 @@ static int on_member_sync(agent_state_t *state, int fd,
     }
     state->member_count = count + 1;
     peer_connect_all(state);
+    /* 优雅关闭：断开所有连接 */
+    agent_log("INFO", "shutting down...");
+    for (int i = 0; i < state->peer_count; i++) {
+        if (state->peers[i].fd >= 0) {
+            epoll_ctl(state->epoll_fd, EPOLL_CTL_DEL, state->peers[i].fd, NULL);
+            close(state->peers[i].fd);
+        }
+    }
+    if (state->listen_fd >= 0) close(state->listen_fd);
+    plugin_destroy(state);
     return 0;
 }
 
@@ -499,6 +622,16 @@ static int on_status_report(agent_state_t *state, int fd,
         peer->last_heartbeat = now_ms();
         peer->heartbeat_miss = 0;
     }
+    /* 优雅关闭：断开所有连接 */
+    agent_log("INFO", "shutting down...");
+    for (int i = 0; i < state->peer_count; i++) {
+        if (state->peers[i].fd >= 0) {
+            epoll_ctl(state->epoll_fd, EPOLL_CTL_DEL, state->peers[i].fd, NULL);
+            close(state->peers[i].fd);
+        }
+    }
+    if (state->listen_fd >= 0) close(state->listen_fd);
+    plugin_destroy(state);
     return 0;
 }
 
@@ -605,6 +738,16 @@ static int on_master_cmd(agent_state_t *state, int fd,
         snprintf(resp, sizeof(resp), "{\"error\":\"unknown_action\",\"action\":\"%s\"}", action);
         send_message(fd, MSG_MASTER_RESULT, PROTO_FLAG_RESPONSE, resp, strlen(resp));
     }
+    /* 优雅关闭：断开所有连接 */
+    agent_log("INFO", "shutting down...");
+    for (int i = 0; i < state->peer_count; i++) {
+        if (state->peers[i].fd >= 0) {
+            epoll_ctl(state->epoll_fd, EPOLL_CTL_DEL, state->peers[i].fd, NULL);
+            close(state->peers[i].fd);
+        }
+    }
+    if (state->listen_fd >= 0) close(state->listen_fd);
+    plugin_destroy(state);
     return 0;
 }
 
@@ -614,6 +757,16 @@ static int on_master_status(agent_state_t *state, int fd,
     char json[2048];
     session_ctx_to_json(&state->ctx, json, sizeof(json));
     send_message(fd, MSG_MASTER_STATUS, PROTO_FLAG_RESPONSE, json, strlen(json));
+    /* 优雅关闭：断开所有连接 */
+    agent_log("INFO", "shutting down...");
+    for (int i = 0; i < state->peer_count; i++) {
+        if (state->peers[i].fd >= 0) {
+            epoll_ctl(state->epoll_fd, EPOLL_CTL_DEL, state->peers[i].fd, NULL);
+            close(state->peers[i].fd);
+        }
+    }
+    if (state->listen_fd >= 0) close(state->listen_fd);
+    plugin_destroy(state);
     return 0;
 }
 
@@ -899,8 +1052,9 @@ static void election_tick(agent_state_t *state, long now) {
                 _mp += snprintf(_ml + _mp, sizeof(_ml) - _mp, "],\"epoch\":%d}", state->election.term);
                 for (int _mi = 0; _mi < state->peer_count; _mi++) {
                     if (state->peers[_mi].state == PEER_CONNECTED)
-                        send_message(state->peers[_mi].fd, MSG_MEMBER_SYNC,
-                                     PROTO_FLAG_REQUEST, _ml, strlen(_ml));
+                        if (send_message(state->peers[_mi].fd, MSG_MEMBER_SYNC,
+                                     PROTO_FLAG_REQUEST, _ml, strlen(_ml)) < 0)
+                            agent_log("DEBUG", "member_sync to peer[%d] failed", _mi);
                 }
             }
         }
@@ -950,6 +1104,7 @@ int server_event_loop(agent_state_t *state) {
     pending_task_recover(state);
 
     while (state->running) {
+        if (state->running == 0) break;  /* set by signal handler */
         nfds = epoll_wait(state->epoll_fd, events, 256, 100);
 
         for (int i = 0; i < nfds; i++) {
@@ -993,6 +1148,16 @@ int server_event_loop(agent_state_t *state) {
         plugin_tick(state, now);
     }
 
+    /* 优雅关闭：断开所有连接 */
+    agent_log("INFO", "shutting down...");
+    for (int i = 0; i < state->peer_count; i++) {
+        if (state->peers[i].fd >= 0) {
+            epoll_ctl(state->epoll_fd, EPOLL_CTL_DEL, state->peers[i].fd, NULL);
+            close(state->peers[i].fd);
+        }
+    }
+    if (state->listen_fd >= 0) close(state->listen_fd);
+    plugin_destroy(state);
     return 0;
 }
 /* ===================================================================
