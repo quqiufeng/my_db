@@ -169,7 +169,8 @@ pool_alloc 分配连续数组
 
 **句柄 API**:
 ```c
-cache_ns_t ns = cache_ns(cache, "/coding/cpp");
+// 通过 ns 参数直接操作
+    cache_set_ns(cache, "/coding/cpp", "templates", "...", 0);
 cache_set_ns(ns, "templates", "模板元编程精华...", TTL);
 // 实际存储 key = "/coding/cpp/templates"
 ```
@@ -204,14 +205,14 @@ cache_set(cache, "/agent/personality", "友好、专业、简洁", 0);
 save_file("/data/knowledge/cpp/move-semantics.pdf", pdf_data);
 
 // KV 中存引用
-cache_set_json(cache, "/coding/cpp/move-semantics",
+cache_set(cache, "/coding/cpp/move-semantics",
     "{\"t\":\"concept\",\"c\":\"右值引用和移动语义...\",\"s\":\"knowledge/cpp/move-semantics.pdf\",\"p\":\"page:15\",\"i\":5}",
     0);
 ```
 
 **Type C: 混合模式**（精华 + 引用）
 ```c
-cache_set_json(cache, "/coding/design-patterns/singleton",
+cache_set(cache, "/coding/design-patterns/singleton",
     "{\"t\":\"pattern\",\"c\":\"单例模式确保全局唯一实例...\",\"s\":\"repos/design-patterns/src/singleton.cpp\",\"p\":\"line:42-80\",\"i\":4,\"tags\":\"[\"creational\",\"thread-safe\"]\"}",
     0);
 ```
@@ -241,77 +242,70 @@ cache_set_json(cache, "/coding/design-patterns/singleton",
 #define CACHE_ERR_CORRUPTED -6 // 文件损坏
 
 // 生命周期
-cache_t cache_open(const char* db_dir, size_t max_memory);
-void cache_close(cache_t cache);
-int cache_sync(cache_t cache);
+cache_t* cache_open(const char* db_dir, size_t max_memory);
+void cache_close(cache_t* cache);
+int cache_sync(cache_t* cache);
 
 // 基础 CRUD
-int cache_set(cache_t cache, const char* key, const char* value, uint64_t ttl_ms);
-const char* cache_get(cache_t cache, const char* key);  // 返回指针，不拷贝
-int cache_del(cache_t cache, const char* key);
-int cache_exists(cache_t cache, const char* key);
+int cache_set(cache_t* cache, const char* key, const char* value, uint64_t ttl_ms);
+const char* cache_get(cache_t* cache, const char* key);  // 返回指针，不拷贝
+int cache_del(cache_t* cache, const char* key);
+int cache_exists(cache_t* cache, const char* key);
 
 // JSON 便捷操作
-int cache_set_json(cache_t cache, const char* key, const char* json, uint64_t ttl_ms);
-const char* cache_get_json(cache_t cache, const char* key);
+/* Value 本身可以是 JSON 字符串 */
 ```
 
 ### 4.2 Namespace 操作
 
 ```c
 // 创建命名空间句柄（相对路径）
-cache_ns_t cache_ns(cache_t cache, const char* prefix);
-cache_ns_t cache_ns_child(cache_ns_t parent, const char* name);
-
-// 在命名空间内操作
-int cache_set_ns(cache_ns_t ns, const char* key, const char* value, uint64_t ttl_ms);
-const char* cache_get_ns(cache_ns_t ns, const char* key);
-int cache_del_ns(cache_ns_t ns, const char* key);
-
-// 获取当前 namespace 的完整路径
-const char* cache_ns_path(cache_ns_t ns);
+// 命名空间操作（实际存储 key = "ns/key"）
+int cache_set_ns(cache_t* cache, const char* ns, const char* key,
+                 const char* value, uint64_t ttl_ms);
+const char* cache_get_ns(cache_t* cache, const char* ns, const char* key);
+int cache_del_ns(cache_t* cache, const char* ns, const char* key);
+int cache_del_namespace(cache_t* cache, const char* ns);
 ```
 
 ### 4.3 搜索操作
 
 ```c
 // 前缀搜索：返回匹配的所有 key
-cache_result_t* cache_prefix(cache_t cache, const char* prefix, size_t* count);
-
-// 范围搜索：[start_key, end_key)
-cache_result_t* cache_range(cache_t cache, const char* start, const char* end, size_t* count);
-
-// 正则搜索（POSIX 扩展正则）
-cache_result_t* cache_regex(cache_t cache, const char* pattern, size_t* count);
-
-// 标签搜索：搜索包含指定标签的所有 entry
-cache_result_t* cache_tag(cache_t cache, const char* tag, size_t* count);
-
-// 结果结构
-typedef struct {
-    char* key;
-    char* value;     // JSON 格式
-    uint64_t access_time;
-} cache_result_t;
-
-void cache_result_free(cache_result_t* results, size_t count);
+// 前缀搜索
+int cache_search_prefix(cache_t* cache, const char* prefix,
+                        cache_result_t** out_results, size_t* out_count);
+// 范围搜索
+int cache_search_range(cache_t* cache, const char* start, const char* end,
+                       cache_result_t** out_results, size_t* out_count);
+// 正则搜索
+int cache_search_regex(cache_t* cache, const char* pattern,
+                       cache_result_t** out_results, size_t* out_count);
+// 模糊搜索
+int cache_search_fuzzy(cache_t* cache, const char* query, int max_distance,
+                       cache_result_t** out_results, size_t* out_count);
+// 标签搜索
+int cache_search_tag(cache_t* cache, const char* tag,
+                     cache_result_t** out_results, size_t* out_count);
+// 结果释放
+void cache_results_free(cache_result_t* results);
 ```
 
 ### 4.4 管理操作
 
 ```c
 // 统计信息
-size_t cache_count(cache_t cache);                    // 总条目数
-size_t cache_memory_used(cache_t cache);              // 已用内存
-size_t cache_memory_max(cache_t cache);               // 最大内存
+size_t cache_count(cache_t* cache);                    // 总条目数
+size_t cache_memory_used(cache_t* cache);              // 已用内存
+size_t cache_memory_max(cache_t* cache);               // 最大内存
 
 // 生命周期管理
-int cache_expire(cache_t cache, const char* key);     // 立即过期
-int cache_touch(cache_t cache, const char* key);      // 更新 access_time
+int cache_expire(cache_t* cache, const char* key);     // 立即过期
+int cache_touch(cache_t* cache, const char* key);      // 更新 access_time
 
 // 清理
-size_t cache_compact(cache_t cache);                  // 物理清理过期/删除的条目
-size_t cache_purge_expired(cache_t cache);            // 清理所有过期条目
+size_t cache_compact(cache_t* cache);                  // 物理清理过期/删除的条目
+size_t cache_purge_expired(cache_t* cache);            // 清理所有过期条目
 
 // 诊断
 int cache_check(const char* db_dir);                  // 检查 cache 文件完整性
@@ -327,43 +321,42 @@ int cache_check(const char* db_dir);                  // 检查 cache 文件完�
 #include "cache.h"
 
 int main() {
-    cache_t cache = cache_open("coding-knowledge", 100 * 1024 * 1024);  // 100MB
+    cache_t* cache = cache_open("coding-knowledge", 100 * 1024 * 1024);  // 100MB
     
     // 1. 存储 C++ 知识点
-    cache_set_json(cache, "/coding/cpp/move-semantics",
+    cache_set(cache, "/coding/cpp/move-semantics",
         "{\"t\":\"concept\",\"c\":\"右值引用(T&&)实现完美转发...\",\"i\":5,\"tags\":[\"cpp11\",\"performance\"]}",
         0);  // TTL=0 表示永久
     
-    cache_set_json(cache, "/coding/cpp/templates/sfinae",
+    cache_set(cache, "/coding/cpp/templates/sfinae",
         "{\"t\":\"concept\",\"c\":\"SFINAE: Substitution Failure Is Not An Error...\",\"i\":4,\"tags\":[\"cpp03\",\"metaprogramming\"]}",
         0);
     
-    cache_set_json(cache, "/coding/python/async/await",
+    cache_set(cache, "/coding/python/async/await",
         "{\"t\":\"pattern\",\"c\":\"asyncio.gather 并发执行多个协程...\",\"i\":4,\"tags\":[\"python3.5\",\"async\"]}",
         0);
     
     // 2. 前缀搜索：获取所有 C++ 知识点
     size_t count;
-    cache_result_t* results = cache_prefix(cache, "/coding/cpp/", &count);
+    cache_result_t* results = cache_search_prefix(cache, "/coding/cpp/", &results, &count);
     printf("C++ 知识点: %zu 条\n", count);
     for (size_t i = 0; i < count; i++) {
         printf("  %s: %s\n", results[i].key, results[i].value);
     }
-    cache_result_free(results, count);
+    cache_results_free(results, count);
     
     // 3. 正则搜索：找所有包含 "async" 的知识点
-    results = cache_regex(cache, ".*async.*", &count);
+    results = cache_search_regex(cache, ".*async.*", &results, &count);
     printf("Async 相关: %zu 条\n", count);
-    cache_result_free(results, count);
+    cache_results_free(results, count);
     
     // 4. 标签搜索：找所有 "performance" 相关的
-    results = cache_tag(cache, "performance", &count);
+    results = cache_search_tag(cache, "performance", &results, &count);
     printf("Performance 相关: %zu 条\n", count);
-    cache_result_free(results, count);
+    cache_results_free(results, count);
     
-    // 5. 使用 namespace 句柄
-    cache_ns_t cpp_ns = cache_ns(cache, "/coding/cpp");
-    cache_set_ns(cpp_ns, "rvalue-reference", "右值引用详解...", 0);
+    // 5. 使用 namespace
+    cache_set_ns(cache, "/coding/cpp", "rvalue-reference", "右值引用详解...", 0);
     // 实际存储: /coding/cpp/rvalue-reference
     
     cache_sync(cache);
@@ -376,21 +369,21 @@ int main() {
 
 ```c
 // Agent 性格设定（永久）
-cache_set_json(cache, "/agent/personality",
+cache_set(cache, "/agent/personality",
     "{\"t\":\"config\",\"c\":\"友好、专业、简洁，使用中文回答\",\"i\":5}", 0);
 
 // 工作记忆（5 分钟 TTL）
-cache_set_json(cache, "/agent/working/current-task",
+cache_set(cache, "/agent/working/current-task",
     "{\"t\":\"task\",\"c\":\"正在分析用户提供的 C++ 代码...\",\"i\":3}",
     5 * 60 * 1000);  // 5 分钟
 
 // 短期记忆（1 小时 TTL）
-cache_set_json(cache, "/agent/session/20240115-001",
+cache_set(cache, "/agent/session/20240115-001",
     "{\"t\":\"conversation\",\"c\":\"用户询问 C++ 内存模型，已解释内存顺序...\",\"i\":4}",
     60 * 60 * 1000);  // 1 小时
 
 // 长期知识（永久）
-cache_set_json(cache, "/knowledge/cpp/memory-model",
+cache_set(cache, "/knowledge/cpp/memory-model",
     "{\"t\":\"concept\",\"c\":\"C++11 内存模型：sequenced-before, happens-before...\",\"s\":\"docs/cpp-memory-model.pdf\",\"i\":5}",
     0);
 ```
@@ -404,7 +397,7 @@ fwrite(pdf_data, 1, pdf_size, f);
 fclose(f);
 
 // KV 中存引用 + 精华摘要
-cache_set_json(cache, "/coding/design-patterns/factory",
+cache_set(cache, "/coding/design-patterns/factory",
     "{\"t\":\"pattern\",\"c\":\"工厂模式：将对象创建逻辑封装...\",\"s\":\"docs/design-pattern.pdf\",\"p\":\"page:42-50\",\"i\":5,\"tags\":[\"creational\"]}",
     0);
 
@@ -444,7 +437,7 @@ cache_set(cache, key, value, TTL_PERMANENT); // 知识积累
 ### 6.3 惰性过期
 
 ```c
-const char* cache_get(cache_t cache, const char* key) {
+const char* cache_get(cache_t* cache, const char* key) {
     entry_t* entry = hash_lookup(...);
     if (entry && entry->expire_at > 0 && entry->expire_at < now()) {
         // 惰性删除：返回 NULL，标记删除
@@ -492,13 +485,13 @@ my_db 项目
 **两者可以共存**:
 ```c
 db_t db = db_open("business-data", ...);      // 业务数据库
-cache_t cache = cache_open("agent-memory", ...); // Agent 记忆
+cache_t* cache = cache_open("agent-memory", ...); // Agent 记忆
 
 // 用户数据存数据库
 db_insert(users_table, &user, sizeof(user));
 
 // Agent 记忆存 Cache
-cache_set_json(cache, "/agent/session/001", "{...}", TTL_SHORT);
+cache_set(cache, "/agent/session/001", "{...}", TTL_SHORT);
 ```
 
 ---
@@ -521,16 +514,16 @@ cache_set_json(cache, "/agent/session/001", "{...}", TTL_SHORT);
 **典型搜索场景**:
 ```
 1. "我在写 C++，给我相关知识点" 
-   → cache_prefix(cache, "/coding/cpp/")
+   → cache_search_prefix(cache, "/coding/cpp/")
    
 2. "找所有关于 'async' 的记忆"
-   → cache_regex(cache, ".*async.*")
+   → cache_search_regex(cache, ".*async.*")
    
 3. "找 C++ 到 Python 之间的知识点"
-   → cache_range(cache, "/coding/cpp/", "/coding/python/")
+   → cache_search_range(cache, "/coding/cpp/", "/coding/python/")
    
 4. "找所有 'performance' 标签的"
-   → cache_tag(cache, "performance")
+   → cache_search_tag(cache, "performance")
 ```
 
 ### 9.2 索引方案对比
