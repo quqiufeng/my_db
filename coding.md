@@ -1499,8 +1499,9 @@ Node.js/npm 是世界上最大的开源代码生态之一。当前 `code_indexer
 - **插件接口**：`code_indexer` 通过统一接口调用外部插件，插件输出 JSON Lines 格式的 chunk / call_edge / import_edge / metadata
 - **插件注册**：通过 `plugin.json` 注册扩展名匹配、命令、优先级
 - **失败回退**：插件失败时自动回退到 ctags
-- **TS 插件内部**：使用 tree-sitter 解析 `.ts/.tsx/.js/.jsx`，新增 `ts_function`、`ts_method`、`ts_class`、`ts_interface`、`ts_type_alias`、`ts_enum`、`ts_variable`、`ts_property`、`ts_import`、`ts_export`、`ts_decorator`、`ts_namespace`、`ts_jsx_component` 等符号类型
-- **噪音过滤**：跳过/降权 `.d.ts`、测试文件、类型定义
+- **TS 插件内部**：使用 tree-sitter C API 解析 `.ts/.tsx/.js/.jsx`，不依赖 Node.js / npm。新增 `ts_function`、`ts_method`、`ts_class`、`ts_interface`、`ts_type_alias`、`ts_enum`、`ts_variable`、`ts_property`、`ts_import`、`ts_export`、`ts_decorator`、`ts_namespace`、`ts_jsx_component` 等符号类型
+- **噪音过滤**：跳过/降权 `.d.ts`、测试文件、类型定义；减少匿名 lambda 重复；修正 `export const` 导出标记；静态链接 tree-sitter 核心以简化部署
+- **构建位置**：`/opt/my_db/plugins/typescript-indexer/`，`make` 后生成 `bin/typescript-indexer`
 
 这是 coding.md 第一次为特定语言做索引增强，插件模式保证未来 Rust、Go、Java 等语言可以按同样方式扩展。
 

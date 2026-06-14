@@ -91,3 +91,8 @@ tools/cross_search.sh.bak
 agent/agent
 agent/build/
 agent/*.o
+
+# TypeScript indexer plugin build artifacts
+plugins/typescript-indexer/bin/
+plugins/typescript-indexer/obj/
+plugins/typescript-indexer/*.o

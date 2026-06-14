@@ -38,7 +38,7 @@ TypeScript/Node.js 是第一个专用语言插件，因为：
       "description": "Enhanced TypeScript/JavaScript parser using tree-sitter",
       "extensions": [".ts", ".tsx", ".js", ".jsx"],
       "languages": ["typescript", "tsx", "javascript", "jsx"],
-      "command": ["node", "/opt/my_db/plugins/typescript-indexer/index.js"],
+      "command": ["/opt/my_db/plugins/typescript-indexer/bin/typescript-indexer"],
       "env": {
         "TS_PARSER_MAX_FILE_SIZE": "1048576"
       },
@@ -54,11 +54,15 @@ TypeScript/Node.js 是第一个专用语言插件，因为：
 plugins/
 ├── typescript-indexer/
 │   ├── plugin.json          # 插件元数据
-│   ├── index.js             # 入口可执行文件
-│   ├── parser.js            # tree-sitter 解析逻辑
-│   ├── extractor.js         # 符号提取
-│   ├── callgraph.js         # 调用图提取
-│   └── package.json         # npm 依赖
+│   ├── Makefile             # 构建脚本
+│   ├── src/
+│   │   ├── main.c           # 入口与参数解析
+│   │   ├── parser.c         # tree-sitter 解析
+│   │   ├── extractor.c      # 符号提取
+│   │   ├── callgraph.c      # 调用图提取
+│   │   └── import_export.c  # 导入导出解析
+│   └── bin/
+│       └── typescript-indexer  # 编译后的二进制
 ```
 
 ### 2.3 code_indexer 调用方式
@@ -81,10 +85,9 @@ code_indexer 遇到 .ts 文件时
 通过命令行参数传入：
 
 ```bash
-node plugins/typescript-indexer/index.js \
+/opt/my_db/plugins/typescript-indexer/bin/typescript-indexer \
   --file /opt/opencode/packages/core/src/session/message.ts \
-  --project /opt/opencode \
-  --tsconfig /opt/opencode/tsconfig.json
+  --project /opt/opencode
 ```
 
 ### 2.5 插件输出格式
@@ -183,23 +186,31 @@ node plugins/typescript-indexer/index.js \
 
 ## 4. TypeScript 插件实现
 
-### 4.1 技术选型：tree-sitter
+### 4.1 技术选型：tree-sitter C API
 
-插件内部使用 `tree-sitter` + `tree-sitter-typescript` 解析。
+插件使用 `tree-sitter` C 核心库 + `tree-sitter-typescript` 原生 parser。不依赖 Node.js / npm，运行时仅需要 `libjansson.so.4` 与 `libc`。
 
-```javascript
-// plugins/typescript-indexer/parser.js
-const Parser = require("tree-sitter")
-const TypeScript = require("tree-sitter-typescript/typescript")
-const TSX = require("tree-sitter-typescript/tsx")
+```c
+// plugins/typescript-indexer/src/parser.c
+#include <tree_sitter/api.h>
 
-function getParser(filePath) {
-  const parser = new Parser()
-  if (filePath.endsWith(".tsx")) parser.setLanguage(TSX)
-  else if (filePath.endsWith(".ts")) parser.setLanguage(TypeScript)
-  // js/jsx 类似
-  return parser
+extern const TSLanguage *tree_sitter_typescript(void);
+extern const TSLanguage *tree_sitter_tsx(void);
+
+TSParser *create_parser(const char *path) {
+  TSParser *parser = ts_parser_new();
+  if (strstr(path, ".tsx"))
+    ts_parser_set_language(parser, tree_sitter_tsx());
+  else if (strstr(path, ".ts"))
+    ts_parser_set_language(parser, tree_sitter_typescript());
+  return parser;
 }
+```
+
+构建时把 `libtree-sitter.a` 静态链接进二进制，避免目标机器安装 `libtree-sitter.so`：
+
+```makefile
+LDFLAGS += -L/opt/tree-sitter -l:libtree-sitter.a -ljansson
 ```
 
 ### 4.2 提取的符号类型
@@ -222,39 +233,42 @@ function getParser(filePath) {
 
 ### 4.3 调用图提取
 
-提取 `call_expression` 节点：
+遍历 `call_expression` 节点，记录当前函数与 callee 名称：
 
-```javascript
-// plugins/typescript-indexer/callgraph.js
-function extractCalls(node, currentFunction) {
-  const calls = []
-  traverse(node, (child) => {
-    if (child.type === "call_expression") {
-      const callee = child.childForFieldName("function")
-      calls.push({
-        caller: currentFunction,
-        callee: getCalleeName(callee),
-        line: callee.startPosition.row + 1
-      })
-    }
-  })
-  return calls
+```c
+// plugins/typescript-indexer/src/callgraph.c
+void extract_calls(TSNode node, const char *current_func) {
+  if (strcmp(ts_node_type(node), "call_expression") == 0) {
+    TSNode callee = ts_node_child_by_field_name(node, "function", 8);
+    const char *callee_name = get_callee_name(callee);
+    printf("{\"type\":\"call_edge\",\"caller\":\"%s\",\"callee\":\"%s\"}\n",
+           current_func, callee_name);
+  }
+  uint32_t count = ts_node_named_child_count(node);
+  for (uint32_t i = 0; i < count; i++) {
+    extract_calls(ts_node_named_child(node, i), current_func);
+  }
 }
 ```
 
 ### 4.4 Import/Export 解析
 
-```javascript
-// import { foo } from './bar'
-function extractImport(node) {
-  const source = node.childForFieldName("source")?.text?.slice(1, -1)
-  const specifiers = node.descendantsOfType("import_specifier").map(s => s.text)
-  return {
-    type: "import_edge",
-    source_file: currentFile,
-    target_file: resolveImportPath(source, currentFile, tsconfig),
-    symbols: specifiers,
-    kind: "named_import"
+```c
+// plugins/typescript-indexer/src/import_export.c
+void extract_import(TSNode node, const char *current_file) {
+  TSNode source = ts_node_child_by_field_name(node, "source", 6);
+  char module[256];
+  get_node_text(source, module, sizeof(module));
+
+  uint32_t count = ts_node_named_child_count(node);
+  for (uint32_t i = 0; i < count; i++) {
+    TSNode spec = ts_node_named_child(node, i);
+    if (strcmp(ts_node_type(spec), "import_specifier") == 0) {
+      const char *name = get_identifier(spec);
+      printf("{\"type\":\"import_edge\",\"source_file\":\"%s\","
+             "\"target_file\":\"%s\",\"symbols\":[\"%s\"]}\n",
+             current_file, resolve_import_path(module, current_file), name);
+    }
   }
 }
 ```
@@ -302,7 +316,8 @@ function extractImport(node) {
 
 1. 插件内批量处理（一次处理多个文件）
 2. 多进程并行
-3. 可选 C 原生 tree-sitter 绑定
+3. 使用 C 原生 tree-sitter 绑定（已实现）
+4. 静态链接 tree-sitter 核心，简化部署
 
 ## 6. 与现有工具链的集成
 
