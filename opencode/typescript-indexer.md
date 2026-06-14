@@ -1,277 +1,384 @@
-# TypeScript/Node.js 代码索引增强设计
+# 代码索引插件：TypeScript/Node.js 解析增强
 
-> 为 coding.md 代码探索系统增加对 TypeScript/JavaScript 生态的深度解析能力
+> coding.md 的第一个专用语言索引插件
 
-## 1. 为什么要增强
+## 1. 为什么做成插件
 
-Node.js/npm 是世界上最大的开源代码生态之一：
+coding.md 的 `code_indexer` 基于 universal-ctags，对 C/C++/Python 效果很好。但现代语言（TypeScript、Rust、Go 等）有各自复杂的语法特性，ctags 难以全面覆盖。
 
-- npm 注册表有超过 200 万个包
-- 大量现代项目使用 TypeScript/JavaScript
-- AI Agent 的开发场景大量涉及 Node.js 项目
-- opencode 本身就是 TypeScript/Effect-TS 项目，解析质量直接影响分析效果
+把语言增强做成**插件模式**的好处：
 
-当前 `code_indexer` 基于 universal-ctags 做通用符号提取，对 C/C++/Python 效果很好，但对 TypeScript 有以下短板：
-
-| 问题 | 影响 |
+| 优势 | 说明 |
 |------|------|
-| 箭头函数识别不完整 | `const handler = () => {}` 被识别为变量而非函数 |
-| 接口/类型别名噪音大 | `.d.ts` 和类型定义产生大量无执行逻辑的 chunks |
-| Effect-TS 等工厂函数识别差 | `Layer.effect`、`Context.Service` 等模式抓不到清晰边界 |
-| ES Module 调用图弱 | `import/export` 跨文件关系提取不充分 |
-| JSX/TSX 组件边界不清 | React/Vue 组件的 props/state 关系难以提取 |
+| 解耦 | 核心索引器保持通用，语言特化逻辑交给插件 |
+| 可扩展 | 未来加 Rust、Go、Java 插件，走同一套接口 |
+| 可独立迭代 | TS 插件升级不需要改 `code_indexer` |
+| 可组合 | 一个插件处理多种相近语言（如 `.ts/.tsx/.js/.jsx`） |
+| 可禁用 | 不需要时直接移除插件配置 |
 
-因此，需要为 TypeScript/JavaScript 增加专用解析器，显著提升索引质量。
+TypeScript/Node.js 是第一个专用语言插件，因为：
 
-## 2. 目标
+- npm 是世界上最大的开源代码生态
+- 现代 AI Agent 大量基于 TypeScript/Node.js
+- opencode 本身就是 TypeScript/Effect-TS 项目
 
-1. 准确识别 TypeScript/JavaScript 各类符号：函数、类、方法、接口、类型别名、变量、装饰器
-2. 正确提取箭头函数、异步函数、生成器函数
-3. 提取 import/export 关系和跨文件调用边
-4. 过滤 `.d.ts` 噪音，降低类型定义对语义搜索的干扰
-5. 支持 `.ts`、`.tsx`、`.js`、`.jsx` 文件
-6. 与现有 C 工具链兼容，统一输出 `chunks_meta.jsonl`
+## 2. 插件接口设计
 
-## 3. 技术选型：tree-sitter
+### 2.1 插件注册文件
 
-### 3.1 为什么选 tree-sitter
-
-| 方案 | 优点 | 缺点 |
-|------|------|------|
-| universal-ctags | 轻量、多语言、已集成 | 对 TS 现代语法支持有限 |
-| TypeScript Compiler API | 最准确、有类型信息 | 需要 Node.js 运行时、解析慢、内存大、和 C 工具链风格不一致 |
-| **tree-sitter** | 快速、准确、多语言统一、适合做符号和调用图 | 需要引入 parser 依赖 |
-
-选择 **tree-sitter** 作为主要增强方案：
-
-- 官方有 `tree-sitter-typescript`，支持 TS/TSX
-- 解析速度快，适合大规模代码库
-- 能产出完整 AST，支持符号提取、调用图、scope 分析
-- 后续可扩展到其他语言（Rust/Go/Python 都有 tree-sitter grammar）
-
-### 3.2 解析范围
-
-```
-.ts     TypeScript 源码
-.tsx    TypeScript + JSX
-.js     JavaScript 源码
-.jsx    JavaScript + JSX
-.d.ts   TypeScript 声明文件（降低权重或跳过）
-```
-
-## 4. 增强后的符号类型
-
-在现有 kind 基础上，新增 TypeScript 专用 kind：
-
-| Kind | 说明 | 示例 |
-|------|------|------|
-| `ts_function` | 函数声明、函数表达式、箭头函数 | `function foo() {}`、`const bar = () => {}` |
-| `ts_method` | 类/对象方法 | `class A { foo() {} }` |
-| `ts_class` | 类声明 | `class Foo {}` |
-| `ts_interface` | 接口 | `interface Foo {}` |
-| `ts_type_alias` | 类型别名 | `type Foo = {}` |
-| `ts_enum` | 枚举 | `enum Color {}` |
-| `ts_variable` | 变量声明 | `const foo = ...` |
-| `ts_property` | 类/对象属性 | `class A { foo: number }` |
-| `ts_import` | 导入 | `import { foo } from './bar'` |
-| `ts_export` | 导出 | `export function foo()` |
-| `ts_decorator` | 装饰器 | `@Component` |
-| `ts_namespace` | 命名空间 | `namespace Foo {}` |
-| `ts_jsx_component` | JSX 组件 | `function Component() {}` |
-
-## 5. 调用图增强
-
-### 5.1 提取 CallExpression
-
-```typescript
-// 识别以下调用形式
-foo()                           → callee: foo
-obj.bar()                       → callee: obj.bar
-this.baz()                      → callee: this.baz
-lib.fn(arg1, arg2)              → callee: lib.fn
-someObj.method?.()              → callee: someObj.method
-```
-
-### 5.2 提取 Import/Export 关系
-
-```typescript
-// import { foo } from './bar'
-// → 添加 cross-file edge: current_file → ./bar → foo
-
-// import * as lib from './lib'
-// → 添加 cross-file edge: current_file → ./lib → *
-
-// export function foo() {}
-// → 标记 foo 为 module export
-
-// export { foo } from './bar'
-// → 添加 re-export edge
-```
-
-### 5.3 跨文件解析
-
-结合 `tsconfig.json` 或 package.json 的 `exports`/`main`，解析相对路径和路径别名：
-
-```typescript
-// tsconfig.json
-{
-  "compilerOptions": {
-    "paths": {
-      "@/*": ["./src/*"]
-    }
-  }
-}
-
-// import { foo } from '@/utils'
-// → 解析为 ./src/utils.ts 或 ./src/utils/index.ts
-```
-
-## 6. 噪音过滤策略
-
-| 来源 | 策略 |
-|------|------|
-| `.d.ts` 文件 | 默认跳过，或标记 `kind: ts_declaration` 降低搜索权重 |
-| 测试文件 | 跳过 `*.test.ts`、`*.spec.ts`、`**/__tests__/**` |
-| 类型定义 | 保留但标记为 `ts_interface`/`ts_type_alias`，语义搜索时降低权重 |
-| 第三方代码 | 仍由 `node_modules/` 过滤规则排除 |
-| 极小函数 | 行数少于 3 行的 getter/setter 可合并或跳过 |
-
-## 7. 实现方案
-
-### 7.1 Phase 1：快速验证（推荐先走这一步）
-
-用 Node.js + tree-sitter 写一个独立 parser：
-
-```typescript
-// tools/ts_parser.ts
-import Parser from "tree-sitter"
-import TypeScript from "tree-sitter-typescript"
-
-const parser = new Parser()
-parser.setLanguage(TypeScript.typescript)
-
-export function parseFile(path: string, source: string) {
-  const tree = parser.parse(source)
-  return extractChunks(tree.rootNode, path)
-}
-
-function extractChunks(node: Parser.SyntaxNode, path: string) {
-  const chunks = []
-  for (const child of node.children) {
-    if (isFunctionNode(child)) {
-      chunks.push({
-        name: getFunctionName(child),
-        kind: "ts_function",
-        file: path,
-        line_start: child.startPosition.row,
-        line_end: child.endPosition.row,
-        signature: child.text.slice(0, 200),
-      })
-    }
-    // ... class, interface, method, import, etc.
-  }
-  return chunks
-}
-```
-
-输出格式与现有 `chunks_meta.jsonl` 一致，直接复用 `batch_embedder` 和 `cache_import`。
-
-### 7.2 Phase 2：集成到 code_indexer
-
-在 `code_indexer.c` 中：
-
-1. 检测文件扩展名 `.ts/.tsx/.js/.jsx`
-2. 对这些文件调用 `ts_parser`（通过 fork + exec 或动态库）
-3. 其他语言继续用 ctags
-4. 统一输出 `chunks_meta.jsonl` 和 `chunks_text.txt`
-
-```c
-// 伪代码
-if (is_typescript_or_javascript(file)) {
-    chunks = ts_parser_extract(file);
-} else {
-    chunks = ctags_extract(file);
-}
-```
-
-### 7.3 Phase 3：C 语言原生集成（可选优化）
-
-如果 Node.js wrapper 性能不够，可将 tree-sitter parser 编译为 C 库，直接链接到 `code_indexer`：
-
-```c
-#include "tree_sitter/api.h"
-#include "tree_sitter/typescript/parser.h"
-
-TSParser* parser = ts_parser_new();
-ts_parser_set_language(parser, tree_sitter_typescript());
-```
-
-优点：
-- 无 Node.js 启动开销
-- 多 worker 并行更轻量
-- 和现有 C 工具链风格一致
-
-缺点：
-- 编译复杂
-- 维护成本高
-
-## 8. 输出格式
-
-与现有 `chunks_meta.jsonl` 保持一致，新增字段可选：
+`code_indexer` 启动时读取插件注册表：
 
 ```json
 {
-  "name": "toToolKind",
-  "kind": "ts_function",
-  "file": "packages/opencode/src/acp/tool.ts",
-  "line_start": 38,
-  "line_end": 71,
-  "language": "typescript",
-  "signature": "export function toToolKind(toolName: string): ToolKind",
-  "tags": ["export"],
-  "is_export": true,
-  "imports": ["@agentclientprotocol/sdk"],
-  "called_by": [],
-  "calls": []
+  "$schema": "https://opencode.ai/coding-indexer-plugin-schema.json",
+  "plugins": [
+    {
+      "name": "typescript",
+      "version": "1.0.0",
+      "description": "Enhanced TypeScript/JavaScript parser using tree-sitter",
+      "extensions": [".ts", ".tsx", ".js", ".jsx"],
+      "languages": ["typescript", "tsx", "javascript", "jsx"],
+      "command": ["node", "/opt/my_db/plugins/typescript-indexer/index.js"],
+      "env": {
+        "TS_PARSER_MAX_FILE_SIZE": "1048576"
+      },
+      "priority": 100
+    }
+  ]
 }
 ```
 
-## 9. 验证计划
+### 2.2 插件定位
 
-用 opencode 项目做前后对比：
+```
+plugins/
+├── typescript-indexer/
+│   ├── plugin.json          # 插件元数据
+│   ├── index.js             # 入口可执行文件
+│   ├── parser.js            # tree-sitter 解析逻辑
+│   ├── extractor.js         # 符号提取
+│   ├── callgraph.js         # 调用图提取
+│   └── package.json         # npm 依赖
+```
 
-| 指标 | ctags 旧版 | tree-sitter 新版 | 提升 |
-|------|-----------|------------------|------|
-| chunks 数 | 31691 | ? | 预期更合理（过滤噪音） |
-| 函数识别数 | 2667 | ? | 预期显著提升 |
+### 2.3 code_indexer 调用方式
+
+```bash
+code_indexer 遇到 .ts 文件时
+  │
+  ▼
+检查 plugin.json：是否有匹配 .ts 的插件？
+  │
+  ├─ 有 → 调用插件处理该文件
+  │         插件输出 JSON Lines 到 stdout
+  │         code_indexer 读取并合并到 chunks_meta.jsonl
+  │
+  └─ 无 → 回退到 ctags 通用解析
+```
+
+### 2.4 插件输入
+
+通过命令行参数传入：
+
+```bash
+node plugins/typescript-indexer/index.js \
+  --file /opt/opencode/packages/core/src/session/message.ts \
+  --project /opt/opencode \
+  --tsconfig /opt/opencode/tsconfig.json
+```
+
+### 2.5 插件输出格式
+
+插件输出 **JSON Lines**，每行一条记录。支持两种类型：
+
+#### chunk 记录
+
+```json
+{
+  "type": "chunk",
+  "name": "toLLMMessage",
+  "kind": "ts_function",
+  "file": "packages/core/src/session/runner/to-llm-message.ts",
+  "line_start": 93,
+  "line_end": 145,
+  "language": "typescript",
+  "signature": "function toLLMMessage(message: SessionMessage.Message, model: Model): Message[]",
+  "content": "function toLLMMessage(message: SessionMessage.Message, model: Model): Message[] {\n  switch (message.type) {\n    ...\n  }\n}",
+  "tags": ["export"],
+  "is_export": true,
+  "is_default_export": false
+}
+```
+
+#### call_edge 记录
+
+```json
+{
+  "type": "call_edge",
+  "caller": "toLLMMessage",
+  "caller_file": "packages/core/src/session/runner/to-llm-message.ts",
+  "caller_line": 102,
+  "callee": "Message.make",
+  "callee_file": null,
+  "callee_line": null,
+  "kind": "direct"
+}
+```
+
+#### import_edge 记录
+
+```json
+{
+  "type": "import_edge",
+  "source_file": "packages/core/src/session/runner/to-llm-message.ts",
+  "target_file": "packages/core/src/session/message.ts",
+  "symbols": ["SessionMessage"],
+  "kind": "named_import"
+}
+```
+
+#### metadata 记录（可选，每个文件输出一次）
+
+```json
+{
+  "type": "metadata",
+  "file": "packages/core/src/session/runner/to-llm-message.ts",
+  "language": "typescript",
+  "stats": {
+    "functions": 2,
+    "classes": 0,
+    "interfaces": 0,
+    "imports": 5
+  }
+}
+```
+
+### 2.6 回退机制
+
+如果插件进程退出非零、输出为空或解析失败，`code_indexer` 自动回退到 ctags。
+
+## 3. 插件生命周期
+
+```
+1. code_indexer 启动
+   │
+   ▼
+2. 读取 plugin registry（默认 ~/.config/coding/indexer-plugins.json）
+   │
+   ▼
+3. 扫描源码目录，按扩展名匹配插件
+   │
+   ▼
+4. 对每个匹配文件 fork 子进程调用插件
+   │
+   ▼
+5. 插件输出 JSON Lines → code_indexer 解析
+   │
+   ▼
+6. 合并到统一的 chunks_meta.jsonl / chunks_text.txt
+   │
+   ▼
+7. 无插件匹配的文件走 ctags 默认流程
+```
+
+## 4. TypeScript 插件实现
+
+### 4.1 技术选型：tree-sitter
+
+插件内部使用 `tree-sitter` + `tree-sitter-typescript` 解析。
+
+```javascript
+// plugins/typescript-indexer/parser.js
+const Parser = require("tree-sitter")
+const TypeScript = require("tree-sitter-typescript/typescript")
+const TSX = require("tree-sitter-typescript/tsx")
+
+function getParser(filePath) {
+  const parser = new Parser()
+  if (filePath.endsWith(".tsx")) parser.setLanguage(TSX)
+  else if (filePath.endsWith(".ts")) parser.setLanguage(TypeScript)
+  // js/jsx 类似
+  return parser
+}
+```
+
+### 4.2 提取的符号类型
+
+| Kind | tree-sitter 节点 | 说明 |
+|------|-----------------|------|
+| `ts_function` | `function_declaration`、`function_expression`、`arrow_function` | 函数 |
+| `ts_method` | `method_definition` | 类/对象方法 |
+| `ts_class` | `class_declaration` | 类 |
+| `ts_interface` | `interface_declaration` | 接口 |
+| `ts_type_alias` | `type_alias_declaration` | 类型别名 |
+| `ts_enum` | `enum_declaration` | 枚举 |
+| `ts_variable` | `variable_declarator` | 变量 |
+| `ts_property` | `property_definition`、`public_field_definition` | 属性 |
+| `ts_import` | `import_declaration` | 导入 |
+| `ts_export` | `export_statement` | 导出 |
+| `ts_decorator` | `decorator` | 装饰器 |
+| `ts_namespace` | `module_declaration` | 命名空间 |
+| `ts_jsx_component` | 函数/类且返回 JSX | React/Vue 组件 |
+
+### 4.3 调用图提取
+
+提取 `call_expression` 节点：
+
+```javascript
+// plugins/typescript-indexer/callgraph.js
+function extractCalls(node, currentFunction) {
+  const calls = []
+  traverse(node, (child) => {
+    if (child.type === "call_expression") {
+      const callee = child.childForFieldName("function")
+      calls.push({
+        caller: currentFunction,
+        callee: getCalleeName(callee),
+        line: callee.startPosition.row + 1
+      })
+    }
+  })
+  return calls
+}
+```
+
+### 4.4 Import/Export 解析
+
+```javascript
+// import { foo } from './bar'
+function extractImport(node) {
+  const source = node.childForFieldName("source")?.text?.slice(1, -1)
+  const specifiers = node.descendantsOfType("import_specifier").map(s => s.text)
+  return {
+    type: "import_edge",
+    source_file: currentFile,
+    target_file: resolveImportPath(source, currentFile, tsconfig),
+    symbols: specifiers,
+    kind: "named_import"
+  }
+}
+```
+
+### 4.5 噪音过滤
+
+| 来源 | 策略 |
+|------|------|
+| `.d.ts` | 默认跳过，或标记 `kind: ts_declaration` 且降低搜索权重 |
+| 测试文件 | 跳过 `*.test.ts`、`*.spec.ts`、`**/__tests__/**` |
+| 类型定义 | 保留但单独标记 kind，语义搜索时降低权重 |
+| 极小函数 | 少于 3 行的 getter/setter 可合并 |
+| node_modules | 由外层 exclude 规则控制 |
+
+## 5. 实现步骤
+
+### Phase 1：插件框架 MVP
+
+1. 定义 `plugin.json` schema
+2. 修改 `code_indexer` 读取 registry 并 fork 插件进程
+3. 解析插件 JSON Lines 输出
+4. 无插件时回退 ctags
+5. 输出统一格式到 `chunks_meta.jsonl`
+
+### Phase 2：TypeScript 插件 MVP
+
+1. 创建 `plugins/typescript-indexer/`
+2. 用 tree-sitter 实现基本符号提取
+3. 输出 chunk 记录
+4. 验证 opencode 项目
+
+### Phase 3：调用图与导入导出
+
+1. 实现 `call_edge` 输出
+2. 实现 `import_edge` 输出
+3. code_indexer 合并到 `call_graph.json`
+
+### Phase 4：噪音过滤与权重
+
+1. `.d.ts` 过滤/降权
+2. 测试文件跳过
+3. 类型定义单独标记
+
+### Phase 5：性能优化
+
+1. 插件内批量处理（一次处理多个文件）
+2. 多进程并行
+3. 可选 C 原生 tree-sitter 绑定
+
+## 6. 与现有工具链的集成
+
+```
+analyze_repo.sh /opt/opencode /code/opencode
+  │
+  ▼
+code_indexer 扫描文件
+  ├─ .ts/.tsx/.js/.jsx → 调用 typescript-indexer 插件
+  ├─ .c/.h/.cpp/.py   → 走 ctags
+  │
+  ▼
+统一生成 chunks_meta.jsonl + chunks_text.txt
+  │
+  ▼
+batch_embedder 生成向量
+  │
+  ▼
+call_graph / dataflow 分析
+  │
+  ▼
+cache_import 写入 /memory/
+```
+
+## 7. 验证计划
+
+用 opencode 做 A/B 测试：
+
+| 指标 | ctags | typescript-plugin | 提升 |
+|------|-------|-------------------|------|
+| 函数识别数 | 2667 | ? | 预期 +30~50% |
 | 箭头函数识别 | 低 | 高 | 明显提升 |
-| 调用图边 | 966 | ? | 预期提升 2-5x |
-| 数据流变量 | 2000 | ? | 预期提升 |
-| 语义搜索 Top-5 命中率 | ? | ? | 主观评估 |
+| 调用图边 | 966 | ? | 预期 +3~5x |
+| chunks 数 | 31691 | ? | 可能减少（过滤噪音） |
+| 语义搜索命中率 | ? | ? | 主观评估提升 |
 
 验证命令：
 
 ```bash
-# 旧版
-/opt/my_db/ai_code_search.sh index /opt/opencode /opt/code_caches/opencode_ctags_cache 4
-
-# 新版
-/opt/my_db/ai_code_search.sh index /opt/opencode /opt/code_caches/opencode_ts_cache 4 --ts-parser
+# 启用插件
+/opt/my_db/ai_code_search.sh index /opt/opencode /opt/code_caches/opencode_ts_cache 4 \
+  --plugins /opt/my_db/plugins/typescript-indexer/plugin.json
 
 # 对比查询
-./tools/cache_query "arrow function handler" --repo /code/opencode_ctags --type search
 ./tools/cache_query "arrow function handler" --repo /code/opencode_ts --type search
+./tools/cache_query "toToolKind" --repo /code/opencode_ts --type context --depth 2
 ```
 
-## 10. 与复刻 opencode 的关系
+## 8. 对其他语言插件的启示
 
-TypeScript 解析增强不仅服务于 coding.md 通用分析能力，也直接支持我们复刻 opencode：
+TypeScript 插件成功后，可以用同样接口扩展：
 
-1. **深度理解 opencode 源码**：更准确的调用图和符号索引
-2. **复刻实现参考**：可以精确提取 opencode 的模块边界、工具注册流程、消息状态机
+| 语言 | 插件名 | 解析器 |
+|------|--------|--------|
+| Rust | rust-indexer | tree-sitter-rust |
+| Go | go-indexer | tree-sitter-go |
+| Java | java-indexer | tree-sitter-java |
+| Ruby | ruby-indexer | tree-sitter-ruby |
+| C# | csharp-indexer | tree-sitter-c-sharp |
+
+所有插件统一遵循：
+
+- `plugin.json` 注册
+- 输入：文件路径
+- 输出：JSON Lines（chunk / call_edge / import_edge / metadata）
+- 失败回退 ctags
+
+## 9. 与复刻 opencode 的关系
+
+这个插件设计本身也服务于复刻 opencode：
+
+1. **更准地理解 opencode 源码**：Effect-TS 工厂函数、Layer/Service 模式能被识别
+2. **Agent 可参考 opencode 实现**：调用图更清晰，能追踪模块依赖
 3. **第三方依赖索引**：用户项目中的 `node_modules/` 可以高质量索引
-4. **Agent 工具设计**：参考 opencode 的 `toToolKind` 分类，设计我们自己的工具权限模型
+4. **验证插件架构**：第一个真实场景就是分析 opencode，为后续语言插件打样
 
-## 11. 一句话总结
+## 10. 一句话总结
 
-> **为 TypeScript/JavaScript 增加 tree-sitter 专用解析器，把 coding.md 从"能分析 TS"提升到"深度理解 TS"，这是覆盖现代 AI Agent 开发场景的关键投入。**
+> **把 TypeScript/Node.js 索引增强做成 coding.md 的第一个语言插件，用统一插件接口连接 tree-sitter 和 code_indexer，未来任何语言都可以按同样模式扩展。**

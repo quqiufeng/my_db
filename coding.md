@@ -1486,19 +1486,23 @@ stdbuf -oL ./tools/cache_import /opt/code_caches/php_cache /code/php --cache-dir
 
 ## 系统级修复与性能优化记录
 
-### TypeScript/JavaScript 索引增强
+### TypeScript/JavaScript 索引增强（插件模式）
+
+coding.md 的第一个专用语言索引插件。
 
 Node.js/npm 是世界上最大的开源代码生态之一。当前 `code_indexer` 基于 universal-ctags，对 C/C++/Python 效果很好，但对 TypeScript/JavaScript 的现代语法（箭头函数、Effect-TS 工厂函数、ES Module 导入导出、JSX 组件等）解析不够深入。
 
 详见：[opencode/typescript-indexer.md](opencode/typescript-indexer.md)
 
-核心增强方向：
+核心设计：
 
-- 引入 tree-sitter 专用解析器，替代/补充 ctags 对 `.ts/.tsx/.js/.jsx` 的处理
-- 新增 TypeScript 专属符号类型：`ts_function`、`ts_method`、`ts_class`、`ts_interface`、`ts_type_alias`、`ts_enum`、`ts_variable`、`ts_property`、`ts_import`、`ts_export`、`ts_decorator`、`ts_namespace`、`ts_jsx_component`
-- 增强调用图：提取 `CallExpression`、`ImportDeclaration`、`ExportDeclaration`
-- 过滤 `.d.ts` 噪音和测试文件
-- 与现有工具链兼容，统一输出 `chunks_meta.jsonl`
+- **插件接口**：`code_indexer` 通过统一接口调用外部插件，插件输出 JSON Lines 格式的 chunk / call_edge / import_edge / metadata
+- **插件注册**：通过 `plugin.json` 注册扩展名匹配、命令、优先级
+- **失败回退**：插件失败时自动回退到 ctags
+- **TS 插件内部**：使用 tree-sitter 解析 `.ts/.tsx/.js/.jsx`，新增 `ts_function`、`ts_method`、`ts_class`、`ts_interface`、`ts_type_alias`、`ts_enum`、`ts_variable`、`ts_property`、`ts_import`、`ts_export`、`ts_decorator`、`ts_namespace`、`ts_jsx_component` 等符号类型
+- **噪音过滤**：跳过/降权 `.d.ts`、测试文件、类型定义
+
+这是 coding.md 第一次为特定语言做索引增强，插件模式保证未来 Rust、Go、Java 等语言可以按同样方式扩展。
 
 ## 系统级修复与性能优化记录
 
