@@ -1486,6 +1486,22 @@ stdbuf -oL ./tools/cache_import /opt/code_caches/php_cache /code/php --cache-dir
 
 ## 系统级修复与性能优化记录
 
+### TypeScript/JavaScript 索引增强
+
+Node.js/npm 是世界上最大的开源代码生态之一。当前 `code_indexer` 基于 universal-ctags，对 C/C++/Python 效果很好，但对 TypeScript/JavaScript 的现代语法（箭头函数、Effect-TS 工厂函数、ES Module 导入导出、JSX 组件等）解析不够深入。
+
+详见：[opencode/typescript-indexer.md](opencode/typescript-indexer.md)
+
+核心增强方向：
+
+- 引入 tree-sitter 专用解析器，替代/补充 ctags 对 `.ts/.tsx/.js/.jsx` 的处理
+- 新增 TypeScript 专属符号类型：`ts_function`、`ts_method`、`ts_class`、`ts_interface`、`ts_type_alias`、`ts_enum`、`ts_variable`、`ts_property`、`ts_import`、`ts_export`、`ts_decorator`、`ts_namespace`、`ts_jsx_component`
+- 增强调用图：提取 `CallExpression`、`ImportDeclaration`、`ExportDeclaration`
+- 过滤 `.d.ts` 噪音和测试文件
+- 与现有工具链兼容，统一输出 `chunks_meta.jsonl`
+
+## 系统级修复与性能优化记录
+
 > 以下记录了在探索 OpenResty、CPython、llama.cpp、Linux Kernel 过程中发现并修复的系统性问题。与 PHP 踩坑不同，这些是基础工具链的架构缺陷，影响所有项目。
 
 ### 1. `protected_regular=2` 导致 Worker 静默失败
