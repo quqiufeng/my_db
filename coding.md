@@ -47,6 +47,7 @@
 | mruby | 待下载 | /code/mruby | /code/mruby | 待探索 | — |
 | Zig | https://github.com/ziglang/zig | /code/zig | /code/zig | 待探索 | — |
 | PHP | /opt/php/src | /code/php | /code/php | ✅ 2026-06-09 | 已完成 |
+| opencode | /opt/opencode | /code/opencode | /code/opencode | ✅ 2026-06-15 | 已完成（Node.js/TypeScript 验证） |
 
 
 > 使用 `./analyze_repo.sh <source>` 分析新项目后，数据会自动保存到 `/code/{project}/`。
