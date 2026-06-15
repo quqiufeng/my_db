@@ -21,10 +21,12 @@
 | 覆盖源文件 | 1015 |
 | 语义向量 | 10218 × 768 |
 | HNSW 索引 | 32.79 MB |
-| KV Cache keys | 29510 |
+| KV Cache keys | 10322 |
 | 导入成功 chunks | 10193 / 10218 |
-| **调用图函数** | **9652** |
-| **调用图边** | **48742** |
+| **调用图函数** | **2564** |
+| **调用图边** | **13244** |
+| 插件解析边（应用后） | 5256 |
+| 过滤掉的插件边 | 17321 |
 | 数据流变量 | 11 |
 
 > 注：Chunks 数量从 ctags 基线的 31691 降至 10218， because the TypeScript AST plugin 只提取语义级声明（函数、类型、类、接口、方法），过滤掉了 ctags 产生的成员/字段/变量等噪声，搜索和报告质量更高。少量 chunks（约 25 个）因同名同文件冲突未导入。
@@ -242,14 +244,14 @@ opencode 大量使用 Effect 的 `Context.Service` 模式管理依赖：
 
 ### 5.11 调用图（Call Graph）
 
-通过改造 `call_graph` 工具，使其读取 TypeScript 插件输出的 `call_edge` 记录，opencode 的调用关系首次可用：
+通过改造 `call_graph` 工具，使其读取 TypeScript 插件输出的 `call_edge` 记录，opencode 的调用关系首次可用。并新增噪声符号过滤，去除 JS 内置（`Array.isArray`、`JSON.stringify`、`Math.max` 等）和 Effect-TS 组合子（`Effect.gen`、`Effect.map` 等），使调用图聚焦于业务逻辑。
 
 | 指标 | 数值 |
 |------|------|
-| 有调用关系的函数 | 9652 |
-| 总调用边 | 48742 |
-| 插件解析边 | 22577 |
-| 文本匹配补充边 | ~26165 |
+| 有调用关系的函数 | 2564 |
+| 总调用边 | 13244 |
+| 插件解析边（应用） | 5256 |
+| 过滤掉的插件边 | 17321（JS/Effect 内置 + 匿名表达式） |
 
 **关键调用关系示例**：
 
@@ -258,22 +260,36 @@ opencode 大量使用 Effect 的 `Context.Service` 模式管理依赖：
 - `renderPrompt` → 被 `render` 调用（`packages/opencode/src/tool/shell/prompt.ts:287, 290`）
 - `mcpConfig` → 被 `registerMcpServers` 调用（`packages/opencode/src/acp/service.ts:901`）
 
-**高频被调用符号**（包含大量 Effect/Schema/JS 内置）：
+**过滤后的高频被调用符号 Top 20**（业务函数为主）：
 
 ```
-  498 map
-  369 Effect.gen
-  368 join
-  341 Array.isArray
-  340 buildClientParams
-  319 get
-  309 JSON.stringify
-  290 Object.entries
-  283 console.log
-  251 push
+  306 buildClientParams
+  183 isRecord
+  167 resolve
+  146 from
+  143 which
+  142 run
+  135 make
+  121 text
+  103 fail
+  103 parse
+   84 on
+   82 inserted
+   75 write
+   75 fn
+   70 all
+   70 close
+   65 sync
+   64 json
+   64 spawn
+   63 use
 ```
 
-> 注：当前调用图包含 Effect-TS 组合子（`Effect.gen`、`pipe`、`map`）和 JS 内置（`Array.isArray`、`JSON.stringify`）等通用符号，因此高频列表偏基础设施。后续可通过内置符号过滤提升业务函数的信噪比。
+> 注：部分剩余高频符号（`resolve`、`from`、`all`、`spawn`、`json`、`use` 等）可能是业务函数与内置 API 同名，已过滤掉最明显的 `Effect.gen`、`Array.isArray`、`JSON.stringify`、`Math.max`、`path.join`、`Date.now`、`fetch` 等噪声。
+
+### 5.12 数据流分析
+
+`dataflow` 工具当前对 TypeScript 支持有限（只识别 5 个函数、11 个变量），因为 TS 的变量追踪需要 AST 级字段分析。本次未做深入改造——对于应用层 TypeScript 项目，能把代码结构和调用关系看懂即可，无需过度追求字段级数据流。
 
 ## 6. 关键设计模式
 
@@ -329,9 +345,9 @@ opencode 大量使用 Effect 的 `Context.Service` 模式管理依赖：
 - **TypeScript 感知**：正确处理 `type`、`interface`、`class`、箭头函数、泛型、重载
 - **内容完整**：保留函数签名与完整 body 内容，便于 LLM 理解
 - **导出信息**：通过 `tags` 标记 `export`
-- **调用图可用**：`code_indexer` 现在保存插件原始输出到 `plugin_output.jsonl`；`call_graph` 读取其中的 `call_edge` 记录并与文本匹配边合并，使 TypeScript 项目首次拥有完整的 caller/callee 关系
+- **调用图可用**：`code_indexer` 现在保存插件原始输出到 `plugin_output.jsonl`；`call_graph` 读取其中的 `call_edge` 记录，并过滤 JS 内置、Effect-TS 组合子、匿名表达式等噪声，只保留项目内部函数之间的调用关系
 
-因此报告基于更高质量的代码 chunks 和真实调用关系，结构与实现细节比 ctags 版本更准确。
+因此报告基于更高质量的代码 chunks 和真实的业务调用关系，结构与实现细节比 ctags 版本更准确。
 
 ## 9. 查询示例
 

@@ -12,6 +12,139 @@ static int g_func_count = 0;
 static int g_name_hash[HASH_SIZE];  // -1 = empty
 #define MAX_ARGS 20
 
+// =============================================================================
+// Noise symbol filter: suppress JS/TS builtins and Effect-TS combinators
+// so the call graph highlights business logic instead of infrastructure.
+// =============================================================================
+
+static const char* NOISE_SYMBOLS[] = {
+    // JavaScript / Node.js globals and constructors
+    "Array", "ArrayBuffer", "Boolean", "Buffer", "DataView", "Date", "Error",
+    "Function", "Infinity", "JSON", "Map", "Math", "NaN", "Number", "Object",
+    "Promise", "Proxy", "RangeError", "ReferenceError", "RegExp", "Set",
+    "String", "Symbol", "TypeError", "URIError", "WeakMap", "WeakSet",
+    "console", "exports", "global", "globalThis", "module", "process",
+    "require", "undefined",
+
+    // Array static and prototype methods
+    "Array.from", "Array.isArray", "Array.of",
+    "at", "concat", "copyWithin", "entries", "every", "fill", "filter", "find",
+    "findIndex", "findLast", "findLastIndex", "flat", "flatMap", "forEach",
+    "includes", "indexOf", "join", "keys", "lastIndexOf", "map", "pop", "push",
+    "reduce", "reduceRight", "reverse", "shift", "slice", "some", "sort",
+    "splice", "toLocaleString", "toString", "unshift", "values",
+
+    // Object static methods
+    "Object.assign", "Object.create", "Object.defineProperties", "Object.defineProperty",
+    "Object.entries", "Object.freeze", "Object.fromEntries", "Object.getOwnPropertyDescriptor",
+    "Object.getOwnPropertyDescriptors", "Object.getOwnPropertyNames", "Object.getOwnPropertySymbols",
+    "Object.getPrototypeOf", "Object.hasOwn", "Object.is", "Object.isExtensible",
+    "Object.isFrozen", "Object.isSealed", "Object.keys", "Object.preventExtensions",
+    "Object.seal", "Object.setPrototypeOf", "Object.values",
+
+    // JSON / console / Promise
+    "JSON.parse", "JSON.stringify",
+    "Promise.all", "Promise.allSettled", "Promise.any", "Promise.race", "Promise.reject", "Promise.resolve",
+    "console.debug", "console.error", "console.info", "console.log", "console.trace", "console.warn",
+
+    // String / Number / Math / Date / RegExp prototype methods (commonly called unqualified)
+    "charAt", "charCodeAt", "codePointAt", "endsWith", "fromCharCode",
+    "match", "matchAll", "normalize", "padEnd", "padStart", "repeat", "replace",
+    "replaceAll", "search", "split", "startsWith", "substring", "substr",
+    "toLowerCase", "toUpperCase", "trim", "trimEnd", "trimStart",
+    "isFinite", "isInteger", "isNaN", "isSafeInteger", "parseFloat", "parseInt",
+    "toFixed", "toPrecision",
+    "abs", "ceil", "floor", "max", "min", "pow", "random", "round", "sqrt", "trunc",
+    "getDate", "getDay", "getFullYear", "getHours", "getMilliseconds", "getMinutes",
+    "getMonth", "getSeconds", "getTime", "getTimezoneOffset", "getUTCDate",
+    "toISOString", "toUTCString",
+    "exec", "test",
+
+    // Map / Set / Promise prototype methods
+    "add", "clear", "delete", "forEach", "get", "has", "set", "size",
+    "catch", "finally", "then",
+
+    // Timers / process
+    "setTimeout", "clearTimeout", "setInterval", "clearInterval", "setImmediate",
+    "process.cwd", "process.env", "process.exit", "process.nextTick",
+
+    // Effect-TS core combinators and namespaces
+    "Effect", "Effect.acquireUseRelease", "Effect.all", "Effect.andThen", "Effect.annotateLogs", "Effect.as",
+    "Effect.bind", "Effect.bindTo", "Effect.catch", "Effect.catchAll", "Effect.catchSome", "Effect.catchTag", "Effect.catchTags",
+    "Effect.die", "Effect.either", "Effect.fail", "Effect.filter", "Effect.flatMap", "Effect.fn",
+    "Effect.fork", "Effect.forever", "Effect.fromNullable", "Effect.gen", "Effect.if",
+    "Effect.ignore", "Effect.iterate", "Effect.join", "Effect.let", "Effect.log", "Effect.logError",
+    "Effect.map", "Effect.mapBoth", "Effect.mapError", "Effect.mergeAll", "Effect.never",
+    "Effect.onExit", "Effect.orDie", "Effect.optionFromOptional", "Effect.provide",
+    "Effect.provideLayer", "Effect.provideService", "Effect.provideServiceEffect",
+    "Effect.promise", "Effect.race", "Effect.raceAll", "Effect.repeat", "Effect.retry",
+    "Effect.runFork", "Effect.runPromise", "Effect.runPromiseExit", "Effect.runSync",
+    "Effect.schedule", "Effect.scoped", "Effect.sleep", "Effect.succeed", "Effect.sync",
+    "Effect.tap", "Effect.tapBoth", "Effect.tapError", "Effect.timeout", "Effect.try",
+    "Effect.tryPromise", "Effect.unified", "Effect.void", "Effect.withSpan", "Effect.zip",
+    "Effect.zipLeft", "Effect.zipRight", "Effect.zipWith",
+    "Context", "Context.Service", "Context.Tag", "Context.add", "Context.get",
+    "Context.make", "Context.merge", "Context.empty",
+    "Layer", "Layer.effect", "Layer.merge", "Layer.provide", "Layer.succeed",
+    "Layer.sync", "Layer.toRuntime",
+    "Ref", "Ref.get", "Ref.make", "Ref.set", "Ref.update", "Ref.updateAndGet",
+    "Option", "Option.flatMap", "Option.fromNullable", "Option.getOrElse",
+    "Option.getOrThrow", "Option.map", "Option.none", "Option.orElse", "Option.some",
+    "Either", "Either.flatMap", "Either.left", "Either.map", "Either.match",
+    "Either.right", "Either.void",
+    "Schema", "Schema.Array", "Schema.Boolean", "Schema.Class", "Schema.Date",
+    "Schema.Literal", "Schema.Number", "Schema.Record", "Schema.String", "Schema.Struct",
+    "Schema.Tuple", "Schema.Union", "Schema.decode", "Schema.decodeUnknown",
+    "Schema.encode", "Schema.encodeUnknown", "Schema.optional", "Schema.parseJson",
+    "pipe",
+
+    // Node.js modules and Web APIs
+    "Buffer.alloc", "Buffer.concat", "Buffer.from", "Buffer.isBuffer",
+    "fetch",
+    "path.basename", "path.dirname", "path.extname", "path.format", "path.isAbsolute",
+    "path.join", "path.normalize", "path.parse", "path.relative", "path.resolve",
+    "child_process.exec", "child_process.execFile", "child_process.execFileSync",
+    "child_process.execSync", "child_process.fork", "child_process.spawn",
+    "fs.access", "fs.accessSync", "fs.appendFile", "fs.appendFileSync", "fs.copyFile",
+    "fs.copyFileSync", "fs.cp", "fs.cpSync", "fs.existsSync", "fs.mkdir", "fs.mkdirSync",
+    "fs.readFile", "fs.readFileSync", "fs.readdir", "fs.readdirSync", "fs.rename",
+    "fs.renameSync", "fs.rm", "fs.rmSync", "fs.rmdir", "fs.rmdirSync", "fs.stat",
+    "fs.statSync", "fs.writeFile", "fs.writeFileSync",
+
+    // Common unqualified helpers that produce noise
+    "entries", "keys", "values", "has", "get", "set", "delete", "clear", "add",
+    "map", "filter", "reduce", "forEach", "find", "some", "every", "includes",
+    "join", "split", "trim", "replace", "startsWith", "endsWith", "push", "pop",
+    "shift", "unshift", "slice", "splice", "sort", "reverse", "concat", "flatMap",
+    "then", "catch", "finally",
+    "log", "error", "warn",
+};
+
+static int is_noise_symbol(const char* name) {
+    if (!name || !name[0]) return 1;
+
+    // Reject anonymous / literal / template / dynamic expressions
+    for (const char* p = name; *p; p++) {
+        char c = *p;
+        if (c == '(' || c == ')' || c == '[' || c == ']' ||
+            c == '{' || c == '}' || c == '`' || c == '$' ||
+            c == '"' || c == '\'') {
+            return 1;
+        }
+    }
+
+    // Reject leading/trailing whitespace or pure whitespace
+    const char* p = name;
+    while (*p && isspace((unsigned char)*p)) p++;
+    if (!*p) return 1;
+
+    int n = sizeof(NOISE_SYMBOLS) / sizeof(NOISE_SYMBOLS[0]);
+    for (int i = 0; i < n; i++) {
+        if (strcmp(NOISE_SYMBOLS[i], name) == 0) return 1;
+    }
+    return 0;
+}
+
 typedef struct call_edge {
     char caller[MAX_NAME_LEN];
     char file[512];
@@ -28,6 +161,17 @@ typedef struct func_node {
 
 static func_node_t* g_func_nodes = NULL;
 
+typedef struct plugin_edge {
+    char caller[MAX_NAME_LEN];
+    char callee[MAX_NAME_LEN];
+    char file[512];
+    int line;
+} plugin_edge_t;
+
+static plugin_edge_t* g_plugin_edges = NULL;
+static int g_plugin_edge_count = 0;
+static int g_plugin_edge_capacity = 0;
+
 // DJB2 hash
 static unsigned int hash_str(const char* s) {
     unsigned int h = 5381;
@@ -36,6 +180,7 @@ static unsigned int hash_str(const char* s) {
 }
 
 static void add_func_name(const char* name) {
+    if (is_noise_symbol(name)) return;
     unsigned int h = hash_str(name);
     while (g_name_hash[h] >= 0) {
         if (strcmp(g_func_names[g_name_hash[h]], name) == 0) return;
@@ -44,6 +189,15 @@ static void add_func_name(const char* name) {
     g_func_names[g_func_count] = strdup(name);
     g_name_hash[h] = g_func_count;
     g_func_count++;
+}
+
+static int is_func_known(const char* name) {
+    unsigned int h = hash_str(name);
+    while (g_name_hash[h] >= 0) {
+        if (strcmp(g_func_names[g_name_hash[h]], name) == 0) return 1;
+        h = (h + 1) % HASH_SIZE;
+    }
+    return 0;
 }
 
 static func_node_t* get_func_node(const char* name, int create) {
@@ -63,7 +217,43 @@ static func_node_t* get_func_node(const char* name, int create) {
     return n;
 }
 
+static void add_call_edge(const char* callee, const char* caller, const char* file, int line, const char* args);
+
+static void store_plugin_edge(const char* caller, const char* callee, const char* file, int line) {
+    if (g_plugin_edge_count >= g_plugin_edge_capacity) {
+        int new_cap = g_plugin_edge_capacity == 0 ? 4096 : g_plugin_edge_capacity * 2;
+        plugin_edge_t* new_arr = realloc(g_plugin_edges, new_cap * sizeof(plugin_edge_t));
+        if (!new_arr) return;
+        g_plugin_edges = new_arr;
+        g_plugin_edge_capacity = new_cap;
+    }
+    plugin_edge_t* e = &g_plugin_edges[g_plugin_edge_count++];
+    strncpy(e->caller, caller, MAX_NAME_LEN - 1);
+    e->caller[MAX_NAME_LEN - 1] = '\0';
+    strncpy(e->callee, callee, MAX_NAME_LEN - 1);
+    e->callee[MAX_NAME_LEN - 1] = '\0';
+    strncpy(e->file, file ? file : "", sizeof(e->file) - 1);
+    e->file[sizeof(e->file) - 1] = '\0';
+    e->line = line;
+}
+
+static void apply_plugin_edges() {
+    int applied = 0;
+    int skipped = 0;
+    for (int i = 0; i < g_plugin_edge_count; i++) {
+        plugin_edge_t* e = &g_plugin_edges[i];
+        if (is_func_known(e->callee) && !is_noise_symbol(e->callee) && !is_noise_symbol(e->caller)) {
+            add_call_edge(e->callee, e->caller, e->file, e->line, "");
+            applied++;
+        } else {
+            skipped++;
+        }
+    }
+    printf("  Applied %d plugin edges, skipped %d external/noise\n", applied, skipped);
+}
+
 static void add_call_edge(const char* callee, const char* caller, const char* file, int line, const char* args) {
+    if (is_noise_symbol(callee) || is_noise_symbol(caller)) return;
     func_node_t* node = get_func_node(callee, 1);
     if (!node) return;
 
@@ -264,9 +454,7 @@ static void load_plugin_edges(const char* plugin_file) {
 
         if (!caller[0] || !callee[0]) continue;
 
-        add_func_name(callee);
-        add_func_name(caller);
-        add_call_edge(callee, caller, file, line_num, "");
+        store_plugin_edge(caller, callee, file, line_num);
         count++;
     }
 
@@ -408,6 +596,7 @@ int main(int argc, char** argv) {
 
     printf("Phase 2: Loading plugin call edges\n");
     load_plugin_edges(plugin_file);
+    apply_plugin_edges();
 
     printf("Phase 3: Building call graph with arguments...\n");
 
