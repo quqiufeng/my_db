@@ -30,6 +30,26 @@ local function sort_by_importance_desc(a, b)
     return ia > ib
 end
 
+-- Read a project instruction file if it exists.
+local function read_instruction_file(project_root, name)
+    if not project_root then return nil end
+    local candidates = {
+        project_root .. "/" .. name,
+        project_root .. "/.opencode/" .. name,
+    }
+    for _, path in ipairs(candidates) do
+        local f = io.open(path, "r")
+        if f then
+            local content = f:read("*a")
+            f:close()
+            if content and content:match("%S") then
+                return content, path
+            end
+        end
+    end
+    return nil
+end
+
 -- Build just the system/instruction part of the prompt (no user query).
 function M.build_system_prompt(session_id, project_ns, project_root)
     project_root = project_root or "."
@@ -48,16 +68,31 @@ function M.build_system_prompt(session_id, project_ns, project_root)
     push("Follow these rules to work efficiently:")
     push("- ALWAYS prefer `kv_search` over reading full files. Search first, read only the relevant snippets.")
     push("- Use `kv_context(symbol, repo)` when analyzing a specific function/class to get callers/callees.")
-    push("- Use `source_read(path, line_start, line_end)` only when you need implementation details.")
+    push("- Use `read(path, offset, limit)` only when you need implementation details.")
     push("- Use `kv_get(key)` for exact keys you already know.")
     push("- Use `code_index(source, namespace)` to index a new repo or dependency before searching it.")
-    push("- Use `apply_edit(path, old_string, new_string)` to modify existing files. old_string must match exactly.")
-    push("- Use `file_create(path, content)` to create new files; `file_delete(path)` to remove; `file_list(path)` to list.")
+    push("- Use `edit(path, old_string, new_string)` to modify existing files. old_string must match exactly.")
+    push("- Use `write(path, content)` to create or overwrite files; `apply_patch(patch)` for diff-based edits.")
+    push("- Use `glob(pattern)` and `grep(pattern)` to explore the project.")
     push("- Use `bash(command)` for shell commands, `git(command)` for git operations, `diff(repo_path, file_path)` to review changes.")
     push("- KV Cache holds permanent memory: project architecture, indexed code, conversation facts, and errors.")
     push("- Third-party code is pre-indexed; do not ask the user to read it raw. Search `/code/` namespace instead.")
     push("- After making edits, consider running `diff` or `git status` to verify changes.")
     push("- Be concise. Only load information relevant to the current task.")
+
+    -- Project instructions from AGENTS.md / instructions.md / claude.md
+    local instruction_files = {"AGENTS.md", "instructions.md", "claude.md"}
+    local found_any = false
+    for _, name in ipairs(instruction_files) do
+        local content, path = read_instruction_file(project_root, name)
+        if content then
+            if not found_any then
+                push("\n# Project Instructions")
+                found_any = true
+            end
+            push("\n## %s\n%s", path, content)
+        end
+    end
 
     -- Available tools
     local tools = opencode.cache_search_prefix("/agent/default/tools/", 32)
@@ -113,8 +148,8 @@ M.build_prompt = nil  -- placeholder to be replaced below
 
 -- Assemble a prompt for the given session and user query.
 -- Returns the full prompt string.
-function M.build_prompt(session_id, project_ns, user_query)
-    local sys = M.build_system_prompt(session_id, project_ns, ".")
+function M.build_prompt(session_id, project_ns, user_query, project_root)
+    local sys = M.build_system_prompt(session_id, project_ns, project_root or ".")
     return sys .. "\n\n## User\n" .. (user_query or "") .. "\n\n## Assistant\n"
 end
 

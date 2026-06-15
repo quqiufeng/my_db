@@ -153,11 +153,13 @@ opencode/
 
 | 工具 | 用途 |
 |------|------|
-| `source_read` | 读取项目文件 |
-| `apply_edit` | 精确替换文件内容 |
-| `file_create` | 创建新文件 |
-| `file_delete` | 删除文件 |
-| `file_list` | 列出目录 |
+| `read` | 读取文件、目录、图片；支持 `offset`/`limit` 分页；自动检测二进制 |
+| `edit` | 精确替换文件内容（旧字符串必须唯一匹配） |
+| `write` | 创建或覆盖文件；支持 `create_only`/`append`/`expected_hash` 条件写入 |
+| `apply_patch` | 应用 unified diff 补丁 |
+| `glob` | 按 glob 模式列出文件 |
+| `grep` | 用 ripgrep 搜索文件内容 |
+| `file_delete` | 删除文件，支持 `expected_hash` 校验 |
 | `bash` | 执行 shell 命令 |
 | `git` | 执行 git 命令 |
 | `diff` | 查看 git diff |
@@ -165,6 +167,20 @@ opencode/
 | `kv_get` | 读取精确 KV 键 |
 | `kv_context` | 获取符号上下文（caller/callee） |
 | `code_index` | 索引新代码库到 KV Cache |
+
+---
+
+## 项目指令自动注入
+
+启动时，如果项目根目录存在以下文件，会自动读取并注入到系统 prompt 中：
+
+| 文件 | 说明 |
+|------|------|
+| `AGENTS.md` | 通用 agent 指令 |
+| `instructions.md` 或 `.opencode/instructions.md` | 项目专属指令 |
+| `claude.md` | Claude 模型专属指令 |
+
+这些文件的内容会作为 `# Project Instructions` 附加到每次 LLM 调用的系统 prompt 里，无需手动复制到对话中。
 
 ---
 

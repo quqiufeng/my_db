@@ -76,7 +76,7 @@ end
 -- Global entry points called from C ------------------------------------------
 
 function build_prompt(session_id, project_ns, user_query)
-    return prompt.build_prompt(session_id, project_ns, user_query)
+    return prompt.build_prompt(session_id, project_ns, user_query, tools.get_project_root())
 end
 
 -- Convert messages table to JSON array string for C API.
