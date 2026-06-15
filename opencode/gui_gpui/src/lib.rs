@@ -425,13 +425,14 @@ impl Render for ChatView {
             .overflow_y_scrollbar()
             .gap_2()
             .p_2()
+            .bg(theme.colors.background)
             .children(messages.into_iter().enumerate().map(move |(idx, m)| {
                 let role = m.role.clone();
-                let (label, header_bg, card_bg, fg) = match role.as_str() {
-                    "user" => ("User", theme.colors.primary, theme.colors.muted, theme.colors.foreground),
-                    "assistant" => ("Assistant", theme.colors.accent, theme.colors.muted, theme.colors.foreground),
-                    "tool" => ("Tool", theme.colors.success, theme.colors.success, theme.colors.background),
-                    _ => ("Unknown", theme.colors.foreground, theme.colors.muted, theme.colors.foreground),
+                let (label, accent) = match role.as_str() {
+                    "user" => ("User", theme.colors.primary),
+                    "assistant" => ("Assistant", theme.colors.accent),
+                    "tool" => ("Tool", theme.colors.warning),
+                    _ => ("Unknown", theme.colors.foreground),
                 };
                 let is_tool = role == "tool";
                 let expanded = m.expanded;
@@ -461,7 +462,8 @@ impl Render for ChatView {
                                         div()
                                             .px_2()
                                             .py_1()
-                                            .bg(theme.colors.secondary)
+                                            .bg(theme.colors.muted)
+                                            .text_color(theme.colors.foreground)
                                             .child(format!("{}", if lang.is_empty() { "code" } else { &lang }))
                                             .text_xs(),
                                     )
@@ -484,17 +486,16 @@ impl Render for ChatView {
                     .rounded_md()
                     .overflow_hidden()
                     .border_1()
-                    .border_color(theme.colors.border)
-                    .bg(card_bg)
-                    .text_color(fg)
+                    .border_l_4()
+                    .border_color(accent)
+                    .bg(theme.colors.background)
+                    .text_color(theme.colors.foreground)
                     .child(
                         h_flex()
                             .justify_between()
                             .px_2()
                             .py_1()
-                            .bg(header_bg)
-                            .text_color(theme.colors.background)
-                            .child(div().font_weight(FontWeight::BOLD).child(format!("#{} {}", idx + 1, label)))
+                            .child(div().font_weight(FontWeight::BOLD).text_color(accent).child(format!("#{} {}", idx + 1, label)))
                             .when(is_tool, |this| {
                                 this.child(
                                     Button::new(format!("toggle-{}", idx))
@@ -586,6 +587,7 @@ impl Render for ChatView {
             .h_full()
             .border_l_1()
             .border_color(theme.colors.border)
+            .bg(theme.colors.background)
             .child(session_info)
             .child(context_info)
             .child(lsp_info)
@@ -597,6 +599,7 @@ impl Render for ChatView {
             .p_2()
             .border_t_1()
             .border_color(theme.colors.border)
+            .bg(theme.colors.background)
             .child(
                 div()
                     .flex_1()
@@ -619,6 +622,7 @@ impl Render for ChatView {
             .text_sm()
             .border_t_1()
             .border_color(theme.colors.border)
+            .bg(theme.colors.background)
             .child(div().child(format!("{} · {}", model, version)))
             .child(div().child(format!("{} / {} tokens ({}%)", tokens_used, context_tokens, token_percent)))
             .child(div().child(format!("{}:main", project_name)))
@@ -628,6 +632,7 @@ impl Render for ChatView {
         let main_area = v_flex()
             .flex_1()
             .size_full()
+            .bg(theme.colors.background)
             .child(message_list)
             .child(input_bar)
             .child(status_bar);
