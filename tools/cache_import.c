@@ -92,7 +92,7 @@ static int import_chunk_raw(const char* namespace, const char* line) {
     // Extract "file" from raw JSON
     const char* file_p = strstr(line, "\"file\":\"");
     if (!file_p) return 0;
-    file_p += 7;
+    file_p += 8;
     const char* file_end = strchr(file_p, '"');
     if (!file_end) return 0;
 
@@ -152,6 +152,7 @@ static void import_chunks(const char* analysis_dir, const char* namespace) {
     // Symbol index: built on-demand during queries (skip bulk import for speed)
     char msg[256];
     snprintf(msg, sizeof(msg), "Stored %d chunks out of %d", stored, valid);
+    log_info(msg);
 }
 
 // Import call_graph.json

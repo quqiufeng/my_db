@@ -207,6 +207,7 @@ CACHE_DIR="/memory"        # KV Cache 目录
 JOBS=""                             # 并行进程数（默认 auto）
 PROJECT_NAME=""                     # 项目名（用于目录命名）
 EXCLUDE_DIRS=""
+PLUGINS=""                          # 插件注册表路径
 
 # 解析命令行参数
 while [[ $# -gt 0 ]]; do
@@ -239,6 +240,10 @@ while [[ $# -gt 0 ]]; do
             EXCLUDE_DIRS="$2"
             shift 2
             ;;
+        --plugins)
+            PLUGINS="$2"
+            shift 2
+            ;;
         --help|-h)
             echo "Usage: $0 <source> [namespace] [options]"
             echo ""
@@ -254,6 +259,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --jobs <n>         Parallel jobs"
             echo "  --name <name>      Project name"
             echo "  --exclude-dir <dirs>  Comma-separated dirs to skip"
+            echo "  --plugins <path>   Plugin registry JSON for code_indexer"
             echo ""
             echo "Examples:"
             echo "  $0 https://github.com/redis/redis"
@@ -332,6 +338,7 @@ log "Skip vectors: $SKIP_VECTORS"
 log "Skip callgraph: $SKIP_CALLGRAPH"
 log "Skip dataflow: $SKIP_DATAFLOW"
 log "Exclude dirs: ${EXCLUDE_DIRS:-none}"
+log "Plugins: ${PLUGINS:-none}"
 log "================================================================"
 
 # =============================================================================
@@ -392,7 +399,11 @@ EXCLUDE_ARG=""
 if [ -n "$EXCLUDE_DIRS" ]; then
     EXCLUDE_ARG="--exclude-dir $EXCLUDE_DIRS"
 fi
-if ! "$INDEXER" "$SOURCE_DIR" "$ANALYSIS_DIR" "$JOBS" $EXCLUDE_ARG 2>&1; then
+PLUGIN_ARG=""
+if [ -n "$PLUGINS" ]; then
+    PLUGIN_ARG="--plugins $PLUGINS"
+fi
+if ! "$INDEXER" "$SOURCE_DIR" "$ANALYSIS_DIR" "$JOBS" $EXCLUDE_ARG $PLUGIN_ARG 2>&1; then
     warn "Indexer returned non-zero, continuing..."
 fi
 
