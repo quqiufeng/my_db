@@ -27,16 +27,18 @@ LLM_TEMPERATURE=1.0
 - Type any question or coding task.
 - `/task <description>` — set the current task.
 - `/quit` or `/exit` — leave.
-
 - `goodbye` — say goodbye and exit the REPL politely.
 
 ## Goodbye Function
 
-```
-goodbye()
+```python
+def goodbye():
+    """Print a farewell message and exit the REPL."""
+    print("Goodbye!")
+    exit(0)
 ```
 
-A built-in function that prints `Goodbye!` and exits the REPL cleanly.
+A simple function that prints `Goodbye!` and exits the REPL cleanly.
 
 ## Architecture
 
