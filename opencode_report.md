@@ -12,6 +12,7 @@
 | 分析输出 | /opt/code_caches/opencode_cache |
 | 分析时间 | 2026-06-15 |
 | 索引器 | `typescript-indexer`（C + tree-sitter） |
+| 分析命令 | `./analyze_nodejs_repo.sh /opt/opencode /code/opencode --jobs 4` |
 
 | 指标 | 数值 |
 |------|------|
@@ -19,23 +20,24 @@
 | 代码 Chunks | 10218 |
 | 覆盖源文件 | 1015 |
 | 语义向量 | 10218 × 768 |
-| HNSW 索引 | ~32.79 MB |
-| KV Cache keys | 10230 |
+| HNSW 索引 | 32.79 MB |
+| KV Cache keys | 10206 |
+| 导入成功 chunks | 10193 / 10218 |
 
-> 注：Chunks 数量从 ctags 基线的 31691 降至 10218， because the TypeScript plugin 只提取语义级声明（函数、类型、类、接口、方法），过滤掉了 ctags 产生的成员/字段/变量/局部变量等噪声，搜索和报告质量更高。
+> 注：Chunks 数量从 ctags 基线的 31691 降至 10218， because the TypeScript AST plugin 只提取语义级声明（函数、类型、类、接口、方法），过滤掉了 ctags 产生的成员/字段/变量等噪声，搜索和报告质量更高。少量 chunks（约 25 个）因同名同文件冲突未导入。
 
 ## 2. 技术栈
 
 - **语言**: TypeScript（主项目）、少量 Bun/Node 脚本
 - **运行时/包管理**: Bun（`bun.lock`、`bunfig.toml`）
-- **核心框架**: Effect-TS（`Effect`、`Layer`、`Ref`、`Schema` 贯穿核心）
+- **核心框架**: Effect-TS（`Effect`、`Layer`、`Ref`、`Schema`、`Context.Service` 贯穿核心）
 - **UI 框架**: SolidJS（`packages/app`、`packages/tui`）
-- **架构模式**: 依赖注入（Layer）、函数式编程（Effect）、Schema 驱动数据校验
+- **架构模式**: 依赖注入（Layer）、函数式编程（Effect）、Schema 驱动数据校验、Context Service 模式
 - **Monorepo**: `packages/` 多包结构，含 SDK、CLI、桌面端、云端控制台
 
 ## 3. 包结构
 
-按 TypeScript 插件提取的声明数量分布：
+按 TypeScript AST 插件提取的声明数量分布：
 
 ```
 packages/
@@ -74,7 +76,7 @@ packages/
 
 ### 5.1 会话与消息系统
 
-核心文件：`packages/core/src/session/`
+核心文件：`packages/core/src/session/`、`packages/opencode/src/session/`
 
 - `message.ts`
   - 使用 `Schema.Class` 定义消息类型：`User`、`Assistant`、`Shell`、`System`、`Synthetic`、`Compaction`、`AgentSwitched`、`ModelSwitched`
@@ -114,6 +116,11 @@ packages/
   - 上下文压缩引擎
   - 定义 `Compaction` 消息 schema：`summary`、`recent`、`reason`
 
+- `message-v2.ts`
+  - `filterCompacted()` 控制压缩消息在历史中的保留与丢弃
+  - 通过 `tail_start_id` 找到压缩后需要保留的尾部消息
+  - 支持 `completed` 集合标记已完成的 assistant turn
+
 - SDK 生成的类型 `SessionMessageCompaction`（`packages/sdk/js/src/v2/gen/types.gen.ts`）
   ```typescript
   type SessionMessageCompaction = {
@@ -139,17 +146,23 @@ packages/
     - `abort`（AbortSignal）
     - `metadata()`, `ask()`（与 UI/会话交互）
 
-- 语义搜索发现的工具相关声明：`tool`、`ExecutableTool`、`settle`、`ExamplePlugin`
+- Shell 工具（`packages/opencode/src/tool/shell/prompt.ts`）
+  - `renderPrompt(template, values)` 用 `${key}` 占位符渲染 prompt
+
+- Bash 命令提取（`packages/opencode/src/cli/cmd/run/session-data.ts`）
+  - `bashCommand(part: ToolPart)` 从 tool part 中提取 `input.command`
 
 ### 5.3 Agent 与子代理
 
 - `Agent` 类型在多个包中出现（`packages/core`、`packages/opencode`）
-- 子代理入口：`showSubagent`、`clearSubagent`
-- `attachAgent` 用于把 agent 绑定到会话
+- `localAgent()`（`packages/opencode/src/cli/cmd/run.ts`）：加载本地 agent，拒绝 subagent 作为主 agent
+- `attachAgent()`：连接远程 opencode 实例的 agent 列表
+- 子代理数据管理：`createSubagentData()`、`snapshotSubagentData()`、`reduceSubagentData()`
 
 ### 5.4 LLM Provider
 
 - `packages/llm/` 提供 provider 抽象
+- `packages/core/src/github-copilot/copilot-provider.ts`：`provider(modelId) = createChatModel(modelId)`
 - 搜索发现：`requireBaseURL`、`anthropicOptions`、`geminiOptions`
 - 支持多 provider 配置与错误处理（`invalidRequest`、`eventError`）
 
@@ -158,55 +171,130 @@ packages/
 - `buildFileTree`、`FileTreeNode`、`visit`：文件树构建与遍历
 - `splitGitPatch`、`fileFromPatchChunk`、`diff`：Git diff/patch 处理
 - `invalidateFromWatcher`、`WatcherOps`：文件变更监听
+- `createFileViewCache`（`packages/app/src/context/file/view-cache.ts`）：基于 SolidJS root 的文件视图缓存，带 LRU 和作用域生命周期
+- `reconnectWithDirectory`（`packages/tui/src/context/editor.ts`）：目录切换后重连 LSP/编辑器后端
 
 ### 5.6 Prompt 与 MCP
 
 - `usePrompt`、`promptEnvVar`、`PromptMode`：prompt 模板管理
-- `MCPClient`、`mcpConfig`、`server`：MCP（Model Context Protocol）服务端/客户端支持
+- `renderPrompt`：简单的 `${var}` 模板替换
+- `MCPClient`（`packages/opencode/src/mcp/index.ts`）：Model Context Protocol 客户端
+- `mcpConfig`（`packages/opencode/src/acp/service.ts`）：把 MCP server 配置转换为 remote/local 两种形式
+  ```typescript
+  function mcpConfig(server: McpServer) {
+    if ("type" in server) {
+      return { type: "remote", url: server.url, headers: ... }
+    }
+    return { type: "local", command: [...], environment: ... }
+  }
+  ```
 
-### 5.7 上下文管理相关
+### 5.7 上下文管理（Context Service）
 
-- `createMainWindow`、`OpenCodeWindow`、`wireWindowRecovery`：桌面窗口生命周期
-- `updateMessage`：会话消息更新
-- `syncSessionModel`：本地与远端会话模型同步
+opencode 大量使用 Effect 的 `Context.Service` 模式管理依赖：
+
+- `RequestContextRef`（`packages/core/src/plugin/layer-map.example.ts`）
+  ```typescript
+  class RequestContextRef extends Context.Service<RequestContextRef, RequestContext>()(
+    "@opencode/example/RequestContextRef",
+  ) {}
+  ```
+
+- `ContextLimitLoader`（`packages/opencode/src/acp/usage.ts`）：上下文限制加载服务
+
+- `provideInstanceContext`（`packages/opencode/src/server/routes/instance/httpapi/middleware/instance-context.ts`）
+  - HTTP 中间件：从 route 解析 workspace/directory，注入 `InstanceRef` 和 `WorkspaceRef`
+  - 典型 Effect 服务提供模式：
+    ```typescript
+    return yield* effect.pipe(
+      Effect.provideService(InstanceRef, ctx),
+      Effect.provideService(WorkspaceRef, route.workspaceID),
+    )
+    ```
+
+### 5.8 TUI 与 CLI
+
+- `runTui`（`packages/cli/src/tui.ts`）：启动 TUI 客户端
+  ```typescript
+  function runTui(transport: { url: string; headers: RequestInit["headers"] }) {
+    const config = TuiConfig.resolve({}, { terminalSuspend: false })
+    return run({ ...transport, args: {}, config, fetch: gracefulFetch, pluginHost: {...} })
+      .pipe(Effect.provide(Global.defaultLayer))
+  }
+  ```
+
+- `PluginKind = "server" | "tui"`（`packages/opencode/src/plugin/shared.ts`）：插件分服务端和 TUI 两类
+- `resolveExternalPlugins`、`addExternalPluginEntries`：外部插件发现与加载
+
+### 5.9 统计与遥测
+
+- `statsProxy`（`packages/console/app/src/lib/stats-proxy.ts`）：把 stats 请求代理到 `stats.opencode.ai`
+- `SessionStats`：会话级统计接口
+- `ProviderStatMetric`：provider 性能指标
+
+### 5.10 主题与 UI
+
+- `currentTheme`、`setTheme`、`refreshTheme`、`ThemeTool`：主题切换工具
+- `packages/ui/` 提供跨包 UI 组件与主题 token
 
 ## 6. 关键设计模式
 
 1. **Effect-TS 全栈**
    - 几乎所有核心流程都用 `Effect.gen` 编排
-   - 依赖注入通过 `Layer` 实现
+   - 依赖注入通过 `Layer` 和 `Context.Service` 实现
    - 状态用 `Ref` 管理
 
 2. **Schema 驱动**
    - 消息、事件、配置全部用 `@effect/schema` 定义
    - 运行时类型安全 + 序列化
 
-3. **插件化工具**
+3. **Context Service 模式**
+   - 大量 `Context.Service<Id, Interface>()` 定义服务标识
+   - HTTP 中间件、插件层、实例上下文都通过 `Effect.provideService` 注入
+
+4. **插件化工具**
    - 工具 = schema + execute
    - `ToolContext` 提供统一执行环境
+   - 插件类型：`server` | `tui`
 
-4. **Compaction 作为一级概念**
+5. **Compaction 作为一级概念**
    - 不是后期补丁，而是消息模型内置类型
    - 自动/手动触发，生成 summary + recent context
+   - `filterCompacted()` 精细控制历史保留
 
-5. **Monorepo 分层**
+6. **Monorepo 分层**
    - `core`：引擎
    - `opencode`：CLI/TUI/控制面
    - `app`/`tui`/`desktop`：不同 UI 形态
    - `sdk/js`：对外 SDK
 
-## 7. 索引改进说明
+## 7. 热点文件
+
+| Chunks | 文件 | 说明 |
+|--------|------|------|
+| 1211 | `packages/sdk/js/src/v2/gen/types.gen.ts` | SDK v2 生成的类型定义 |
+| 431 | `packages/sdk/js/src/gen/types.gen.ts` | SDK v1 生成的类型定义 |
+| 311 | `packages/sdk/js/src/v2/gen/sdk.gen.ts` | SDK v2 生成的客户端代码 |
+| 107 | `packages/opencode/src/cli/cmd/run/tool.ts` | CLI run 命令工具处理 |
+| 104 | `packages/sdk/js/src/gen/sdk.gen.ts` | SDK v1 生成的客户端代码 |
+| 85 | `packages/stats/core/src/honeycomb-backfill.ts` | 遥测数据回填 |
+| 73 | `packages/opencode/src/plugin/tui/runtime.ts` | TUI 插件运行时 |
+| 72 | `packages/stats/core/src/domain/home.ts` | 统计首页领域模型 |
+| 66 | `packages/opencode/src/provider/provider.ts` | Provider 配置与选择 |
+| 56 | `packages/opencode/src/cli/cmd/run/subagent-data.ts` | 子代理数据管理 |
+
+## 8. 索引改进说明
 
 本次分析使用自研 TypeScript AST 插件（C + tree-sitter）替代 ctags，改进点：
 
-- **语义精准**：只提取函数、类型、类、接口、方法，不生成成员/字段噪声
-- **TypeScript 感知**：正确处理 `type`、`interface`、`class`、箭头函数、泛型
+- **语义精准**：只提取函数、类型、类、接口、方法，不生成成员变量和局部变量噪声
+- **TypeScript 感知**：正确处理 `type`、`interface`、`class`、箭头函数、泛型、重载
 - **内容完整**：保留函数签名与完整 body 内容，便于 LLM 理解
-- **导出信息**：通过 `tags` 标记 `export`（本次未在 meta 中展开，保留在插件输出）
+- **导出信息**：通过 `tags` 标记 `export`
 
 因此报告基于更高质量的代码 chunks，结构与实现细节比 ctags 版本更准确。
 
-## 8. 查询示例
+## 9. 查询示例
 
 ```bash
 # 项目概览
@@ -214,9 +302,14 @@ packages/
 
 # 语义搜索
 ./explore_repo.sh /code/opencode search "session compaction"
+./explore_repo.sh /code/opencode search "MCP server"
+./explore_repo.sh /code/opencode search "tool execution"
 
-# 精确符号
+# 精确符号（chunk key 格式）
 ./tools/cache_query "/code/opencode/chunks//opt/opencode/packages/core/src/session/runner/to-llm-message.ts/toLLMMessage" --type exact --pretty
+
+# 热点符号
+./explore_repo.sh /code/opencode top 20
 ```
 
 ---
