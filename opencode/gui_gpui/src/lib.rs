@@ -610,7 +610,6 @@ impl Render for ChatView {
 
         // Bottom input + status bar
         let input_bar = h_flex()
-            .gap_2()
             .p_2()
             .border_t_1()
             .border_color(border)
@@ -620,15 +619,6 @@ impl Render for ChatView {
                     .flex_1()
                     .h(px(80.0))
                     .child(Input::new(&self.input_state).h_full()),
-            )
-            .child(
-                Button::new("send")
-                    .primary()
-                    .label("Send")
-                    .on_click(cx.listener(move |this, _event, window, cx| {
-                        let text = this.input_state.read(cx).value().to_string();
-                        this.send_message(text, window, cx);
-                    })),
             );
 
         let status_bar = h_flex()
