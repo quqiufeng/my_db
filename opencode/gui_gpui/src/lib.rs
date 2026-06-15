@@ -669,6 +669,7 @@ pub extern "C" fn gui_run(app_ptr: *mut c_void) -> c_int {
             let ht = std::sync::Arc::make_mut(&mut theme.highlight_theme);
             ht.style.editor_background = Some(gpui::rgb(0x1e1e1e).into());
         }
+        gpui_component::theme::Theme::change(gpui_component::theme::ThemeMode::Dark, None, cx);
 
         let executor = cx.foreground_executor().clone();
         {
@@ -744,6 +745,10 @@ pub extern "C" fn gui_run(app_ptr: *mut c_void) -> c_int {
                     let app: &mut GuiApp = unsafe { &mut *app_ptr };
                     *app.view.lock().unwrap() = Some(chat_view.downgrade());
                 }
+
+                input_state_for_view.update(cx, |state, cx| {
+                    state.focus(window, cx);
+                });
 
                 cx.new(|cx| Root::new(chat_view, window, cx))
             },
