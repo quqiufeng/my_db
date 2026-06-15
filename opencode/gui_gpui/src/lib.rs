@@ -1,10 +1,10 @@
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int, c_void};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 
 use gpui::prelude::FluentBuilder;
-use gpui::*;
+use gpui::{InteractiveElement as _, StatefulInteractiveElement as _, *};
 use gpui_component::{
     button::{Button, ButtonVariants},
     input::{Input, InputEvent, InputState, TabSize},
@@ -40,6 +40,9 @@ pub struct GuiApp {
     /// Foreground executor captured during gui_run so C callbacks can dispatch
     /// UI updates to the GPUI main thread.
     executor: Mutex<Option<ForegroundExecutor>>,
+
+    /// Sender to notify the foreground task that the UI needs a redraw.
+    ui_tx: Mutex<Option<mpsc::Sender<()>>>,
 }
 
 #[derive(Clone)]
@@ -60,24 +63,10 @@ impl GuiApp {
         });
     }
 
-    fn refresh_ui(&self,
-        _f: impl FnOnce(&mut ChatView, &mut Window, &mut Context<ChatView>) + Send + 'static,
-    ) {
-        if let Ok(guard) = self.executor.lock() {
-            if let Some(exec) = guard.as_ref().cloned() {
-                if let Some(_view) = self
-                    .view
-                    .lock()
-                    .unwrap()
-                    .as_ref()
-                    .and_then(|v| v.upgrade())
-                {
-                    exec.spawn(async move {
-                        // C callbacks run on arbitrary threads and don't have a Window/AsyncWindowContext.
-                        // We rely on the Render loop polling shared state, so this is a no-op placeholder.
-                    })
-                    .detach();
-                }
+    fn refresh_ui(&self) {
+        if let Ok(guard) = self.ui_tx.lock() {
+            if let Some(tx) = guard.as_ref() {
+                let _ = tx.send(());
             }
         }
     }
@@ -139,6 +128,7 @@ pub extern "C" fn gui_app_create(config_json: *const c_char) -> *mut c_void {
         files: Arc::new(Mutex::new(files)),
         view: Mutex::new(None),
         executor: Mutex::new(None),
+        ui_tx: Mutex::new(None),
     };
 
     Box::into_raw(Box::new(app)) as *mut c_void
@@ -212,7 +202,7 @@ pub extern "C" fn gui_stream_delta(
             });
         }
     }
-    app.refresh_ui(|_this, _window, _cx| {});
+    app.refresh_ui();
 }
 
 #[no_mangle]
@@ -229,7 +219,7 @@ pub extern "C" fn gui_append_message(
     let text_str = unsafe { CStr::from_ptr(text).to_string_lossy().to_string() };
     let app: &GuiApp = unsafe { &*(app as *mut GuiApp) };
     app.append(&role_str, text_str, None);
-    app.refresh_ui(|_this, _window, _cx| {});
+    app.refresh_ui();
 }
 
 #[no_mangle]
@@ -250,7 +240,7 @@ pub extern "C" fn gui_tool_output(
         format!("[{}] {}", tool_id_str, output_str),
         Some(tool_id_str),
     );
-    app.refresh_ui(|_this, _window, _cx| {});
+    app.refresh_ui();
 }
 
 fn notify_app(_app: &GuiApp) {
@@ -260,6 +250,9 @@ fn notify_app(_app: &GuiApp) {
 struct ChatView {
     app: *mut GuiApp,
     input_state: Entity<InputState>,
+    editor_state: Entity<InputState>,
+    editor_path: Option<PathBuf>,
+    editor_visible: bool,
 }
 
 impl ChatView {
@@ -284,6 +277,38 @@ impl ChatView {
             }
         }
         cx.notify();
+    }
+
+    fn open_file(&mut self,
+        path: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let content = std::fs::read_to_string(&path).unwrap_or_else(|e| format!("Error reading file: {}", e));
+        let lang = language_for_path(&path);
+        self.editor_state.update(cx, |state, _cx| {
+            state.set_value(content, window, _cx);
+        });
+        self.editor_path = Some(path);
+        self.editor_visible = true;
+        let _ = lang;
+        cx.notify();
+    }
+}
+
+fn language_for_path(path: &Path) -> &'static str {
+    match path.extension().and_then(|e| e.to_str()) {
+        Some("rs") => "rust",
+        Some("py") => "python",
+        Some("js") | Some("ts") | Some("jsx") | Some("tsx") => "javascript",
+        Some("c") | Some("h") | Some("cpp") | Some("hpp") | Some("cc") => "c",
+        Some("go") => "go",
+        Some("lua") => "lua",
+        Some("md") | Some("markdown") => "markdown",
+        Some("json") => "json",
+        Some("toml") => "toml",
+        Some("yaml") | Some("yml") => "yaml",
+        _ => "plaintext",
     }
 }
 
@@ -314,12 +339,6 @@ impl Render for ChatView {
                     _ => ("Unknown", theme.colors.foreground, theme.colors.background),
                 };
                 let is_tool = role == "tool";
-                let tool_header = if is_tool {
-                    let summary = m.text.split('\n').next().unwrap_or("").to_string();
-                    Some(summary)
-                } else {
-                    None
-                };
                 let expanded = m.expanded;
                 let display_text = m.text.clone();
                 v_flex()
@@ -361,21 +380,59 @@ impl Render for ChatView {
                         v_flex()
                             .gap_1()
                             .p_2()
-                            .children(files.into_iter().map(move |path| {
-                                let rel = path
-                                    .strip_prefix(&project_root)
-                                    .unwrap_or(&path)
-                                    .to_string_lossy()
-                                    .to_string();
-                                let is_dir = path.is_dir();
-                                let icon = if is_dir { "📁" } else { "📄" };
-                                div()
-                                    .child(format!("{} {}", icon, rel))
-                                    .text_sm()
-                                    .cursor_pointer()
+                            .children(files.into_iter().enumerate().map({
+                                let cx_ref = &cx;
+                                move |(idx, path)| {
+                                    let rel = path
+                                        .strip_prefix(&project_root)
+                                        .unwrap_or(&path)
+                                        .to_string_lossy()
+                                        .to_string();
+                                    let is_dir = path.is_dir();
+                                    let icon = if is_dir { "📁" } else { "📄" };
+                                    let path_for_click = path.clone();
+                                    div()
+                                        .id(format!("file-{}", idx))
+                                        .child(format!("{} {}", icon, rel))
+                                        .text_sm()
+                                        .cursor_pointer()
+                                        .when(!is_dir, |this| {
+                                            this.on_click(cx_ref.listener(move |this, _event, window, cx| {
+                                                this.open_file(path_for_click.clone(), window, cx);
+                                            }))
+                                        })
+                                }
                             })),
                     ),
             );
+
+        let editor_panel = v_flex()
+            .h(px(240.0))
+            .border_t_1()
+            .border_color(theme.colors.border)
+            .child(
+                div()
+                    .p_2()
+                    .font_weight(FontWeight::BOLD)
+                    .child(
+                        self.editor_path
+                            .as_ref()
+                            .map(|p| p.file_name().unwrap_or_default().to_string_lossy().to_string())
+                            .unwrap_or_else(|| "Editor".to_string()),
+                    ),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .child(Input::new(&self.editor_state,
+                    ).h_full()),
+            );
+
+        let right_panel = v_flex()
+            .w(px(280.0))
+            .h_full()
+            .child(file_tree)
+            .when(self.editor_visible, |this| this.child(editor_panel));
 
         h_flex()
             .size_full()
@@ -391,7 +448,9 @@ impl Render for ChatView {
                     .child(
                         div()
                             .h_32()
-                            .child(Input::new(&self.input_state).h_full()),
+                            .child(Input::new(
+                                &self.input_state,
+                            ).h_full()),
                     )
                     .child(
                         Button::new("send")
@@ -403,7 +462,7 @@ impl Render for ChatView {
                             })),
                     ),
             )
-            .child(file_tree)
+            .child(right_panel)
     }
 }
 
@@ -421,9 +480,16 @@ pub extern "C" fn gui_run(app_ptr: *mut c_void) -> c_int {
         cx.activate(true);
 
         let executor = cx.foreground_executor().clone();
+        let async_app = cx.to_async();
         {
             let app: &mut GuiApp = unsafe { &mut *app_ptr };
             *app.executor.lock().unwrap() = Some(executor);
+        }
+
+        let (ui_tx, ui_rx) = mpsc::channel::<()>();
+        {
+            let app: &mut GuiApp = unsafe { &mut *app_ptr };
+            *app.ui_tx.lock().unwrap() = Some(ui_tx);
         }
 
         let bounds = Bounds::centered(None, size(px(900.0), px(600.0)), cx);
@@ -441,10 +507,19 @@ pub extern "C" fn gui_run(app_ptr: *mut c_void) -> c_int {
                         .tab_size(TabSize { tab_size: 4, ..Default::default() })
                 });
                 let input_state_for_view = input_state.clone();
+                let editor_state = cx.new(|cx| {
+                    InputState::new(window, cx)
+                        .code_editor("plaintext")
+                        .multi_line(true)
+                        .tab_size(TabSize { tab_size: 4, ..Default::default() })
+                });
                 let chat_view = cx.new(|cx| {
                     let view = ChatView {
                         app: app_ptr,
                         input_state,
+                        editor_state,
+                        editor_path: None,
+                        editor_visible: false,
                     };
                     cx.subscribe_in(
                         &input_state_for_view,
@@ -468,6 +543,20 @@ pub extern "C" fn gui_run(app_ptr: *mut c_void) -> c_int {
                     let app: &mut GuiApp = unsafe { &mut *app_ptr };
                     *app.view.lock().unwrap() = Some(chat_view.downgrade());
                 }
+
+                let weak_view = chat_view.downgrade();
+                async_app
+                    .spawn(async move |cx| {
+                        while ui_rx.recv().is_ok() {
+                            weak_view
+                                .update(cx, |_this, cx| {
+                                    cx.notify();
+                                })
+                                .ok();
+                        }
+                    })
+                    .detach();
+
                 cx.new(|cx| Root::new(chat_view, window, cx))
             },
         )
