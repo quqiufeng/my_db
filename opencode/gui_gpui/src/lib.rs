@@ -676,7 +676,7 @@ pub extern "C" fn gui_run(app_ptr: *mut c_void) -> c_int {
             *app.executor.lock().unwrap() = Some(executor);
         }
 
-        let bounds = Bounds::centered(None, size(px(900.0), px(600.0)), cx);
+        let bounds = Bounds::centered(None, size(px(1280.0), px(720.0)), cx);
 
         cx.open_window(
             WindowOptions {
