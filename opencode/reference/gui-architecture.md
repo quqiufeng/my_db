@@ -94,6 +94,24 @@ Rust GUI 引擎追加到 messages，刷新 UI
 GPUI 定时轮询触发 cx.notify()，窗口重绘
 ```
 
+## 最小可运行 Demo
+
+`opencode/gui_gpui/examples/minimal.rs` 是一个剥离了业务逻辑的最小 GPUI 窗口示例：
+
+- 直接调用 `gpui_platform::application().run`
+- 初始化 `gpui_component`
+- 打开一个 600×400 的窗口
+- 在 `Root` 中渲染一个纯绿色背景视图
+
+它的作用是验证编译环境、GPU 渲染和窗口创建是否正常。如果 GUI 出现窗口透明或无法渲染，可以先跑这个 demo 确认底层 GPUI 是否能正常工作：
+
+```bash
+cd /opt/my_db/opencode/gui_gpui
+cargo run --release --example minimal
+```
+
+这是从完整 GUI 中抽取的最小骨架，适合作为新功能的起点。
+
 ## 关键技巧：跨线程安全刷新
 
 Rust GUI 引擎不能在 C/Lua 回调线程直接调用 `cx.notify()`。本项目的做法：
