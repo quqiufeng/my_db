@@ -1307,10 +1307,10 @@ Lua: build_prompt() -> C: llm_complete(system, prompt, tools_json)
 
 当前已实现一个最小可用 GUI 原型：
 
-- **Rust 后端**：使用 `egui` + `eframe` 编译为 `libopencode_gui.so`。
+- **Rust 后端**：使用 `egui` + `eframe` 编译为 `libaicoding_gui.so`。
 - **C ABI**：暴露 `gui_app_create` / `gui_run` / `gui_on_user_message` / `gui_append_message` / `gui_stream_delta` / `gui_tool_output` 等函数。
 - **LuaJIT FFI 封装**：`gui.lua` 让 Lua 脚本可以创建窗口、注册回调、发送消息/流式片段/工具输出。
-- **集成方式**：`OPENCODE_GUI=1 ./opencode_cli ...` 启动 GUI 模式，由 Lua `run_gui()` 驱动 LLM + 工具循环，并把结果回写到聊天面板。
+- **集成方式**：`OPENCODE_GUI=1 ./aicoding ...` 启动 GUI 模式，由 Lua `run_gui()` 驱动 LLM + 工具循环，并把结果回写到聊天面板。
 
 选择 egui 的原因是：它无需系统 GUI 开发库即可编译，适合快速验证 C ABI + Lua FFI 架构。长期目标仍是 GPUI + gpui-component（GPU 渲染、Dock、编辑器组件），但 C ABI 和 Lua FFI 层保持兼容，后端可以平滑替换。
 

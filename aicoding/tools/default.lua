@@ -4,6 +4,15 @@
 
 local cjson = require("cjson")
 local permissions = require("permissions")
+local memory = require("memory")
+local checkpoint = require("checkpoint")
+
+-- Shell-quote a string for use inside a POSIX shell command.
+-- Uses single quotes so the only thing to escape is a single quote itself.
+local function shell_quote(s)
+    if not s then return "''" end
+    return "'" .. s:gsub("'", "'\"'\"'") .. "'"
+end
 
 -- Pure Lua helpers: base64 and sha256 (avoid requiring unregistered C functions)
 local base64_chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
@@ -135,14 +144,40 @@ local function finalize_schema(schema)
 end
 
 local project_root = "."
+local session_id = "default"
 
 function M.set_project_root(path)
     project_root = path or "."
     permissions.load(project_root)
 end
 
+-- Run git diff for a single file relative to the project root.
+local function git_diff_for_file(path)
+    local root = project_root or "."
+    local rel = path
+    if path:sub(1, #root) == root then
+        rel = path:sub(#root + 1)
+        if rel:sub(1, 1) == "/" then rel = rel:sub(2) end
+    end
+    if rel == "" then rel = "." end
+    local cmd = string.format("git -C %s diff -- %s 2>&1",
+                              shell_quote(root), shell_quote(rel))
+    local f = io.popen(cmd)
+    local out = f:read("*a") or ""
+    f:close()
+    return out
+end
+
+function M.set_session_id(sid)
+    session_id = sid or "default"
+end
+
 function M.get_project_root()
     return project_root
+end
+
+function M.get_session_id()
+    return session_id
 end
 
 -- Resolve a possibly-relative path against project root
@@ -221,26 +256,33 @@ local function permit(action, resource)
     return true, nil
 end
 
+-- Create a checkpoint before destructive file operations.
+local function checkpoint_files(paths, reason)
+    local files = {}
+    for _, p in ipairs(paths) do
+        table.insert(files, { path = resolve_path(p) })
+    end
+    return checkpoint.create(session_id, project_root, files, reason)
+end
+
 M.tools = {
     {
         name = "kv_search",
-        description = "Search the KV Cache for relevant code, facts, or history.",
+        description = "Search the KV Cache for relevant code, facts, or history. Use search_type='semantic' for natural language code search over indexed repos.",
         parameters = {
             query = { type = "string", required = true },
-            namespace = { type = "string", required = false },
+            namespace = { type = "string", required = false, description = "KV namespace prefix (e.g. /agent/default/facts) or repo namespace for semantic search (e.g. /code/local/linux)" },
             search_type = { type = "string", enum = {"semantic", "prefix", "regex", "tag"}, required = false }
         },
         handler = function(args)
-            local q = args.query or ""
-            local ns = args.namespace or ""
-            local prefix = ns
-            if prefix ~= "" and not prefix:match("/$") then prefix = prefix .. "/" end
-            local results = opencode.cache_search_prefix(prefix, 10)
-            local out = {}
-            for _, r in ipairs(results) do
-                table.insert(out, { key = r.key, value = r.value, score = r.score })
+            local results, err = memory.search(args.query, {
+                namespace = args.namespace,
+                search_type = args.search_type
+            })
+            if not results then
+                return { ok = false, error = tostring(err) }
             end
-            return { ok = true, results = out }
+            return { ok = true, results = results }
         end
     },
     {
@@ -250,8 +292,23 @@ M.tools = {
             key = { type = "string", required = true }
         },
         handler = function(args)
-            local val = opencode.cache_get(args.key)
+            local val = memory.read(args.key)
             return { ok = val ~= nil, value = val }
+        end
+    },
+    {
+        name = "kv_set",
+        description = "Write a fact or memory into the KV Cache. Optional TTL and namespace prefix.",
+        parameters = {
+            key = { type = "string", required = true, description = "Key to write. If namespace is given, it is prepended." },
+            value = { type = "string", required = true, description = "Value to store (JSON string recommended)" },
+            namespace = { type = "string", required = false, description = "Namespace prefix, e.g. /agent/default/facts" },
+            ttl_seconds = { type = "integer", required = false, description = "Time-to-live in seconds (0 = permanent)" }
+        },
+        handler = function(args)
+            local full_key = memory.key(args.key, args.namespace)
+            local ok = memory.write(full_key, args.value, args.ttl_seconds)
+            return { ok = ok, key = full_key }
         end
     },
     {
@@ -262,11 +319,7 @@ M.tools = {
             repo = { type = "string", required = true }
         },
         handler = function(args)
-            local cmd = string.format("cd /opt/my_db && ./tools/cache_query %s --repo %s --type context 2>&1",
-                                        cjson.encode(args.symbol), cjson.encode(args.repo))
-            local f = io.popen(cmd)
-            local out = f:read("*a") or ""
-            local ok = f:close()
+            local ok, out = memory.context(args.symbol, args.repo)
             return { ok = ok, output = truncate(out) }
         end
     },
@@ -380,6 +433,13 @@ M.tools = {
             local ok, err = permit("edit", resolve_path(args.path))
             if not ok then return { ok = false, error = err } end
             local path = resolve_path(args.path)
+
+            -- Checkpoint before edit
+            local cp = checkpoint_files({path}, "edit")
+            if not cp.ok then
+                return { ok = false, error = "checkpoint failed: " .. tostring(cp.error) }
+            end
+
             local raw, rerr = read_file(path, true)
             if not raw then
                 return { ok = false, error = rerr }
@@ -407,13 +467,22 @@ M.tools = {
                 return { ok = false, error = string.format("expected %d match(es) but found %d", expected, count) }
             end
 
-            local new_content = content:gsub(old, args.new_string, expected)
+            local new_content = content
+            local pos = 1
+            for _ = 1, expected do
+                local idx = new_content:find(old, pos, true)
+                if not idx then break end
+                new_content = new_content:sub(1, idx - 1) .. args.new_string .. new_content:sub(idx + #old)
+                pos = idx + #args.new_string
+            end
+
             local final = bom_prefix .. new_content
             local wok, werr = write_file(path, final)
             if not wok then
                 return { ok = false, error = tostring(werr) }
             end
-            return { ok = true, replaced = old, with = args.new_string, count = expected }
+            local diff_out = git_diff_for_file(path)
+            return { ok = true, replaced = old, with = args.new_string, count = expected, checkpoint = cp.checkpoint_id, diff = diff_out }
         end
     },
     {
@@ -439,6 +508,14 @@ M.tools = {
                 return { ok = false, error = "file already exists: " .. path }
             end
 
+            -- Checkpoint before overwrite
+            if exists then
+                local cp = checkpoint_files({path}, "write")
+                if not cp.ok then
+                    return { ok = false, error = "checkpoint failed: " .. tostring(cp.error) }
+                end
+            end
+
             if args.expected_hash and exists then
                 local hash = sha256(existing)
                 if hash ~= args.expected_hash then
@@ -451,11 +528,17 @@ M.tools = {
                 content = existing .. content
             end
 
+            local dir = path:match("^(.*)/")
+            if dir then
+                os.execute("mkdir -p " .. shell_quote(dir))
+            end
+
             local cok, cerr = write_file(path, content)
             if not cok then
                 return { ok = false, error = tostring(cerr) }
             end
-            return { ok = true, written = path, bytes = #content }
+            local diff_out = exists and git_diff_for_file(path) or ""
+            return { ok = true, written = path, bytes = #content, diff = diff_out }
         end
     },
     {
@@ -470,18 +553,40 @@ M.tools = {
             if not ok then return { ok = false, error = err } end
             local patch = args.patch
             local target = args.file_path and resolve_path(args.file_path) or ""
+
+            -- Determine files that will be modified by parsing the patch
+            local paths_to_backup = {}
+            if target ~= "" then
+                table.insert(paths_to_backup, target)
+            else
+                for line in patch:gmatch("[^\r\n]+") do
+                    local f = line:match("^--- (.+)$")
+                    if f and f ~= "/dev/null" then
+                        -- Strip optional timestamp
+                        f = f:gsub("\t.*$", "")
+                        table.insert(paths_to_backup, resolve_path(f))
+                    end
+                end
+            end
+
+            -- Checkpoint affected existing files
+            local cp = checkpoint_files(paths_to_backup, "apply_patch")
+            if not cp.ok then
+                return { ok = false, error = "checkpoint failed: " .. tostring(cp.error) }
+            end
+
             local tmp = os.tmpname() .. ".patch"
             local f = io.open(tmp, "w")
             if not f then return { ok = false, error = "cannot create temp patch file" } end
             f:write(patch)
             f:close()
-            local cmd = target ~= "" and string.format("patch -p0 --forward -i %s -- %s 2>&1", cjson.encode(tmp), cjson.encode(target))
-                or string.format("patch -p1 --forward -i %s 2>&1", cjson.encode(tmp))
+            local cmd = target ~= "" and string.format("patch -p0 --forward -i %s -- %s 2>&1", shell_quote(tmp), shell_quote(target))
+                or string.format("patch -p1 --forward -i %s 2>&1", shell_quote(tmp))
             local p = io.popen(cmd)
             local out = p:read("*a") or ""
             local pok = p:close()
             os.remove(tmp)
-            return { ok = pok, output = truncate(out) }
+            return { ok = pok, output = truncate(out), checkpoint = cp.checkpoint_id }
         end
     },
     {
@@ -494,7 +599,7 @@ M.tools = {
         handler = function(args)
             local base = resolve_path(args.path or ".")
             local pattern = args.pattern
-            local cmd = string.format("cd %s && find . -path %s -print 2>/dev/null | head -200", cjson.encode(base), cjson.encode(pattern))
+            local cmd = string.format("cd %s && find . -name %s -print 2>/dev/null | head -200", shell_quote(base), shell_quote(pattern))
             local f = io.popen(cmd)
             local out = f:read("*a") or ""
             f:close()
@@ -516,9 +621,9 @@ M.tools = {
         handler = function(args)
             local base = resolve_path(args.path or ".")
             local pattern = args.pattern
-            local glob = args.glob and string.format("-g %s", cjson.encode(args.glob)) or ""
+            local glob = args.glob and string.format("-g %s", shell_quote(args.glob)) or ""
             local cmd = string.format("cd %s && rg --line-number --no-heading %s %s 2>/dev/null | head -200",
-                                      cjson.encode(base), glob, cjson.encode(pattern))
+                                      shell_quote(base), glob, shell_quote(pattern))
             local f = io.popen(cmd)
             local out = f:read("*a") or ""
             f:close()
@@ -537,22 +642,29 @@ M.tools = {
             if not ok then return { ok = false, error = err } end
             local path = resolve_path(args.path)
 
+            local existing = read_file(path, true)
+            if not existing then
+                return { ok = false, error = "file not found: " .. path }
+            end
+
             if args.expected_hash then
-                local existing = read_file(path, true)
-                if not existing then
-                    return { ok = false, error = "file not found: " .. path }
-                end
                 local hash = sha256(existing)
                 if hash ~= args.expected_hash then
                     return { ok = false, error = "file hash mismatch, refusing to delete" }
                 end
             end
 
+            -- Checkpoint before delete
+            local cp = checkpoint_files({path}, "file_delete")
+            if not cp.ok then
+                return { ok = false, error = "checkpoint failed: " .. tostring(cp.error) }
+            end
+
             local dok, derr = os.remove(path)
             if not dok then
                 return { ok = false, error = tostring(derr) }
             end
-            return { ok = true, deleted = path }
+            return { ok = true, deleted = path, checkpoint = cp.checkpoint_id }
         end
     },
     {
@@ -560,15 +672,17 @@ M.tools = {
         description = "Run a shell command and return stdout/stderr.",
         parameters = {
             command = { type = "string", required = true },
-            timeout = { type = "integer", required = false }
+            timeout = { type = "integer", required = false },
+            workdir = { type = "string", required = false, description = "Working directory. Defaults to project root." }
         },
         handler = function(args)
             local ok, err = permit("bash", args.command)
             if not ok then return { ok = false, error = err } end
             local cmd = args.command
             local timeout = args.timeout or 30
-            local f = io.popen(string.format("timeout %d bash -c %s 2>&1",
-                                             timeout, cjson.encode(cmd)))
+            local workdir = shell_quote(resolve_path(args.workdir) or project_root)
+            local f = io.popen(string.format("cd %s && timeout %d bash -c %s 2>&1",
+                                             workdir, timeout, shell_quote(cmd)))
             local out = f:read("*a") or ""
             local bok = f:close()
             return { ok = bok, output = truncate(out) }
@@ -584,8 +698,8 @@ M.tools = {
         handler = function(args)
             local ok, err = permit("git", args.command)
             if not ok then return { ok = false, error = err } end
-            local repo = resolve_path(args.repo_path) or "."
-            local cmd = string.format("cd %s && git %s 2>&1", cjson.encode(repo), args.command)
+            local repo = resolve_path(args.repo_path) or project_root
+            local cmd = string.format("cd %s && git %s 2>&1", shell_quote(repo), args.command)
             local f = io.popen(cmd)
             local out = f:read("*a") or ""
             local gok = f:close()
@@ -600,13 +714,13 @@ M.tools = {
             file_path = { type = "string", required = false }
         },
         handler = function(args)
-            local repo = resolve_path(args.repo_path) or "."
+            local repo = resolve_path(args.repo_path) or project_root
             local file = args.file_path or ""
             local cmd
             if file ~= "" then
-                cmd = string.format("cd %s && git diff -- %s 2>&1", cjson.encode(repo), cjson.encode(file))
+                cmd = string.format("cd %s && git diff -- %s 2>&1", shell_quote(repo), shell_quote(file))
             else
-                cmd = string.format("cd %s && git diff 2>&1", cjson.encode(repo))
+                cmd = string.format("cd %s && git diff 2>&1", shell_quote(repo))
             end
             local f = io.popen(cmd)
             local out = f:read("*a") or ""
@@ -615,27 +729,312 @@ M.tools = {
         end
     },
     {
-        name = "code_index",
-        description = "Index a code repository into KV Cache using the coding.md toolchain.",
+        name = "build",
+        description = "Run a project build/compile command and return structured output. If command is omitted, the tool auto-detects the build system (make, cargo, npm, cmake, go, python). Use this after editing code to verify changes compile. On failure, the truncated output is returned so you can fix errors.",
         parameters = {
-            source = { type = "string", required = true },
-            namespace = { type = "string", required = true },
-            language = { type = "string", required = false }
+            command = { type = "string", required = false, description = "Build command to run. Auto-detected if omitted." },
+            workdir = { type = "string", required = false, description = "Working directory. Defaults to project root." },
+            timeout = { type = "integer", required = false, description = "Timeout in seconds (default 120)." },
+            max_output_lines = { type = "integer", required = false, description = "Max lines of output to return (default 200)." }
         },
         handler = function(args)
-            local src = args.source
-            local ns = args.namespace
-            local lang = args.language or "auto"
-            local script = "analyze_repo.sh"
-            if lang == "nodejs" or lang == "typescript" then
-                script = "analyze_nodejs_repo.sh"
+            local ok, err = permit("bash", args.command or "build")
+            if not ok then return { ok = false, error = err } end
+
+            local workdir = resolve_path(args.workdir) or project_root
+            local timeout = args.timeout or 120
+            local max_lines = args.max_output_lines or 200
+
+            local function file_exists(path)
+                local f = io.open(path, "r")
+                if f then f:close(); return true end
+                return false
             end
-            local cmd = string.format("cd /opt/my_db && ./%s %s %s 2>&1",
-                                        script, cjson.encode(src), cjson.encode(ns))
+
+            local function detect_build_command(dir)
+                if file_exists(dir .. "/Cargo.toml") then
+                    return "cargo build --release"
+                elseif file_exists(dir .. "/package.json") then
+                    return "npm run build"
+                elseif file_exists(dir .. "/Makefile") or file_exists(dir .. "/makefile") then
+                    return "make"
+                elseif file_exists(dir .. "/CMakeLists.txt") then
+                    return "cmake --build build"
+                elseif file_exists(dir .. "/go.mod") then
+                    return "go build ./..."
+                elseif file_exists(dir .. "/setup.py") or file_exists(dir .. "/pyproject.toml") then
+                    return "python -m build"
+                else
+                    return nil
+                end
+            end
+
+            local cmd = args.command
+            if not cmd or cmd == "" then
+                cmd = detect_build_command(workdir)
+                if not cmd then
+                    return { ok = false, error = "Could not auto-detect build system in " .. workdir }
+                end
+            end
+
+            local full_cmd = string.format("cd %s && timeout %d bash -c %s 2>&1",
+                                           shell_quote(workdir), timeout, shell_quote(cmd))
+            local f = io.popen(full_cmd)
+            local out = f:read("*a") or ""
+            local bok = f:close()
+            local exit_code = 0
+            if not bok then
+                -- io.popen close returns nil, exit code string, or just false on error
+                -- Normalize to a numeric-ish value for downstream use.
+                exit_code = 1
+            end
+
+            -- Summarize output to a reasonable line count.
+            local lines = {}
+            for line in out:gmatch("[^\r\n]+") do
+                table.insert(lines, line)
+                if #lines >= max_lines then
+                    table.insert(lines, "... [truncated]")
+                    break
+                end
+            end
+            local summary = table.concat(lines, "\n")
+
+            -- Persist result to KV Cache for cross-turn memory.
+            local build_key = string.format("/agent/%s/builds/%d", session_id, os.time())
+            local build_record = cjson.encode({
+                command = cmd,
+                workdir = workdir,
+                exit_code = exit_code,
+                output_summary = summary,
+                ok = exit_code == 0
+            })
+            pcall(function() memory.write(build_key, build_record, 0) end)
+
+            if exit_code == 0 then
+                return { ok = true, command = cmd, exit_code = exit_code, output = summary }
+            else
+                return { ok = false, command = cmd, exit_code = exit_code, output = summary, error = "Build failed" }
+            end
+        end
+    },
+    {
+        name = "web_fetch",
+        description = "Fetch content from a URL. Useful for reading API docs, RFCs, library documentation, or StackOverflow answers. Returns truncated text/html/markdown.",
+        parameters = {
+            url = { type = "string", required = true, description = "URL to fetch" },
+            format = { type = "string", enum = {"text", "html", "markdown"}, required = false, description = "Return format. Defaults to text." },
+            timeout = { type = "integer", required = false, description = "Timeout in seconds (default 30)." },
+            max_length = { type = "integer", required = false, description = "Max characters to return (default 8000)." }
+        },
+        handler = function(args)
+            local ok, err = permit("bash", "web_fetch " .. tostring(args.url))
+            if not ok then return { ok = false, error = err } end
+
+            local url = args.url
+            local fmt = (args.format or "text"):lower()
+            local timeout = args.timeout or 30
+            local max_len = args.max_length or 8000
+
+            if url == "" then
+                return { ok = false, error = "url is empty" }
+            end
+
+            -- Validate URL scheme to prevent accidental local command execution.
+            local scheme = url:match("^([a-zA-Z][a-zA-Z0-9+.-]*):")
+            if not scheme or (scheme ~= "http" and scheme ~= "https") then
+                return { ok = false, error = "only http/https URLs are supported" }
+            end
+
+            -- Prefer lynx/w3m/pandoc for cleaner text/markdown output if available.
+            local function command_available(name)
+                local p = io.popen("command -v " .. shell_quote(name) .. " 2>/dev/null")
+                local out = p:read("*a") or ""
+                p:close()
+                return out:gsub("%s+", "") ~= ""
+            end
+
+            local cmd
+            if fmt == "html" then
+                cmd = string.format("curl -sL --max-time %d --user-agent %s %s 2>&1",
+                                    timeout, shell_quote("opencode/1.0"), shell_quote(url))
+            elseif fmt == "markdown" then
+                if command_available("pandoc") then
+                    cmd = string.format("curl -sL --max-time %d --user-agent %s %s 2>&1 | pandoc -f html -t markdown --wrap=none 2>&1",
+                                        timeout, shell_quote("opencode/1.0"), shell_quote(url))
+                elseif command_available("lynx") then
+                    cmd = string.format("curl -sL --max-time %d --user-agent %s %s 2>&1 | lynx -stdin -dump 2>&1",
+                                        timeout, shell_quote("opencode/1.0"), shell_quote(url))
+                else
+                    cmd = string.format("curl -sL --max-time %d --user-agent %s %s 2>&1",
+                                        timeout, shell_quote("opencode/1.0"), shell_quote(url))
+                end
+            else
+                if command_available("lynx") then
+                    cmd = string.format("curl -sL --max-time %d --user-agent %s %s 2>&1 | lynx -stdin -dump 2>&1",
+                                        timeout, shell_quote("opencode/1.0"), shell_quote(url))
+                elseif command_available("w3m") then
+                    cmd = string.format("curl -sL --max-time %d --user-agent %s %s 2>&1 | w3m -T text/html -dump 2>&1",
+                                        timeout, shell_quote("opencode/1.0"), shell_quote(url))
+                else
+                    -- Last resort: strip HTML tags with sed.
+                    cmd = string.format("curl -sL --max-time %d --user-agent %s %s 2>&1 | sed 's/<[^>]*>//g' 2>&1",
+                                        timeout, shell_quote("opencode/1.0"), shell_quote(url))
+                end
+            end
+
             local f = io.popen(cmd)
             local out = f:read("*a") or ""
-            local ok = f:close()
-            return { ok = ok, output = truncate(out, 8000) }
+            f:close()
+
+            -- Basic truncation with marker.
+            local truncated = false
+            if #out > max_len then
+                out = out:sub(1, max_len) .. "\n... [truncated " .. tostring(#out - max_len) .. " chars]"
+                truncated = true
+            end
+
+            -- Persist a short reference to KV Cache.
+            local fetch_key = string.format("/agent/%s/web_fetches/%d", session_id, os.time())
+            pcall(function()
+                memory.write(fetch_key, cjson.encode({
+                    url = url,
+                    format = fmt,
+                    truncated = truncated,
+                    preview = out:sub(1, 200),
+                }), 86400)
+            end)
+
+            return { ok = true, url = url, format = fmt, truncated = truncated, content = out }
+        end
+    },
+    {
+        name = "plugin_create",
+        description = "Create or overwrite a Lua plugin in the agent plugins directory. The plugin can add new tools, helpers, or hooks.",
+        parameters = {
+            name = { type = "string", required = true, description = "Plugin filename without .lua extension" },
+            code = { type = "string", required = true, description = "Full Lua source code for the plugin" },
+            scope = { type = "string", enum = {"global", "project"}, required = false, description = "global writes to /opt/my_db/aicoding/plugins/, project writes to .opencode/plugins/" }
+        },
+        handler = function(args)
+            local name = args.name:gsub("[^%w_-]", "")
+            if name == "" then return { ok = false, error = "invalid plugin name" } end
+            local scope = args.scope or "global"
+            local dir
+            if scope == "project" then
+                dir = M.get_project_root() .. "/.opencode/plugins"
+            else
+                dir = "/opt/my_db/aicoding/plugins"
+            end
+            local cmd = string.format("mkdir -p %s", cjson.encode(dir))
+            os.execute(cmd)
+            local path = dir .. "/" .. name .. ".lua"
+            local f = io.open(path, "w")
+            if not f then return { ok = false, error = "cannot write " .. path } end
+            f:write(args.code)
+            f:close()
+            return { ok = true, path = path }
+        end
+    },
+    {
+        name = "plugin_load",
+        description = "Hot-load a Lua plugin by name. After loading, any new tools returned by the plugin are merged into the agent tool set and exposed to the model immediately.",
+        parameters = {
+            name = { type = "string", required = true, description = "Plugin filename without .lua extension" },
+            scope = { type = "string", enum = {"global", "project"}, required = false, description = "Where to look for the plugin" }
+        },
+        handler = function(args)
+            local name = args.name:gsub("[^%w_-]", "")
+            local scope = args.scope or "global"
+            local dir
+            if scope == "project" then
+                dir = M.get_project_root() .. "/.opencode/plugins"
+            else
+                dir = "/opt/my_db/aicoding/plugins"
+            end
+            local f = io.open(path, "r")
+            if not f then return { ok = false, error = "plugin not found: " .. path } end
+            f:close()
+
+            -- Load plugin and capture returned tool definitions
+            local chunk, load_err = loadfile(path)
+            if not chunk then return { ok = false, error = tostring(load_err) } end
+            local ok, result = pcall(chunk)
+            if not ok then return { ok = false, error = tostring(result) } end
+
+            -- Merge returned tools into active tool set
+            if type(result) == "table" then
+                for _, tool in ipairs(result) do
+                    if type(tool) == "table" and tool.name then
+                        table.insert(M.tools, tool)
+                    end
+                end
+            end
+
+            M.register_tools("/agent/default")
+            return { ok = true, path = path, tools_loaded = type(result) == "table" and #result or 0 }
+        end
+    },
+    {
+        name = "plugin_list",
+        description = "List available and currently loaded Lua plugins.",
+        parameters = {},
+        handler = function(args)
+            local global_dir = "/opt/my_db/aicoding/plugins"
+            local project_dir = M.get_project_root() .. "/.opencode/plugins"
+            local function scan(dir)
+                local out = {}
+                local p = io.popen("ls " .. cjson.encode(dir) .. " 2>/dev/null")
+                if p then
+                    for line in p:lines() do
+                        if line:match("%.lua$") then
+                            table.insert(out, line)
+                        end
+                    end
+                    p:close()
+                end
+                return out
+            end
+            return {
+                ok = true,
+                global_plugins = scan(global_dir),
+                project_plugins = scan(project_dir),
+                note = "Use plugin_create to add a plugin, plugin_load to hot-load it."
+            }
+        end
+    },
+    {
+        name = "checkpoint_list",
+        description = "List checkpoints (automatic backups taken before edits).",
+        parameters = {
+            session_id = { type = "string", required = false, description = "Session filter. Defaults to current session." }
+        },
+        handler = function(args)
+            local sid = args.session_id or session_id
+            return checkpoint.list(sid)
+        end
+    },
+    {
+        name = "undo_last",
+        description = "Undo the most recent checkpoint by restoring backed-up files.",
+        parameters = {
+            session_id = { type = "string", required = false, description = "Session to undo. Defaults to current session." }
+        },
+        handler = function(args)
+            local sid = args.session_id or session_id
+            return checkpoint.undo_last(sid, project_root)
+        end
+    },
+    {
+        name = "rollback_to",
+        description = "Restore files to a specific checkpoint id.",
+        parameters = {
+            checkpoint_id = { type = "string", required = true },
+            session_id = { type = "string", required = false, description = "Defaults to current session." }
+        },
+        handler = function(args)
+            local sid = args.session_id or session_id
+            return checkpoint.restore(sid, project_root, args.checkpoint_id)
         end
     }
 }

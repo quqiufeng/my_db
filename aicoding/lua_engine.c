@@ -1,12 +1,24 @@
 #define _GNU_SOURCE
 #include "lua_engine.h"
 
+#include "http_async.h"
+#include "llm_client.h"
+#include "session.h"
+#include "vector_engine.h"
 #include <lauxlib.h>
 #include <lualib.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
+#include <dlfcn.h>
 
+/* GUI functions are provided by libaicoding_gui.so loaded with RTLD_GLOBAL.
+ * Resolve them dynamically so the C core can be linked without the GUI lib. */
+static void* gui_sym(const char* name) {
+    void* p = dlsym(RTLD_DEFAULT, name);
+    return p;
+}
 struct lua_engine {
     lua_State*     L;
     cache_t*       cache;
@@ -100,6 +112,71 @@ static int l_cache_search_tag(lua_State* L) {
     return 1;
 }
 
+static int l_vector_search(lua_State* L) {
+    const char* cache_dir = luaL_checkstring(L, 1);
+    const char* query = luaL_checkstring(L, 2);
+    const char* ns = luaL_optstring(L, 3, NULL);
+    int top_k = luaL_optinteger(L, 4, 10);
+    if (top_k <= 0 || top_k > 100) top_k = 10;
+
+    vector_engine_t* engine = vector_engine_open(cache_dir, "jina");
+    if (!engine) {
+        lua_pushnil(L);
+        lua_pushstring(L, vector_engine_error());
+        return 2;
+    }
+
+    vector_result_t* results = calloc(top_k, sizeof(vector_result_t));
+    if (!results) {
+        vector_engine_close(engine);
+        lua_pushnil(L);
+        lua_pushstring(L, "out of memory");
+        return 2;
+    }
+
+    int n = ns
+        ? vector_engine_search_ns(engine, query, top_k, ns, results)
+        : vector_engine_search(engine, query, top_k, results);
+
+    if (n < 0) {
+        free(results);
+        vector_engine_close(engine);
+        lua_pushnil(L);
+        lua_pushstring(L, vector_engine_error());
+        return 2;
+    }
+
+    lua_createtable(L, n, 0);
+    for (int i = 0; i < n; i++) {
+        lua_createtable(L, 0, 9);
+        lua_pushstring(L, results[i].namespace);
+        lua_setfield(L, -2, "namespace");
+        lua_pushstring(L, results[i].name);
+        lua_setfield(L, -2, "name");
+        lua_pushstring(L, results[i].file);
+        lua_setfield(L, -2, "file");
+        lua_pushstring(L, results[i].kind);
+        lua_setfield(L, -2, "kind");
+        lua_pushstring(L, results[i].language);
+        lua_setfield(L, -2, "language");
+        lua_pushstring(L, results[i].signature);
+        lua_setfield(L, -2, "signature");
+        lua_pushstring(L, results[i].content);
+        lua_setfield(L, -2, "content");
+        lua_pushinteger(L, results[i].line_start);
+        lua_setfield(L, -2, "line_start");
+        lua_pushinteger(L, results[i].line_end);
+        lua_setfield(L, -2, "line_end");
+        lua_pushnumber(L, results[i].score);
+        lua_setfield(L, -2, "score");
+        lua_rawseti(L, -2, i + 1);
+    }
+
+    free(results);
+    vector_engine_close(engine);
+    return 1;
+}
+
 static int l_source_read(lua_State* L) {
     const char* path = luaL_checkstring(L, 1);
     int line_start = luaL_optinteger(L, 2, 1);
@@ -148,6 +225,38 @@ static int l_log_info(lua_State* L) {
     const char* msg = luaL_checkstring(L, 1);
     fprintf(stderr, "[LUA] %s\n", msg);
     return 0;
+}
+
+static int l_set_clipboard(lua_State* L) {
+    const char* text = luaL_checkstring(L, 1);
+    const char* cmd = NULL;
+    if (access("/usr/bin/wl-copy", X_OK) == 0 || access("/usr/local/bin/wl-copy", X_OK) == 0) {
+        cmd = "wl-copy";
+    } else if (access("/usr/bin/xclip", X_OK) == 0 || access("/usr/local/bin/xclip", X_OK) == 0) {
+        cmd = "xclip -selection clipboard";
+    } else if (access("/usr/bin/xsel", X_OK) == 0 || access("/usr/local/bin/xsel", X_OK) == 0) {
+        cmd = "xsel --clipboard --input";
+    }
+    if (!cmd) {
+        lua_pushboolean(L, 0);
+        lua_pushstring(L, "no clipboard utility found");
+        return 2;
+    }
+    FILE* pipe = popen(cmd, "w");
+    if (!pipe) {
+        lua_pushboolean(L, 0);
+        lua_pushstring(L, "failed to open clipboard pipe");
+        return 2;
+    }
+    fputs(text, pipe);
+    int rc = pclose(pipe);
+    if (rc != 0) {
+        lua_pushboolean(L, 0);
+        lua_pushstring(L, "clipboard command failed");
+        return 2;
+    }
+    lua_pushboolean(L, 1);
+    return 1;
 }
 
 static int l_llm_complete(lua_State* L) {
@@ -201,6 +310,83 @@ static int l_llm_complete_messages(lua_State* L) {
     return 2;
 }
 
+static int l_http_request(lua_State* L) {
+    const char* url = luaL_checkstring(L, 1);
+    const char* method = luaL_checkstring(L, 2);
+    const char* headers = luaL_optstring(L, 3, NULL);
+    const char* body = luaL_optstring(L, 4, NULL);
+    http_async_req_t* req = http_async_request(url, method, headers, body);
+    if (!req) {
+        lua_pushnil(L);
+        return 1;
+    }
+    lua_pushlightuserdata(L, req);
+    return 1;
+}
+
+static int l_http_poll(lua_State* L) {
+    http_async_req_t* req = lua_touserdata(L, 1);
+    int s = http_async_poll(req);
+    lua_pushinteger(L, s);
+    return 1;
+}
+
+static int l_http_response(lua_State* L) {
+    http_async_req_t* req = lua_touserdata(L, 1);
+    const char* r = http_async_response(req);
+    if (r) lua_pushstring(L, r);
+    else lua_pushnil(L);
+    return 1;
+}
+
+static int l_http_free(lua_State* L) {
+    http_async_req_t* req = lua_touserdata(L, 1);
+    http_async_free(req);
+    return 0;
+}
+
+static int l_get_lua_state(lua_State* L) {
+    lua_pushlightuserdata(L, L);
+    return 1;
+}
+
+static int l_gui_set_tokens(lua_State* L) {
+    void* app = lua_touserdata(L, 1);
+    int total = luaL_checkinteger(L, 2);
+    int prompt = luaL_checkinteger(L, 3);
+    int completion = luaL_checkinteger(L, 4);
+    typedef void (*fn_t)(void*, int, int, int);
+    fn_t fn = (fn_t)gui_sym("gui_set_tokens");
+    if (app && fn) {
+        fn(app, total, prompt, completion);
+    }
+    lua_pushboolean(L, 1);
+    return 1;
+}
+
+static int l_gui_set_input(lua_State* L) {
+    void* app = lua_touserdata(L, 1);
+    const char* text = luaL_checkstring(L, 2);
+    typedef void (*fn_t)(void*, const char*);
+    fn_t fn = (fn_t)gui_sym("gui_set_input_value");
+    if (app && fn) {
+        fn(app, text);
+    }
+    lua_pushboolean(L, 1);
+    return 1;
+}
+
+static int l_gui_submit(lua_State* L) {
+    void* app = lua_touserdata(L, 1);
+    typedef void (*fn_t)(void*);
+    fn_t fn = (fn_t)gui_sym("gui_submit_input");
+    if (app && fn) {
+        fn(app);
+    }
+    lua_pushboolean(L, 1);
+    return 1;
+}
+
 static int l_llm_complete_raw(lua_State* L) {
     llm_client_t* llm = get_llm(L);
     if (!llm) {
@@ -235,13 +421,23 @@ static const luaL_Reg opencode_lib[] = {
     {"cache_set",          l_cache_set},
     {"cache_search_prefix", l_cache_search_prefix},
     {"cache_search_tag",   l_cache_search_tag},
+    {"vector_search",      l_vector_search},
     {"source_read",        l_source_read},
     {"log_info",           l_log_info},
+    {"set_clipboard",      l_set_clipboard},
     {"llm_complete",       l_llm_complete},
     {"llm_complete_messages", l_llm_complete_messages},
     {"llm_complete_raw",   l_llm_complete_raw},
     {"llm_protocol",       l_llm_protocol},
     {"get_model",          l_get_model},
+    {"http_request",        l_http_request},
+    {"http_poll",           l_http_poll},
+    {"http_response",       l_http_response},
+    {"http_free",           l_http_free},
+    {"get_lua_state",       l_get_lua_state},
+    {"gui_set_tokens",      l_gui_set_tokens},
+    {"gui_set_input",       l_gui_set_input},
+    {"gui_submit",          l_gui_submit},
     {NULL, NULL}
 };
 

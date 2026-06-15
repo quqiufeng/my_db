@@ -16,7 +16,7 @@
 │  - 调度工具、检查权限、管理 Todo                              │
 ├─────────────────────────────────────────────────────────────┤
 │                      LuaJIT FFI 绑定层                         │
-│  gui.lua 中通过 ffi.load("opencode_gui") 加载 libopencode_gui.so│
+│  gui.lua 中通过 ffi.load("aicoding_gui") 加载 libaicoding_gui.so│
 │  暴露：gui.create / append_message / stream_delta /           │
 │        tool_output / add_todo / set_todo_done 等              │
 ├─────────────────────────────────────────────────────────────┤
@@ -70,7 +70,7 @@ void gui_append_message(void* app, const char* role, const char* text);
 
 ```lua
 -- Lua 端通过 FFI 调用
-local gui = ffi.load("opencode_gui")
+local gui = ffi.load("aicoding_gui")
 gui.gui_append_message(app, "assistant", delta)
 ```
 
@@ -106,7 +106,7 @@ GPUI 定时轮询触发 cx.notify()，窗口重绘
 它的作用是验证编译环境、GPU 渲染和窗口创建是否正常。如果 GUI 出现窗口透明或无法渲染，可以先跑这个 demo 确认底层 GPUI 是否能正常工作：
 
 ```bash
-cd /opt/my_db/opencode/gui_gpui
+cd /opt/my_db/aicoding/gui_gpui
 cargo run --release --example minimal
 ```
 

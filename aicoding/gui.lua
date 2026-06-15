@@ -1,5 +1,5 @@
--- LuaJIT FFI binding for libopencode_gui.so
--- Provides a Lua-facing GUI object backed by egui/eframe.
+-- LuaJIT FFI binding for libaicoding_gui.so
+-- Provides a Lua-facing GUI object backed by gpui-component.
 
 local ffi = require("ffi")
 local cjson = require("cjson")
@@ -7,6 +7,7 @@ local cjson = require("cjson")
 ffi.cdef[[
     void* gui_app_create(const char* config_json);
     void  gui_app_free(void* app);
+    void free(void* p);
 
     void gui_on_user_message(
         void* app,
@@ -20,18 +21,23 @@ ffi.cdef[[
         void* userdata
     );
 
-    int gui_run(void* app);
+    int gui_run(void* app, void* lua_state);
 
     void gui_stream_delta(void* app, const char* session_id, const char* delta);
     void gui_append_message(void* app, const char* session_id, const char* role, const char* text);
     void gui_tool_output(void* app, const char* session_id, const char* tool_id, const char* output);
+
+    void gui_set_tokens(void* app, int total, int prompt, int completion);
+    void gui_set_input_value(void* app, const char* text);
+    void gui_submit_input(void* app);
+    char* gui_get_messages(void* app);
 
     void gui_add_todo(void* app, const char* text);
     void gui_set_todo_done(void* app, const char* text, int done);
     void gui_clear_todos(void* app);
 ]]
 
-local lib = ffi.load("opencode_gui")
+local lib = ffi.load("aicoding_gui", true)
 
 local M = {}
 
@@ -125,7 +131,8 @@ function M.on_tool_call(app, handler)
 end
 
 function M.run(app)
-    return lib.gui_run(app)
+    local L = opencode.get_lua_state()
+    return lib.gui_run(app, L)
 end
 
 function M.stream_delta(app, session_id, delta)
@@ -138,6 +145,27 @@ end
 
 function M.tool_output(app, session_id, tool_id, output)
     lib.gui_tool_output(app, session_id, tool_id, output)
+end
+
+function M.set_tokens(app, total, prompt, completion)
+    lib.gui_set_tokens(app, total, prompt, completion)
+end
+
+function M.set_input(app, text)
+    lib.gui_set_input_value(app, text)
+end
+
+function M.submit(app)
+    lib.gui_submit_input(app)
+end
+
+function M.get_messages(app)
+    local cstr = lib.gui_get_messages(app)
+    if cstr == nil then return {} end
+    local s = ffi.string(cstr)
+    ffi.C.free(cstr)
+    local ok, arr = pcall(cjson.decode, s)
+    if ok then return arr else return {} end
 end
 
 function M.add_todo(app, text)

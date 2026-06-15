@@ -44,7 +44,7 @@ int main(int argc, char** argv) {
     }
 
     /* Set Lua package.path so require() finds prompts/default and tools/default */
-    const char* base = "/opt/my_db/opencode";
+    const char* base = "/opt/my_db/aicoding";
     if (argc > 2) base = argv[2];
     char path_cmd[2048];
     snprintf(path_cmd, sizeof(path_cmd),
@@ -58,7 +58,7 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    if (lua_engine_dofile(L, "/opt/my_db/opencode/main.lua") != 0) {
+    if (lua_engine_dofile(L, "/opt/my_db/aicoding/main.lua") != 0) {
         fprintf(stderr, "failed to load main.lua\n");
         lua_engine_free(L);
         session_free(s);
