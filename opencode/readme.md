@@ -3,6 +3,8 @@
 一个面向开发者、对齐 [opencode](https://opencode.ai) 体验的 AI Coding Agent。核心定位是**小而精、可编译成独立二进制**——不依赖 Node.js / Bun / Python 运行时，一个可执行文件即可运行。
 
 > 当前仓库：`quqiufeng/my_db/opencode`
+>
+> 📐 **GUI 架构说明**：[Rust + LuaJIT FFI 的 GUI 开发模式](reference/gui-architecture.md) —— Rust 渲染引擎编译为 `.so`，LuaJIT 通过 C ABI 驱动界面，内容更新与 LLM 交互全部在 Lua 层完成。
 
 ---
 
