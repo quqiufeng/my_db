@@ -40,6 +40,9 @@ pub struct GuiApp {
     /// Cached file list for the file explorer.
     files: Arc<Mutex<Vec<PathBuf>>>,
 
+    /// Live todo list updated by the agent workflow.
+    todos: Arc<Mutex<Vec<TodoItem>>>,
+
     /// Weak handle to the ChatView entity so C callbacks can notify the UI.
     view: Mutex<Option<WeakEntity<ChatView>>>,
 
@@ -49,6 +52,65 @@ pub struct GuiApp {
 
     /// Sender to notify the foreground task that the UI needs a redraw.
     ui_tx: Mutex<Option<mpsc::Sender<()>>>,
+}
+
+#[derive(Clone)]
+enum MessageBlock {
+    Text(String),
+    Code { lang: String, code: String },
+}
+
+fn parse_message_blocks(text: &str) -> Vec<MessageBlock> {
+    let mut blocks = Vec::new();
+    let mut current = String::new();
+    let mut in_code = false;
+    let mut lang = String::new();
+    let mut code = String::new();
+
+    for line in text.lines() {
+        if line.starts_with("```") {
+            if in_code {
+                // End code block
+                if !current.is_empty() {
+                    blocks.push(MessageBlock::Text(current.trim_end().to_string()));
+                    current.clear();
+                }
+                blocks.push(MessageBlock::Code {
+                    lang: lang.trim().to_string(),
+                    code: code.trim_end().to_string(),
+                });
+                lang.clear();
+                code.clear();
+                in_code = false;
+            } else {
+                // Start code block
+                if !current.is_empty() {
+                    blocks.push(MessageBlock::Text(current.trim_end().to_string()));
+                    current.clear();
+                }
+                lang = line.strip_prefix("```").unwrap_or("").trim().to_string();
+                in_code = true;
+            }
+        } else if in_code {
+            code.push_str(line);
+            code.push('\n');
+        } else {
+            current.push_str(line);
+            current.push('\n');
+        }
+    }
+
+    if !current.is_empty() {
+        blocks.push(MessageBlock::Text(current.trim_end().to_string()));
+    }
+    if in_code && !code.is_empty() {
+        blocks.push(MessageBlock::Code {
+            lang: lang.trim().to_string(),
+            code: code.trim_end().to_string(),
+        });
+    }
+
+    blocks
 }
 
 #[derive(Clone)]
@@ -149,6 +211,7 @@ pub extern "C" fn gui_app_create(config_json: *const c_char) -> *mut c_void {
         version,
         project_root: project_root.clone(),
         files: Arc::new(Mutex::new(files)),
+        todos: Arc::new(Mutex::new(Vec::new())),
         view: Mutex::new(None),
         executor: Mutex::new(None),
         ui_tx: Mutex::new(None),
@@ -270,6 +333,50 @@ fn notify_app(_app: &GuiApp) {
     // Kept for ABI compatibility; refresh_ui handles notification.
 }
 
+#[no_mangle]
+pub extern "C" fn gui_add_todo(app: *mut c_void, text: *const c_char) {
+    if app.is_null() || text.is_null() {
+        return;
+    }
+    let text_str = unsafe { CStr::from_ptr(text).to_string_lossy().to_string() };
+    let app: &GuiApp = unsafe { &*(app as *mut GuiApp) };
+    app.todos.lock().unwrap().push(TodoItem {
+        text: text_str,
+        done: false,
+    });
+    app.refresh_ui();
+}
+
+#[no_mangle]
+pub extern "C" fn gui_set_todo_done(app: *mut c_void, text: *const c_char, done: c_int) {
+    if app.is_null() || text.is_null() {
+        return;
+    }
+    let text_str = unsafe { CStr::from_ptr(text).to_string_lossy().to_string() };
+    let app: &GuiApp = unsafe { &*(app as *mut GuiApp) };
+    if let Some(todo) = app
+        .todos
+        .lock()
+        .unwrap()
+        .iter_mut()
+        .find(|t| t.text == text_str)
+    {
+        todo.done = done != 0;
+    }
+    app.refresh_ui();
+}
+
+#[no_mangle]
+pub extern "C" fn gui_clear_todos(app: *mut c_void) {
+    if app.is_null() {
+        return;
+    }
+    let app: &GuiApp = unsafe { &*(app as *mut GuiApp) };
+    app.todos.lock().unwrap().clear();
+    app.refresh_ui();
+}
+
+#[derive(Clone)]
 struct TodoItem {
     text: String,
     done: bool,
@@ -281,7 +388,6 @@ struct ChatView {
     editor_state: Entity<InputState>,
     editor_path: Option<PathBuf>,
     editor_visible: bool,
-    todos: Vec<TodoItem>,
     session_start: String,
     tokens_used: usize,
     context_tokens: usize,
@@ -331,7 +437,8 @@ impl ChatView {
     }
 
     fn toggle_todo(&mut self, idx: usize, cx: &mut Context<Self>) {
-        if let Some(todo) = self.todos.get_mut(idx) {
+        let app: &mut GuiApp = unsafe { &mut *self.app };
+        if let Some(todo) = app.todos.lock().unwrap().get_mut(idx) {
             todo.done = !todo.done;
         }
         cx.notify();
@@ -365,7 +472,15 @@ impl Render for ChatView {
         let messages = app_ref.messages.lock().unwrap().clone();
         let files = app_ref.files.lock().unwrap().clone();
         let project_root = app_ref.project_root.clone();
+        let model = app_ref.model.clone();
+        let version = app_ref.version.clone();
+        let project_name = app_ref.project_root.file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
         let theme = cx.theme().clone();
+        let tokens_used = self.tokens_used;
+        let context_tokens = self.context_tokens;
 
         let message_list = v_flex()
             .flex_1()
@@ -374,33 +489,92 @@ impl Render for ChatView {
             .p_2()
             .children(messages.into_iter().enumerate().map(move |(idx, m)| {
                 let role = m.role.clone();
-                let (label, bg, fg) = match role.as_str() {
-                    "user" => ("User", theme.colors.primary, theme.colors.background),
-                    "assistant" => ("Assistant", theme.colors.muted, theme.colors.foreground),
-                    "tool" => ("Tool", theme.colors.success, theme.colors.background),
-                    _ => ("Unknown", theme.colors.foreground, theme.colors.background),
+                let (label, header_bg, card_bg, fg) = match role.as_str() {
+                    "user" => ("User", theme.colors.primary, theme.colors.muted, theme.colors.foreground),
+                    "assistant" => ("Assistant", theme.colors.accent, theme.colors.muted, theme.colors.foreground),
+                    "tool" => ("Tool", theme.colors.success, theme.colors.success, theme.colors.background),
+                    _ => ("Unknown", theme.colors.foreground, theme.colors.muted, theme.colors.foreground),
                 };
                 let is_tool = role == "tool";
                 let expanded = m.expanded;
                 let display_text = m.text.clone();
+
+                let body: Vec<AnyElement> = if is_tool {
+                    let header = display_text.split('\n').next().unwrap_or("").to_string();
+                    let rest = display_text.strip_prefix(&header).unwrap_or("").trim_start_matches('\n').to_string();
+                    vec![
+                        div().child(header).text_sm().into_any_element(),
+                        div()
+                            .when(expanded, |this| this.child(rest))
+                            .into_any_element(),
+                    ]
+                } else {
+                    parse_message_blocks(&display_text)
+                        .into_iter()
+                        .map(|block| match block {
+                            MessageBlock::Text(t) => div().child(t).into_any_element(),
+                            MessageBlock::Code { lang, code } => {
+                                v_flex()
+                                    .rounded_md()
+                                    .overflow_hidden()
+                                    .border_1()
+                                    .border_color(theme.colors.border)
+                                    .child(
+                                        div()
+                                            .px_2()
+                                            .py_1()
+                                            .bg(theme.colors.secondary)
+                                            .child(format!("{}", if lang.is_empty() { "code" } else { &lang }))
+                                            .text_xs(),
+                                    )
+                                    .child(
+                                        div()
+                                            .p_2()
+                                            .bg(theme.colors.background)
+                                            .text_color(theme.colors.foreground)
+                                            .text_sm()
+                                            .font_family("Zed Mono")
+                                            .child(code),
+                                    )
+                                    .into_any_element()
+                            }
+                        })
+                        .collect()
+                };
+
                 v_flex()
-                    .gap_1()
                     .rounded_md()
-                    .p_2()
-                    .bg(bg)
+                    .overflow_hidden()
+                    .border_1()
+                    .border_color(theme.colors.border)
+                    .bg(card_bg)
                     .text_color(fg)
-                    .child(div().font_weight(FontWeight::BOLD).child(label.to_string()))
-                    .when(is_tool, |this| {
-                        let header = display_text.split('\n').next().unwrap_or("").to_string();
-                        this.child(
-                            Button::new(format!("toggle-{}", idx))
-                                .xsmall()
-                                .ghost()
-                                .label(if expanded { "Collapse" } else { "Expand" }))
-                        .child(header)
-                        .when(expanded, |this| this.child(display_text.clone()))
-                    })
-                    .when(!is_tool, |this| this.child(display_text))
+                    .child(
+                        h_flex()
+                            .justify_between()
+                            .px_2()
+                            .py_1()
+                            .bg(header_bg)
+                            .text_color(theme.colors.background)
+                            .child(div().font_weight(FontWeight::BOLD).child(format!("#{} {}", idx + 1, label)))
+                            .when(is_tool, |this| {
+                                this.child(
+                                    Button::new(format!("toggle-{}", idx))
+                                        .xsmall()
+                                        .ghost()
+                                        .label(if expanded { "Collapse" } else { "Expand" })
+                                        .on_click({
+                                            let app_ptr = app;
+                                            move |_, _window, _cx| {
+                                                if let Some(msg) = unsafe { &mut *(app_ptr as *mut GuiApp) }.messages.lock().unwrap().get_mut(idx) {
+                                                    msg.expanded = !msg.expanded;
+                                                }
+                                            }
+                                        }),
+                                )
+                            }),
+                    )
+                    .children(body)
             }));
 
         // Right info panel (Session / Context / LSP / Todo)
@@ -412,7 +586,26 @@ impl Render for ChatView {
                 .children(content)
         }
 
-        let token_percent = (self.tokens_used as f64 / self.context_tokens as f64 * 100.0) as usize;
+        let token_percent = (tokens_used as f64 / context_tokens as f64 * 100.0) as usize;
+        let bar_width = (tokens_used as f64 / context_tokens as f64 * 240.0) as f32;
+        let progress_bar = div()
+            .w(px(240.0))
+            .h(px(6.0))
+            .rounded_md()
+            .bg(theme.colors.border)
+            .child(
+                div()
+                    .w(px(bar_width.max(1.0)))
+                    .h_full()
+                    .rounded_md()
+                    .bg(if token_percent > 90 {
+                        theme.colors.danger
+                    } else if token_percent > 70 {
+                        theme.colors.warning
+                    } else {
+                        theme.colors.success
+                    }),
+            );
         let session_info = info_section(
             "Session",
             vec![
@@ -422,7 +615,8 @@ impl Render for ChatView {
         let context_info = info_section(
             "Context",
             vec![
-                div().child(format!("{} / {} tokens", self.tokens_used, self.context_tokens)).text_sm().into_any_element(),
+                div().child(format!("{} / {} tokens", tokens_used, context_tokens)).text_sm().into_any_element(),
+                progress_bar.into_any_element(),
                 div().child(format!("{}% used", token_percent)).text_sm().into_any_element(),
                 div().child("$0.00 spent").text_sm().into_any_element(),
             ],
@@ -433,7 +627,8 @@ impl Render for ChatView {
                 div().child("LSPs are disabled").text_sm().into_any_element(),
             ],
         );
-        let todo_items: Vec<AnyElement> = self.todos.iter().enumerate().map(|(idx, todo)| {
+        let todos = unsafe { &*app }.todos.lock().unwrap().clone();
+        let todo_items: Vec<AnyElement> = todos.iter().enumerate().map(|(idx, todo)| {
             let icon = if todo.done { "[✓]" } else { "[ ]" };
             let text = todo.text.clone();
             div()
@@ -525,13 +720,6 @@ impl Render for ChatView {
                     })),
             );
 
-        let app_ref: &GuiApp = unsafe { &*self.app };
-        let model = app_ref.model.clone();
-        let version = app_ref.version.clone();
-        let project_name = app_ref.project_root.file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .to_string();
         let status_bar = h_flex()
             .justify_between()
             .p_1()
@@ -539,14 +727,48 @@ impl Render for ChatView {
             .border_t_1()
             .border_color(theme.colors.border)
             .child(div().child(format!("{} · {}", model, version)))
-            .child(div().child(format!("{} / {} tokens ({}%)", self.tokens_used, self.context_tokens, token_percent)))
+            .child(div().child(format!("{} / {} tokens ({}%)", tokens_used, context_tokens, token_percent)))
             .child(div().child(format!("{}:main", project_name)))
             .child(div().child("OpenCode ".to_string() + &version));
+
+        // Top menu bar
+        let menu_item = |label: &str| {
+            div()
+                .px_2()
+                .py_1()
+                .child(label.to_string())
+                .cursor_pointer()
+                .hover(|style| style.bg(theme.colors.muted))
+                .into_any_element()
+        };
+        let menu_bar = h_flex()
+            .border_b_1()
+            .border_color(theme.colors.border)
+            .child(menu_item("文件"))
+            .child(menu_item("动作"))
+            .child(menu_item("编辑"))
+            .child(menu_item("查看"))
+            .child(menu_item("帮助"));
+
+        // Tabs
+        let tab_bar = h_flex()
+            .border_b_1()
+            .border_color(theme.colors.border)
+            .child(
+                div()
+                    .px_3()
+                    .py_1()
+                    .bg(theme.colors.primary)
+                    .text_color(theme.colors.background)
+                    .child("OpenCode"),
+            );
 
         // Main area: messages above, input/status below
         let main_area = v_flex()
             .flex_1()
             .size_full()
+            .child(menu_bar)
+            .child(tab_bar)
             .child(message_list)
             .child(input_bar)
             .child(status_bar);
@@ -612,11 +834,6 @@ pub extern "C" fn gui_run(app_ptr: *mut c_void) -> c_int {
                         editor_state,
                         editor_path: None,
                         editor_visible: false,
-                        todos: vec![
-                            TodoItem { text: "Review project structure".to_string(), done: true },
-                            TodoItem { text: "Implement core feature".to_string(), done: false },
-                            TodoItem { text: "Run tests and verify".to_string(), done: false },
-                        ],
                         session_start: "2026-06-15T12:00:00".to_string(),
                         tokens_used: 179011,
                         context_tokens: 262144,

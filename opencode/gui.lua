@@ -25,6 +25,10 @@ ffi.cdef[[
     void gui_stream_delta(void* app, const char* session_id, const char* delta);
     void gui_append_message(void* app, const char* session_id, const char* role, const char* text);
     void gui_tool_output(void* app, const char* session_id, const char* tool_id, const char* output);
+
+    void gui_add_todo(void* app, const char* text);
+    void gui_set_todo_done(void* app, const char* text, int done);
+    void gui_clear_todos(void* app);
 ]]
 
 local lib = ffi.load("opencode_gui")
@@ -134,6 +138,18 @@ end
 
 function M.tool_output(app, session_id, tool_id, output)
     lib.gui_tool_output(app, session_id, tool_id, output)
+end
+
+function M.add_todo(app, text)
+    lib.gui_add_todo(app, text)
+end
+
+function M.set_todo_done(app, text, done)
+    lib.gui_set_todo_done(app, text, done and 1 or 0)
+end
+
+function M.clear_todos(app)
+    lib.gui_clear_todos(app)
 end
 
 return M

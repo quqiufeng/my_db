@@ -229,6 +229,8 @@ function run_gui(session_id, project_ns)
 
     gui.on_user_message(app, function(sid, text)
         gui.append_message(app, sid, "user", text)
+        gui.clear_todos(app)
+        gui.add_todo(app, "Plan approach for: " .. text)
 
         local co = coroutine.create(function()
             local protocol = opencode.llm_protocol()
@@ -238,6 +240,7 @@ function run_gui(session_id, project_ns)
 
             for i = 1, max_iterations do
                 opencode.log_info("gui llm iteration " .. tostring(i))
+                gui.add_todo(app, "LLM iteration " .. tostring(i))
                 local request_body = {
                     model = opencode.get_model and opencode.get_model() or "kimi-latest",
                     messages = {},
@@ -271,20 +274,26 @@ function run_gui(session_id, project_ns)
                     return
                 end
 
+                gui.set_todo_done(app, "LLM iteration " .. tostring(i), true)
+
                 if not tool_calls or #tool_calls == 0 then
                     if content and content ~= "" then
                         gui.append_message(app, sid, "assistant", content)
                     end
+                    gui.add_todo(app, "Done")
+                    gui.set_todo_done(app, "Done", true)
                     return
                 end
 
                 append_assistant(messages, content, tool_calls)
                 for _, tc in ipairs(tool_calls) do
                     opencode.log_info("gui executing tool: " .. tc.name)
+                    gui.add_todo(app, "Run tool: " .. tc.name)
                     gui.tool_output(app, sid, tc.name, "running...")
                     local result = tools.dispatch(tc)
                     opencode.log_info("gui tool result: " .. cjson.encode(result):sub(1, 300))
                     gui.tool_output(app, sid, tc.name, cjson.encode(result):sub(1, 800))
+                    gui.set_todo_done(app, "Run tool: " .. tc.name, true)
                     table.insert(messages, {
                         role = "tool",
                         tool_call_id = tc.id,
