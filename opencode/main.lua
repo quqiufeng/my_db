@@ -216,7 +216,13 @@ end
 
 function run_gui(session_id, project_ns)
     local gui = require("gui")
-    local app = gui.create({ title = "opencode", project_root = tools.get_project_root() })
+    local model_name = (opencode.get_model and opencode.get_model()) or "kimi-latest"
+    local app = gui.create({
+        title = "opencode",
+        project_root = tools.get_project_root(),
+        model = model_name,
+        version = "0.2.0",
+    })
 
     -- Demo: append a welcome message after window opens
     gui.append_message(app, session_id, "assistant", "opencode GUI ready. Type a message and press Send.")
