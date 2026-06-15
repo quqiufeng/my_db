@@ -664,6 +664,12 @@ pub extern "C" fn gui_run(app_ptr: *mut c_void) -> c_int {
         gpui_component::init(cx);
         cx.activate(true);
 
+        {
+            let theme = gpui_component::theme::Theme::global_mut(cx);
+            let ht = std::sync::Arc::make_mut(&mut theme.highlight_theme);
+            ht.style.editor_background = Some(gpui::rgb(0x1e1e1e).into());
+        }
+
         let executor = cx.foreground_executor().clone();
         {
             let app: &mut GuiApp = unsafe { &mut *app_ptr };
