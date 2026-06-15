@@ -697,6 +697,14 @@ static int worker_process(worker_t* worker, int worker_id) {
     unlink(meta_file);
     FILE* meta_fp = fopen(meta_file, "w");
 
+    char plugin_raw_file[256];
+    snprintf(plugin_raw_file, sizeof(plugin_raw_file), "/tmp/code_indexer_plugin_raw_%d.jsonl", worker_id);
+    unlink(plugin_raw_file);
+    FILE* plugin_raw_fp = NULL;
+    if (g_plugin_count > 0) {
+        plugin_raw_fp = fopen(plugin_raw_file, "w");
+    }
+
     int chunk_count = 0;
     int plugin_chunk_count = 0;
     int ctags_chunk_count = 0;
@@ -760,7 +768,10 @@ static int worker_process(worker_t* worker, int worker_id) {
         while (fgets(line, sizeof(line), plugin_fp)) {
             char type[32] = {0};
             json_extract_str(line, "type", type, sizeof(type));
-            if (strcmp(type, "chunk") != 0) continue;
+            if (strcmp(type, "chunk") != 0) {
+                if (plugin_raw_fp) fputs(line, plugin_raw_fp);
+                continue;
+            }
 
             char name[256] = {0};
             char file_path[512] = {0};
@@ -789,6 +800,7 @@ static int worker_process(worker_t* worker, int worker_id) {
         unlink(plugin_out);
     }
 
+    if (plugin_raw_fp) fclose(plugin_raw_fp);
     chunk_count += plugin_chunk_count;
 
     // Process remaining files with ctags
@@ -1248,7 +1260,16 @@ int main(int argc, char** argv) {
     snprintf(meta_out, sizeof(meta_out), "%s/chunks_meta.jsonl", cache_dir);
     FILE* meta_out_fp = fopen(meta_out, "w");
 
+    // Merge plugin raw output (call_edge, import_edge, metadata)
+    char plugin_raw_out[512];
+    snprintf(plugin_raw_out, sizeof(plugin_raw_out), "%s/plugin_output.jsonl", cache_dir);
+    FILE* plugin_raw_out_fp = NULL;
+    if (g_plugin_count > 0) {
+        plugin_raw_out_fp = fopen(plugin_raw_out, "w");
+    }
+
     int total_chunks = 0;
+    int total_plugin_lines = 0;
 
     for (int i = 0; i < num_workers; i++) {
         char text_file[256], meta_file[256];
@@ -1279,6 +1300,22 @@ int main(int argc, char** argv) {
             unlink(meta_file);
         }
 
+        // Merge plugin raw output
+        if (plugin_raw_out_fp) {
+            char plugin_raw_file[256];
+            snprintf(plugin_raw_file, sizeof(plugin_raw_file), "/tmp/code_indexer_plugin_raw_%d.jsonl", i);
+            fp = fopen(plugin_raw_file, "r");
+            if (fp) {
+                char line[131072];
+                while (fgets(line, sizeof(line), fp)) {
+                    fputs(line, plugin_raw_out_fp);
+                    total_plugin_lines++;
+                }
+                fclose(fp);
+                unlink(plugin_raw_file);
+            }
+        }
+
         // Count chunks from chunk file
         char chunk_file[256];
         snprintf(chunk_file, sizeof(chunk_file), "/tmp/code_indexer_chunks_%d.jsonl", i);
@@ -1295,6 +1332,10 @@ int main(int argc, char** argv) {
 
     if (text_out_fp) fclose(text_out_fp);
     if (meta_out_fp) fclose(meta_out_fp);
+    if (plugin_raw_out_fp) {
+        fclose(plugin_raw_out_fp);
+        printf("  Plugin output: %s (%d records)\n", plugin_raw_out, total_plugin_lines);
+    }
     
     printf("\n========================================\n");
     printf("Indexing complete!\n");
@@ -1307,7 +1348,9 @@ int main(int argc, char** argv) {
     printf("  Workers: %d\n", num_workers);
     printf("  Time: %.1fs\n", elapsed);
     printf("  Throughput: %.0f files/s\n", file_count / elapsed);
-    printf("  Output: %s/chunks_text.txt, %s/chunks_meta.jsonl\n", cache_dir, cache_dir);
+    printf("  Output: %s/chunks_text.txt, %s/chunks_meta.jsonl", cache_dir, cache_dir);
+    if (g_plugin_count > 0) printf(", %s/plugin_output.jsonl", cache_dir);
+    printf("\n");
     printf("========================================\n");
     
     for (int i = 0; i < file_count; i++) free(files[i].path);

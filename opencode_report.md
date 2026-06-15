@@ -21,8 +21,11 @@
 | 覆盖源文件 | 1015 |
 | 语义向量 | 10218 × 768 |
 | HNSW 索引 | 32.79 MB |
-| KV Cache keys | 10206 |
+| KV Cache keys | 29510 |
 | 导入成功 chunks | 10193 / 10218 |
+| **调用图函数** | **9652** |
+| **调用图边** | **48742** |
+| 数据流变量 | 11 |
 
 > 注：Chunks 数量从 ctags 基线的 31691 降至 10218， because the TypeScript AST plugin 只提取语义级声明（函数、类型、类、接口、方法），过滤掉了 ctags 产生的成员/字段/变量等噪声，搜索和报告质量更高。少量 chunks（约 25 个）因同名同文件冲突未导入。
 
@@ -237,6 +240,41 @@ opencode 大量使用 Effect 的 `Context.Service` 模式管理依赖：
 - `currentTheme`、`setTheme`、`refreshTheme`、`ThemeTool`：主题切换工具
 - `packages/ui/` 提供跨包 UI 组件与主题 token
 
+### 5.11 调用图（Call Graph）
+
+通过改造 `call_graph` 工具，使其读取 TypeScript 插件输出的 `call_edge` 记录，opencode 的调用关系首次可用：
+
+| 指标 | 数值 |
+|------|------|
+| 有调用关系的函数 | 9652 |
+| 总调用边 | 48742 |
+| 插件解析边 | 22577 |
+| 文本匹配补充边 | ~26165 |
+
+**关键调用关系示例**：
+
+- `toLLMMessage` → 被 `toLLMMessages` 调用（`packages/core/src/session/runner/to-llm-message.ts:148`）
+- `localAgent` / `attachAgent` → 被 `pickAgent` 调用（`packages/opencode/src/cli/cmd/run.ts:596`）
+- `renderPrompt` → 被 `render` 调用（`packages/opencode/src/tool/shell/prompt.ts:287, 290`）
+- `mcpConfig` → 被 `registerMcpServers` 调用（`packages/opencode/src/acp/service.ts:901`）
+
+**高频被调用符号**（包含大量 Effect/Schema/JS 内置）：
+
+```
+  498 map
+  369 Effect.gen
+  368 join
+  341 Array.isArray
+  340 buildClientParams
+  319 get
+  309 JSON.stringify
+  290 Object.entries
+  283 console.log
+  251 push
+```
+
+> 注：当前调用图包含 Effect-TS 组合子（`Effect.gen`、`pipe`、`map`）和 JS 内置（`Array.isArray`、`JSON.stringify`）等通用符号，因此高频列表偏基础设施。后续可通过内置符号过滤提升业务函数的信噪比。
+
 ## 6. 关键设计模式
 
 1. **Effect-TS 全栈**
@@ -283,7 +321,7 @@ opencode 大量使用 Effect 的 `Context.Service` 模式管理依赖：
 | 66 | `packages/opencode/src/provider/provider.ts` | Provider 配置与选择 |
 | 56 | `packages/opencode/src/cli/cmd/run/subagent-data.ts` | 子代理数据管理 |
 
-## 8. 索引改进说明
+## 8. 索引与调用图改进说明
 
 本次分析使用自研 TypeScript AST 插件（C + tree-sitter）替代 ctags，改进点：
 
@@ -291,8 +329,9 @@ opencode 大量使用 Effect 的 `Context.Service` 模式管理依赖：
 - **TypeScript 感知**：正确处理 `type`、`interface`、`class`、箭头函数、泛型、重载
 - **内容完整**：保留函数签名与完整 body 内容，便于 LLM 理解
 - **导出信息**：通过 `tags` 标记 `export`
+- **调用图可用**：`code_indexer` 现在保存插件原始输出到 `plugin_output.jsonl`；`call_graph` 读取其中的 `call_edge` 记录并与文本匹配边合并，使 TypeScript 项目首次拥有完整的 caller/callee 关系
 
-因此报告基于更高质量的代码 chunks，结构与实现细节比 ctags 版本更准确。
+因此报告基于更高质量的代码 chunks 和真实调用关系，结构与实现细节比 ctags 版本更准确。
 
 ## 9. 查询示例
 
@@ -307,6 +346,10 @@ opencode 大量使用 Effect 的 `Context.Service` 模式管理依赖：
 
 # 精确符号（chunk key 格式）
 ./tools/cache_query "/code/opencode/chunks//opt/opencode/packages/core/src/session/runner/to-llm-message.ts/toLLMMessage" --type exact --pretty
+
+# 符号上下文（含 caller/callee，调用图已可用）
+./explore_repo.sh /code/opencode symbol toLLMMessage --depth 2
+./explore_repo.sh /code/opencode symbol localAgent --depth 1
 
 # 热点符号
 ./explore_repo.sh /code/opencode top 20
