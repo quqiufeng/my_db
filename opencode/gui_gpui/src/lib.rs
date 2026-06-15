@@ -1,7 +1,8 @@
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int, c_void};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use gpui::prelude::FluentBuilder;
 use gpui::{InteractiveElement as _, StatefulInteractiveElement as _, *};
@@ -46,9 +47,6 @@ pub struct GuiApp {
     /// Foreground executor captured during gui_run so C callbacks can dispatch
     /// UI updates to the GPUI main thread.
     executor: Mutex<Option<ForegroundExecutor>>,
-
-    /// Sender to notify the foreground task that the UI needs a redraw.
-    ui_tx: Mutex<Option<mpsc::Sender<()>>>,
 }
 
 #[derive(Clone)]
@@ -129,9 +127,9 @@ impl GuiApp {
     }
 
     fn refresh_ui(&self) {
-        if let Ok(guard) = self.ui_tx.lock() {
-            if let Some(tx) = guard.as_ref() {
-                let _ = tx.send(());
+        if let Ok(guard) = self.executor.lock() {
+            if let Some(executor) = guard.as_ref() {
+                let _ = executor.spawn(async move {});
             }
         }
     }
@@ -190,7 +188,6 @@ pub extern "C" fn gui_app_create(config_json: *const c_char) -> *mut c_void {
         todos: Arc::new(Mutex::new(Vec::new())),
         view: Mutex::new(None),
         executor: Mutex::new(None),
-        ui_tx: Mutex::new(None),
     };
 
     Box::into_raw(Box::new(app)) as *mut c_void
@@ -658,16 +655,9 @@ pub extern "C" fn gui_run(app_ptr: *mut c_void) -> c_int {
         cx.activate(true);
 
         let executor = cx.foreground_executor().clone();
-        let async_app = cx.to_async();
         {
             let app: &mut GuiApp = unsafe { &mut *app_ptr };
             *app.executor.lock().unwrap() = Some(executor);
-        }
-
-        let (ui_tx, ui_rx) = mpsc::channel::<()>();
-        {
-            let app: &mut GuiApp = unsafe { &mut *app_ptr };
-            *app.ui_tx.lock().unwrap() = Some(ui_tx);
         }
 
         let bounds = Bounds::centered(None, size(px(900.0), px(600.0)), cx);
@@ -675,6 +665,10 @@ pub extern "C" fn gui_run(app_ptr: *mut c_void) -> c_int {
         cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
+                #[cfg(target_os = "linux")]
+                window_background: gpui::WindowBackgroundAppearance::Opaque,
+                #[cfg(target_os = "linux")]
+                window_decorations: Some(gpui::WindowDecorations::Client),
                 ..Default::default()
             },
             move |window, cx| {
@@ -709,25 +703,24 @@ pub extern "C" fn gui_run(app_ptr: *mut c_void) -> c_int {
                         },
                     )
                     .detach();
+
+                    // Poll for external message changes from C callbacks.
+                    cx.spawn(async move |this, cx| {
+                        loop {
+                            cx.background_executor()
+                                .timer(Duration::from_millis(100))
+                                .await;
+                            this.update(cx, |_this, cx| cx.notify()).ok();
+                        }
+                    })
+                    .detach();
+
                     view
                 });
                 {
                     let app: &mut GuiApp = unsafe { &mut *app_ptr };
                     *app.view.lock().unwrap() = Some(chat_view.downgrade());
                 }
-
-                let weak_view = chat_view.downgrade();
-                async_app
-                    .spawn(async move |cx| {
-                        while ui_rx.recv().is_ok() {
-                            weak_view
-                                .update(cx, |_this, cx| {
-                                    cx.notify();
-                                })
-                                .ok();
-                        }
-                    })
-                    .detach();
 
                 cx.new(|cx| Root::new(chat_view, window, cx))
             },
