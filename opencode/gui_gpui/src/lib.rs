@@ -413,23 +413,28 @@ impl Render for ChatView {
             .unwrap_or_default()
             .to_string_lossy()
             .to_string();
-        let theme = cx.theme().clone();
         let tokens_used = self.tokens_used;
         let context_tokens = self.context_tokens;
+
+        let bg = gpui::rgb(0x1a1a1a);
+        let card_bg = gpui::rgb(0x252526);
+        let code_bg = gpui::rgb(0x1e1e1e);
+        let terminal_bg = gpui::rgb(0x0f0f0f);
+        let border = gpui::rgb(0x3c3c3c);
 
         let message_list = v_flex()
             .flex_1()
             .overflow_y_scrollbar()
             .gap_2()
             .p_2()
-            .bg(theme.colors.background)
+            .bg(bg)
             .children(messages.into_iter().enumerate().map(move |(idx, m)| {
                 let role = m.role.clone();
                 let (label, accent) = match role.as_str() {
-                    "user" => ("User", theme.colors.primary),
-                    "assistant" => ("Assistant", theme.colors.accent),
-                    "tool" => ("Tool", theme.colors.warning),
-                    _ => ("Unknown", theme.colors.foreground),
+                    "user" => ("User", gpui::rgb(0x4fc1ff)),
+                    "assistant" => ("Assistant", gpui::rgb(0xc586c0)),
+                    "tool" => ("Tool", gpui::rgb(0xffcc66)),
+                    _ => ("Unknown", gpui::rgb(0xcccccc)),
                 };
                 let is_tool = role == "tool";
                 let expanded = m.expanded;
@@ -439,36 +444,47 @@ impl Render for ChatView {
                     let header = display_text.split('\n').next().unwrap_or("").to_string();
                     let rest = display_text.strip_prefix(&header).unwrap_or("").trim_start_matches('\n').to_string();
                     vec![
-                        div().child(header).text_sm().into_any_element(),
+                        div().child(header).text_sm().text_color(gpui::rgb(0xffcc66)).into_any_element(),
                         div()
-                            .when(expanded, |this| this.child(rest))
+                            .when(expanded, |this| {
+                                this.child(
+                                    div()
+                                        .p_2()
+                                        .rounded_md()
+                                        .bg(terminal_bg)
+                                        .text_color(gpui::rgb(0xcccccc))
+                                        .font_family("Zed Mono")
+                                        .text_sm()
+                                        .child(rest),
+                                )
+                            })
                             .into_any_element(),
                     ]
                 } else {
                     parse_message_blocks(&display_text)
                         .into_iter()
                         .map(|block| match block {
-                            MessageBlock::Text(t) => div().child(t).into_any_element(),
+                            MessageBlock::Text(t) => div().child(t).text_color(gpui::rgb(0xe0e0e0)).into_any_element(),
                             MessageBlock::Code { lang, code } => {
                                 v_flex()
                                     .rounded_md()
                                     .overflow_hidden()
                                     .border_1()
-                                    .border_color(theme.colors.border)
+                                    .border_color(border)
                                     .child(
                                         div()
                                             .px_2()
                                             .py_1()
-                                            .bg(theme.colors.muted)
-                                            .text_color(theme.colors.foreground)
+                                            .bg(gpui::rgb(0x333333))
+                                            .text_color(gpui::rgb(0xcccccc))
                                             .child(format!("{}", if lang.is_empty() { "code" } else { &lang }))
                                             .text_xs(),
                                     )
                                     .child(
                                         div()
                                             .p_2()
-                                            .bg(theme.colors.background)
-                                            .text_color(theme.colors.foreground)
+                                            .bg(code_bg)
+                                            .text_color(gpui::rgb(0xd4d4d4))
                                             .text_sm()
                                             .font_family("Zed Mono")
                                             .child(code),
@@ -485,8 +501,8 @@ impl Render for ChatView {
                     .border_1()
                     .border_l_4()
                     .border_color(accent)
-                    .bg(theme.colors.background)
-                    .text_color(theme.colors.foreground)
+                    .bg(card_bg)
+                    .text_color(gpui::rgb(0xe0e0e0))
                     .child(
                         h_flex()
                             .justify_between()
@@ -518,7 +534,7 @@ impl Render for ChatView {
             v_flex()
                 .gap_1()
                 .p_2()
-                .child(div().font_weight(FontWeight::BOLD).child(title.to_string()))
+                .child(div().font_weight(FontWeight::BOLD).text_color(gpui::rgb(0xe0e0e0)).child(title.to_string()))
                 .children(content)
         }
 
@@ -528,49 +544,51 @@ impl Render for ChatView {
             .w(px(240.0))
             .h(px(6.0))
             .rounded_md()
-            .bg(theme.colors.border)
+            .bg(border)
             .child(
                 div()
                     .w(px(bar_width.max(1.0)))
                     .h_full()
                     .rounded_md()
                     .bg(if token_percent > 90 {
-                        theme.colors.danger
+                        gpui::rgb(0xf48771)
                     } else if token_percent > 70 {
-                        theme.colors.warning
+                        gpui::rgb(0xffcc66)
                     } else {
-                        theme.colors.success
+                        gpui::rgb(0x89d185)
                     }),
             );
         let session_info = info_section(
             "Session",
             vec![
-                div().child(format!("Started {}", self.session_start)).text_sm().into_any_element(),
+                div().child(format!("Started {}", self.session_start)).text_sm().text_color(gpui::rgb(0xcccccc)).into_any_element(),
             ],
         );
         let context_info = info_section(
             "Context",
             vec![
-                div().child(format!("{} / {} tokens", tokens_used, context_tokens)).text_sm().into_any_element(),
+                div().child(format!("{} / {} tokens", tokens_used, context_tokens)).text_sm().text_color(gpui::rgb(0xcccccc)).into_any_element(),
                 progress_bar.into_any_element(),
-                div().child(format!("{}% used", token_percent)).text_sm().into_any_element(),
-                div().child("$0.00 spent").text_sm().into_any_element(),
+                div().child(format!("{}% used", token_percent)).text_sm().text_color(gpui::rgb(0xcccccc)).into_any_element(),
+                div().child("$0.00 spent").text_sm().text_color(gpui::rgb(0xcccccc)).into_any_element(),
             ],
         );
         let lsp_info = info_section(
             "LSP",
             vec![
-                div().child("LSPs are disabled").text_sm().into_any_element(),
+                div().child("LSPs are disabled").text_sm().text_color(gpui::rgb(0xcccccc)).into_any_element(),
             ],
         );
         let todos = unsafe { &*app }.todos.lock().unwrap().clone();
         let todo_items: Vec<AnyElement> = todos.iter().enumerate().map(|(idx, todo)| {
             let icon = if todo.done { "[✓]" } else { "[ ]" };
             let text = todo.text.clone();
+            let color = if todo.done { gpui::rgb(0x89d185) } else { gpui::rgb(0xffcc66) };
             div()
                 .id(format!("todo-{}", idx))
                 .child(format!("{} {}", icon, text))
                 .text_sm()
+                .text_color(color)
                 .cursor_pointer()
                 .on_click(cx.listener(move |this, _event, _window, cx| {
                     this.toggle_todo(idx, cx);
@@ -583,8 +601,8 @@ impl Render for ChatView {
             .w(px(260.0))
             .h_full()
             .border_l_1()
-            .border_color(theme.colors.border)
-            .bg(theme.colors.background)
+            .border_color(border)
+            .bg(bg)
             .child(session_info)
             .child(context_info)
             .child(lsp_info)
@@ -595,8 +613,8 @@ impl Render for ChatView {
             .gap_2()
             .p_2()
             .border_t_1()
-            .border_color(theme.colors.border)
-            .bg(theme.colors.background)
+            .border_color(border)
+            .bg(gpui::rgb(0x252526))
             .child(
                 div()
                     .flex_1()
@@ -618,8 +636,9 @@ impl Render for ChatView {
             .p_1()
             .text_sm()
             .border_t_1()
-            .border_color(theme.colors.border)
-            .bg(theme.colors.background)
+            .border_color(border)
+            .bg(gpui::rgb(0x1e1e1e))
+            .text_color(gpui::rgb(0xcccccc))
             .child(div().child(format!("{} · {}", model, version)))
             .child(div().child(format!("{} / {} tokens ({}%)", tokens_used, context_tokens, token_percent)))
             .child(div().child(format!("{}:main", project_name)))
@@ -629,13 +648,14 @@ impl Render for ChatView {
         let main_area = v_flex()
             .flex_1()
             .size_full()
-            .bg(theme.colors.background)
+            .bg(bg)
             .child(message_list)
             .child(input_bar)
             .child(status_bar);
 
         h_flex()
             .size_full()
+            .bg(bg)
             .child(main_area)
             .child(right_panel)
     }
