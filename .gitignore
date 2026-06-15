@@ -96,3 +96,16 @@ agent/*.o
 plugins/typescript-indexer/bin/
 plugins/typescript-indexer/obj/
 plugins/typescript-indexer/*.o
+
+# opencode secrets
+opencode/.env
+opencode/test_cache/
+opencode/*.bin
+
+# opencode build artifacts
+opencode/opencode_cache/
+opencode/target/
+opencode/libopencode_agent.a
+opencode/opencode_cli
+opencode/gui/target/
+opencode/gui/Cargo.lock

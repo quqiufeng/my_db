@@ -752,18 +752,573 @@ prompt 里只放：
 | 记忆模型 | 无显式分层 | 模拟人类三层记忆 |
 | Agent 复杂度 | 需要维护长上下文 | 轻量调度器，上下文极简 |
 
-## 16. 后续实现步骤
+## 16. 会话与上下文管理：基于 KV Cache 重构
 
-1. 实现 `AgentContext` Python 类，对接 `libmydb.so`。
-2. 提供 `kv_search` / `kv_get` / `kv_context` 工具接口。
-3. 包装 `cache_query` 为模型可调用的函数。
-4. 跑通端到端示例：用户提问 → 搜索代码 → 深度上下文 → 生成回答。
-5. 增加第三方代码识别与拦截配置。
-6. 实现第三方依赖自动预索引流程。
+原生 opencode 的会话管理依赖 `messages` 数组，需要 compaction、token 预算、复杂的状态机。本方案直接用 KV Cache 替换整个会话/上下文系统。
 
-## 17. UI 层实现方案：GPUI 编译为 `.so` + C 调用
+### 16.1 核心原则
 
-### 17.1 为什么选 GPUI
+> **没有 messages 数组。会话就是 KV Cache 中的一个 namespace，prompt 是每次调用前从 KV Cache 实时组装出来的查询结果。**
+
+| opencode | 本方案 |
+|----------|--------|
+| `messages: Message[]` | `/session/{id}/` namespace |
+| compaction | 不需要，本来就只存摘要 |
+| context window 预算 | 固定工作记忆上限 |
+| 工具定义硬编码 | 工具定义也入 KV Cache |
+| 历史原文 | 不保留，只保留每轮摘要 |
+
+### 16.2 Session namespace 结构
+
+```
+/session/{session_id}/
+  /meta
+    /created_at          # 创建时间戳
+    /updated_at          # 最后活跃时间
+    /project             # 关联项目 namespace
+    /model               # 当前模型配置
+  /task/current          # 当前任务一句话
+  /task/history/{id}     # 历史任务（已完成的）
+  /facts/{fact_id}       # 关键事实、决策、错误模式
+  /turns/{turn_id}       # 原始轮次（可选，TTL 短，可清理）
+  /summaries/{turn_id}   # 每轮压缩摘要
+  /files/{path_hash}     # 会话中关注的文件快照/摘要
+  /symbols/{name}        # 当前关注的符号
+  /errors/{error_id}     # 遇到的错误及解决方案
+  /pending_tool          # 当前未完成的 tool call（如果有）
+```
+
+### 16.3 Prompt 组装流程
+
+每次调用 LLM 前，C 侧 `session_build_prompt()` 按以下顺序从 KV Cache 读取：
+
+1. **System prompt**：从 `/agent/{id}/prompts/system` 读取固定模板。
+2. **工具列表**：从 `/agent/{id}/tools/` 读取可用工具 schema。
+3. **当前任务**：`/session/{id}/task/current`。
+4. **关键事实**：`/session/{id}/facts/*`，按重要性 `i` 排序，最多 20 条。
+5. **最近摘要**：`/session/{id}/summaries/*`，按 turn_id 逆序，最多 5 条。
+6. **相关代码片段**：根据当前 query 调用 `kv_search` 实时召回，最多 5 段。
+
+所有内容固定格式为 markdown 文本块，最终拼成一个 `char*` 传入 LLM client。
+
+### 16.4 不保留完整对话
+
+- 用户/助手的完整原文可以临时写入 `/session/{id}/turns/{turn_id}`，但 TTL 短（如 24 小时）。
+- 每轮结束后立即生成摘要写入 `/session/{id}/summaries/{turn_id}`，长期保留。
+- 摘要格式：
+
+```json
+{
+  "t": "summary",
+  "c": "用户要求添加 TypeScript 插件支持；助手创建了 C 插件并更新了 code_indexer。",
+  "tags": ["typescript", "plugin", "code_indexer"],
+  "i": 4,
+  "ts": 1718400000
+}
+```
+
+### 16.5 工具定义也入 KV Cache
+
+不再把 tool schema 硬编码在 C 代码里，而是作为 KV 记录：
+
+```
+/agent/{agent_id}/tools/
+  /bash                # bash 工具 schema
+  /source_read         # 读文件工具 schema
+  /kv_search           # 搜索代码记忆
+  /kv_context          # 符号上下文
+  /code_index          # 索引新项目
+  /md_read             # 读 markdown 文档
+```
+
+每条 value 是 JSON：
+
+```json
+{
+  "t": "tool",
+  "name": "kv_search",
+  "description": "从 KV Cache 搜索相关代码或历史信息",
+  "parameters": {
+    "query": {"type": "string", "required": true},
+    "namespace": {"type": "string", "required": false},
+    "type": {"type": "string", "enum": ["semantic", "prefix", "regex", "symbol"]}
+  }
+}
+```
+
+启动时 C 侧加载这些记录，动态构建发送给 LLM 的 `tools` 数组。
+
+### 16.6 事实提取与强化
+
+每次助手回复后，可选调用一次轻量 LLM 让模型自己提取关键事实：
+
+```
+输入：本轮对话原文
+输出：JSON 数组 [{"fact": "...", "importance": 4, "tags": [...]}]
+```
+
+写入 `/session/{id}/facts/{fact_id}`。
+
+反复被引用或搜索到的事实可以提升 `i` 值，最终升级为 `/project/{name}/facts/` 长期记忆。
+
+### 16.7 C Session Manager API
+
+最小 C API 设计：
+
+```c
+typedef struct session session_t;
+
+session_t* session_create(const char* session_id, const char* project_ns, const char* model);
+void       session_free(session_t* s);
+
+int session_set_task(session_t* s, const char* task);
+int session_add_fact(session_t* s, const char* fact, int importance, const char** tags, int ntags);
+int session_add_summary(session_t* s, int turn_id, const char* summary);
+int session_add_error(session_t* s, const char* error, const char* solution);
+int session_add_file(session_t* s, const char* path, const char* summary);
+int session_add_symbol(session_t* s, const char* name);
+
+char* session_build_prompt(session_t* s, const char* user_query);
+```
+
+实现直接调用 `libmydb.so` 的 `cache_set` / `cache_get` / `cache_search`。
+
+### 16.8 与 opencode 提示词的对接
+
+opencode 的 system prompt、tool schema 描述、响应格式要求可以直接复用。迁移方式：
+
+1. 把 opencode 的 prompt 文本整理成 markdown 模板文件，放在 `opencode/prompts/`。
+2. C 启动时加载这些模板。
+3. 模板中的变量（如 `{tools}`、`{task}`、`{facts}`、`{summaries}`）由 `session_build_prompt()` 用 KV Cache 查询结果填充。
+
+这样 opencode 的提示词工程成果保留，但底层 context 管理完全替换为 KV Cache。
+
+### 16.9 为什么更简单
+
+| 传统方案 | KV Cache 方案 |
+|----------|--------------|
+| 维护 messages 数组 | 直接读写 KV Cache |
+| compaction 算法 | 只存摘要，自然瘦身 |
+| token 预算分配 | 固定上限，超了按策略丢 |
+| 硬编码工具 schema | 工具定义也是 KV 记录 |
+| 历史原文拖累 prompt | 历史只以摘要形式召回 |
+| 上下文状态机复杂 | 每次重新组装，状态极简 |
+
+一句话总结：
+
+> **opencode 的提示词可以复用，但它的会话/context 系统完全不需要复刻。用 KV Cache 重构后，Agent 只要一个 session_id 和一个 prompt 组装函数。**
+
+## 17. LuaJIT 脚本层：C 内核 + Lua 动态扩展
+
+为了不改 C 代码就能调整 prompt、工具、响应解析逻辑，引入 LuaJIT 作为脚本层。C 只做最小内核（KV Cache、LLM HTTP client、session namespace），动态能力全部交给 Lua。
+
+### 17.1 为什么加 LuaJIT
+
+| 纯 C 方案 | C + LuaJIT 方案 |
+|-----------|----------------|
+| 改 prompt 要重编译 | 改 Lua 脚本即可 |
+| 加 tool 要改 C 代码 | Lua 里注册新 tool |
+| JSON 用 C 库容易出错 | Lua cjson 成熟稳定 |
+| 插件系统要自己设计 | Lua `require` 就是插件系统 |
+| 响应解析写 C 很繁琐 | Lua 模式匹配/JSON 极方便 |
+
+### 17.2 职责划分
+
+```
+┌─────────────────────────────────────────┐
+│  Lua 脚本层（动态，用户可改）              │
+│  - prompt 组装                            │
+│  - tool schema 定义                       │
+│  - tool dispatch                          │
+│  - LLM 响应解析                           │
+│  - 插件加载 (require)                     │
+│  - JSON 处理 (cjson)                      │
+└─────────────────────────────────────────┘
+                    ↑↓ C ABI / Lua bindings
+┌─────────────────────────────────────────┐
+│  C 内核（稳定，性能关键）                  │
+│  - KV Cache 读写                          │
+│  - session namespace 管理                 │
+│  - OpenAI-compatible LLM client           │
+│  - SSE 流式解析                           │
+│  - 文件读取 (source_read)                 │
+│  - LuaJIT 宿主                            │
+└─────────────────────────────────────────┘
+```
+
+### 17.3 C 暴露给 Lua 的 API
+
+```c
+// KV Cache
+opencode.cache_get(key) -> string|nil
+opencode.cache_set(key, value, ttl_ms) -> bool
+opencode.cache_search_prefix(prefix, max_results) -> [{key, value, score}]
+opencode.cache_search_tag(tag, max_results) -> [{key, value, score}]
+
+// Files / code
+opencode.source_read(path, line_start, line_end) -> string|nil, err
+
+// LLM
+opencode.llm_complete(system_prompt, user_prompt, tools_json) -> response_json|nil, err
+
+// Logging
+opencode.log_info(msg)
+```
+
+### 17.4 Lua 脚本结构
+
+```
+opencode/
+  main.lua                 # 入口：加载 prompts/tools，注册工具
+  prompts/
+    default.lua            # build_prompt(session_id, project_ns, query)
+  tools/
+    default.lua            # tool 定义 + dispatch
+  plugins/
+    *.lua                  # 用户自定义插件
+```
+
+### 17.5 示例：prompt 组装在 Lua 里
+
+```lua
+-- prompts/default.lua
+local cjson = require("cjson")
+
+local M = {}
+M.MAX_FACTS = 20
+M.MAX_SUMMARIES = 5
+
+function M.build_prompt(session_id, project_ns, user_query)
+    local session_prefix = "/session/" .. session_id .. "/"
+    local parts = {}
+
+    -- System
+    table.insert(parts, "# System\nYou are an expert coding assistant...")
+
+    -- Tools (discovered from KV Cache)
+    local tools = opencode.cache_search_prefix("/agent/default/tools/", 32)
+    for _, t in ipairs(tools) do
+        local tool = cjson.decode(t.value)
+        table.insert(parts, "- `" .. tool.name .. "`: " .. tool.description)
+    end
+
+    -- Current task
+    local task_json = opencode.cache_get(session_prefix .. "task/current")
+    if task_json then
+        local task = cjson.decode(task_json)
+        table.insert(parts, "\n## Current Task\n" .. task.c)
+    end
+
+    -- Facts, summaries, user query...
+    table.insert(parts, "\n## User\n" .. user_query)
+    table.insert(parts, "\n## Assistant\n")
+
+    return table.concat(parts, "\n")
+end
+
+return M
+```
+
+### 17.6 示例：tool 定义和 dispatch 在 Lua 里
+
+```lua
+-- tools/default.lua
+local cjson = require("cjson")
+
+local M = {}
+
+M.tools = {
+    {
+        name = "kv_search",
+        description = "Search KV Cache",
+        parameters = {
+            query = { type = "string", required = true },
+            namespace = { type = "string", required = false }
+        },
+        handler = function(args)
+            local prefix = args.namespace or ""
+            if prefix ~= "" and not prefix:match("/$") then prefix = prefix .. "/" end
+            local results = opencode.cache_search_prefix(prefix, 10)
+            return { ok = true, results = results }
+        end
+    },
+    {
+        name = "source_read",
+        description = "Read source file lines",
+        parameters = {
+            path = { type = "string", required = true },
+            line_start = { type = "integer", required = false },
+            line_end = { type = "integer", required = false }
+        },
+        handler = function(args)
+            local content = opencode.source_read(args.path, args.line_start or 1, args.line_end or 0)
+            return { ok = true, content = content }
+        end
+    }
+}
+
+function M.register_tools(agent_ns)
+    for _, t in ipairs(M.tools) do
+        local schema = { t = "tool", name = t.name, description = t.description, parameters = t.parameters }
+        local key = agent_ns .. "/tools/" .. t.name
+        opencode.cache_set(key, cjson.encode(schema), 0)
+    end
+end
+
+function M.dispatch(tool_call)
+    for _, t in ipairs(M.tools) do
+        if t.name == tool_call.name then
+            return t.handler(tool_call.arguments)
+        end
+    end
+    return { ok = false, error = "unknown tool" }
+end
+
+return M
+```
+
+### 17.7 为什么用 /usr/local/lualib/cjson.so
+
+系统已经通过 OpenResty/LuaJIT 生态预置了 `cjson.so`，LuaJIT 可以直接 `require("cjson")`。不需要额外安装 npm 包，也不需要 C 代码里处理 JSON 转义。
+
+### 17.8 安全边界
+
+- **危险操作（bash）** 目前由 Lua 实现；后续可加 C 侧白名单/沙箱。
+- Lua 脚本运行在主线程，tool handler 中不要执行长时间阻塞操作；需要的话后续改成 C 侧线程池 + Lua callback。
+
+### 17.9 一句话总结
+
+> **C 写内核和 LLM client，LuaJIT 写 prompt、tool、插件。改逻辑不用重新编译，JSON 全部交给 cjson，扩展能力用 `require`。**
+
+## 18. LLM Client 设计
+
+C 侧实现一个轻量 OpenAI-compatible HTTP client，支持同步和流式两种模式。
+
+### 18.1 配置
+
+```c
+typedef struct {
+    char* base_url;       /* e.g. "https://api.openai.com/v1" */
+    char* api_key;
+    char* model;
+    double temperature;
+    int    max_tokens;
+} llm_config_t;
+```
+
+实际密钥从环境变量读取：
+
+```bash
+export OPENAI_BASE_URL=https://api.openai.com/v1
+export OPENAI_API_KEY=sk-...
+export OPENAI_MODEL=gpt-4o-mini
+```
+
+### 18.2 同步调用
+
+```c
+llm_client_t* c = llm_client_create(&cfg);
+char* resp = llm_complete(c, system_prompt, user_prompt, tools_json);
+// resp is full JSON from /chat/completions
+```
+
+### 18.3 流式调用
+
+```c
+int on_delta(const char* delta, void* userdata) {
+    printf("%s", delta);
+    return 0;  // continue
+}
+
+llm_complete_stream(c, system, prompt, tools, on_delta, NULL);
+```
+
+SSE 解析在 C 侧完成，每解析出一个 `content` delta 就调一次 callback。callback 可以把文本回传给 UI 或 Lua。
+
+### 18.4 工具调用流程
+
+```
+Lua: build_prompt() -> C: llm_complete(system, prompt, tools_json)
+                           -> API returns tool_calls
+                           -> Lua: handle_tool_call() -> C tool dispatch
+                           -> C: send tool result back to API
+                           -> API returns final text
+                           -> Lua: save summary + facts
+```
+
+### 18.5 一句话总结
+
+> **LLM client 是 C 侧一个小型 libcurl 封装，只做 HTTP + SSE 解析。请求体组装、响应解析、tool 循环全部交给 Lua。**
+
+## 19. 与原生 opencode 尚未对齐的功能清单
+
+> 以下功能来自对 `/opt/opencode` 真实源码的分析，优先级按实现难度和用户体验排序。`skill` 工具不在本复刻范围内。
+
+### 19.1 工具系统差距
+
+#### 19.1.1 缺少的核心工具
+
+| 工具 | opencode 行为 | 本方案现状 | 优先级 |
+|------|--------------|-----------|--------|
+| `edit` | 精确文本替换，支持 `oldString`/`newString`/`replaceAll`，保留 BOM/行尾符 | 有 `apply_edit`，功能类似但命名和输出格式不同 | 高 |
+| `write` | 创建或覆盖单个文件，保留 BOM | 拆成 `file_create`，没有统一 `write` | 高 |
+| `apply_patch` | 用 `*** Begin Patch` 格式批量增删改文件 | 缺失 | 高 |
+| `glob` | 按 glob 模式搜索文件，返回相对路径列表 | 只有 `file_list`（ls 包装） | 高 |
+| `grep` | 正则搜索文件内容，返回文件/行号/预览 | 缺失 | 高 |
+| `question` | 向用户提问（单选/多选/自定义），获取结构化答案 | 缺失 | 中 |
+| `todowrite` | 创建和维护结构化任务列表 | 缺失 | 中 |
+| `webfetch` | HTTP/HTTPS 抓取，返回 text/markdown/html | 缺失 | 中 |
+| `websearch` | 网络搜索（Exa/Parallel） | 缺失 | 低 |
+| `lsp` | 语言服务器协议交互 | 缺失 | 低 |
+
+#### 19.1.2 现有工具需对齐
+
+| 我们的工具 | 需对齐项 |
+|-----------|---------|
+| `apply_edit` | 改名为 `edit` 或加别名；支持 `replaceAll`；输出 diff 预览；BOM/行尾处理 |
+| `file_create` | 合并为 `write`，支持覆盖已存在文件；返回 `{ operation, target, resource, existed }` |
+| `file_delete` | 建议通过 `apply_patch` delete 实现，不再单独暴露 |
+| `source_read` | 改名为 `read`；支持 offset/limit 分页；支持图片 base64；支持目录列表；二进制文件检测 |
+| `bash` | 增加 `workdir`、`timeout`、`description`；stdout/stderr 分离输出；超时检测 |
+| `git` | opencode 不单独暴露 `git` 工具，应通过 `bash` 执行 git 命令 |
+| `diff` | opencode 不单独暴露 `diff` 工具，通过 `bash` git diff 或文件系统状态获取 |
+| `kv_*` | 保留，但输出格式应更紧凑，接近 opencode `ToolOutput` 结构 |
+
+#### 19.1.3 工具输出格式
+
+- opencode 工具返回 `{ structured, content: [{type, text} | {type, file}] }`，再转成模型可见文本。
+- 当前方案返回 `{ ok, output/content/error }` 自定义 JSON，后续应统一为结构化输出。
+
+### 19.2 权限系统差距
+
+| 项 | opencode | 本方案现状 | 是否需改 |
+|---|---|---|---|
+| 匹配语义 | **last-match-wins**（`findLast`） | 当前 first-match-wins | 是 |
+| 无规则默认 | 默认 `deny`（`missingAgentPermissions = [{ "*", "*", "deny" }]`） | 默认 `ask` | 是 |
+| 持久化授权 | 用户 `always` 后写入 `PermissionSaved` 表，跨进程保留 | 仅 session 内存 allow | 是 |
+| 错误类型 | `DeniedError` / `RejectedError` / `CorrectedError` | 字符串错误 | 中 |
+| Agent 级权限 | 每个 agent 可独立配置 `permissions` | 全局 + 项目级 | 中 |
+| 资源数组 | `resources: string[]`，逐资源 evaluate | 单 resource 字符串 | 低 |
+| 配置键 | `permissions`（复数数组） | 同 v2，但兼容 legacy `permission` | 可保留 |
+
+### 19.3 Session / 消息系统差距
+
+| 项 | opencode | 本方案 |
+|---|---|---|
+| 消息类型 | `User`/`Assistant`/`Shell`/`System`/`Synthetic`/`Compaction`/`AgentSwitched`/`ModelSwitched` | 简单 user/assistant/tool |
+| Compaction | 一级消息类型，自动/手动触发 summary + recent context | 无 |
+| 持久化 | SQLite event store、session inbox、input promotion | 只有 KV Cache index 持久化 |
+| Agent 切换 | `AgentSwitched`/`ModelSwitched`、Context Epoch 替换 | 单一 agent |
+| 多 session/project | 支持 | 仅单 session/project |
+| 会话分享 | `share` 配置 | 无 |
+
+### 19.4 Agent 系统差距
+
+| 项 | opencode | 本方案 |
+|---|---|---|
+| 内置 agent | `build`/`plan`/`explore`/`title`/`summary`/`compaction` | 无 |
+| 自定义 agent | 用户可配置 `agents` | 无 |
+| Agent 字段 | `model`/`variant`/`system`/`mode`/`steps`/`color`/`permissions` | 无 |
+| 子代理 | `createSubagentData`/`snapshotSubagentData` | 无 |
+
+### 19.5 上下文 / Instruction 差距
+
+| 项 | opencode | 本方案 |
+|---|---|---|
+| `AGENTS.md` | 自动从项目根向上发现并注入系统上下文 | 未实现 |
+| `instructions` | 配置额外指令文件/glob/URL | 未实现 |
+| `references` | 本地目录/Git 仓库作为 `@alias/path` 外部上下文 | 未实现 |
+| System Context Registry | `SystemContext`/`Context Epoch`/`Mid-Conversation System Message` | 只有静态 system prompt |
+
+### 19.6 Config 配置差距
+
+| 配置项 | opencode | 本方案 |
+|---|---|---|
+| `agents` | 支持 | 无 |
+| `permissions` | 支持 | 部分 |
+| `providers` | 多 provider/model/variant/headers/body | 仅 env |
+| `mcp.servers` | 支持 local/remote MCP | 无 |
+| `skills` | 支持 | 不做 |
+| `instructions` | 支持 | 无 |
+| `references` | 支持 | 无 |
+| `formatter` / `lsp` | 支持 | 无 |
+| `snapshots` | 文件系统快照/undo | 无 |
+| `tool_output` | 输出截断阈值 | 硬编码 |
+| `compaction` | 上下文压缩配置 | 不需要 |
+| `shell` | 默认 shell | 无 |
+| `share` / `enterprise` / `username` | 支持 | 无 |
+
+### 19.7 Git / 文件系统差距
+
+| 项 | opencode | 本方案 |
+|---|---|---|
+| BOM 保留 | `edit`/`write` 保留 UTF-8 BOM | 无 |
+| 行尾符处理 | 自动检测/转换 `\n` / `\r\n` | 无 |
+| 条件写入 | `writeIfUnchanged` 防脏写 | 无 |
+| 外部目录权限 | `external_directory` 单独授权 | 无 |
+| 快照/undo | `snapshot` 配置支持 revert/unrevert | 无 |
+| Git 工具 | 不单独暴露，通过 `bash` 执行 | 有独立 `git` 工具 |
+
+### 19.8 UI / CLI 差距
+
+| 项 | opencode | 本方案 |
+|---|---|---|
+| 默认形态 | TUI（`runTui`） | stdin REPL |
+| 权限提示 | TUI 弹窗 `once`/`always`/`reject` | tty 文本 `y/N/a/d` |
+| 流式输出 | 支持 SSE 增量渲染 | 整段返回 |
+| 多 session | 支持 | 不支持 |
+| 命令体系 | `serve`/`service`/`migrate`/`debug` | 仅 `--session`/`--project` |
+
+### 19.9 LLM / Provider 差距
+
+| 项 | opencode | 本方案 |
+|---|---|---|
+| 多 provider | `providers` 配置 | 单 env |
+| per-agent model | 支持 | 无 |
+| model variants | 支持 | 无 |
+| request overrides | headers/body/aisdk options | 无 |
+| tool choice | `toolChoice` | 无 |
+| response format | structured output / json schema | 无 |
+| 协议支持 | OpenAI Chat/Responses, Anthropic, Gemini, Bedrock | OpenAI-compatible only |
+
+### 19.10 MCP / 插件差距
+
+| 项 | opencode | 本方案 |
+|---|---|---|
+| MCP server | `mcp.servers` local/remote | 无 |
+| 插件系统 | server/tui 插件 | 静态 Lua 脚本 |
+
+### 19.11 实现优先级建议
+
+按依赖顺序，建议分阶段补齐：
+
+1. **权限系统对齐**：改回 last-match-wins；持久化 `always` 授权。
+2. **工具改名/补齐**：`edit`/`write`/`apply_patch`/`glob`/`grep`。
+3. **`read` 增强**：分页、图片、目录、二进制检测。
+4. **文件修改增强**：BOM/行尾/条件写入。
+5. **`question` / `todowrite` 工具**。
+6. **Agent 系统**：至少内置 `build`/`plan`/`explore`。
+7. **`AGENTS.md` / `instructions` 自动注入**。
+8. **Session 结构化持久化**。
+9. **TUI / 流式输出**。
+10. **MCP / 多 provider / 插件**。
+
+### 19.12 GUI 当前实现
+
+当前已实现一个最小可用 GUI 原型：
+
+- **Rust 后端**：使用 `egui` + `eframe` 编译为 `libopencode_gui.so`。
+- **C ABI**：暴露 `gui_app_create` / `gui_run` / `gui_on_user_message` / `gui_append_message` / `gui_stream_delta` / `gui_tool_output` 等函数。
+- **LuaJIT FFI 封装**：`gui.lua` 让 Lua 脚本可以创建窗口、注册回调、发送消息/流式片段/工具输出。
+- **集成方式**：`OPENCODE_GUI=1 ./opencode_cli ...` 启动 GUI 模式，由 Lua `run_gui()` 驱动 LLM + 工具循环，并把结果回写到聊天面板。
+
+选择 egui 的原因是：它无需系统 GUI 开发库即可编译，适合快速验证 C ABI + Lua FFI 架构。长期目标仍是 GPUI + gpui-component（GPU 渲染、Dock、编辑器组件），但 C ABI 和 Lua FFI 层保持兼容，后端可以平滑替换。
+
+---
+
+## 20. UI 层实现方案：GPUI 编译为 `.so` + C 调用
+
+### 20.1 为什么选 GPUI
 
 opencode 的核心产品线其实是 **TUI/终端交互** + **代码编辑**。原生 opencode TUI 基于 Node.js/Bun + SolidJS + 自定义终端库，启动慢、内存占用高、渲染经过 JS 事件循环。
 
@@ -774,7 +1329,7 @@ Zed 的 **GPUI** 框架正好适合重写这条产品线：
 - 跨平台窗口和输入事件系统
 - 已被 Zed 编辑器验证过
 
-### 17.2 GPUI 不是纯 Rust，底层是 C/C++/Objective-C
+### 20.2 GPUI 不是纯 Rust，底层是 C/C++/Objective-C
 
 GPUI 对外是 Rust crate，但底层大量依赖平台原生 API：
 
@@ -788,7 +1343,7 @@ GPUI 对外是 Rust crate，但底层大量依赖平台原生 API：
 
 所以 GPUI 的“Rust 上层 + C/C++ 底层”结构，很适合包装成 `.so` 给 C 调用。
 
-### 17.3 现成组件库：`gpui-component`
+### 20.3 现成组件库：`gpui-component`
 
 不必从零写 GPUI 组件，可直接使用 [longbridge/gpui-component](https://github.com/longbridge/gpui-component)：
 
@@ -812,7 +1367,7 @@ GPUI 对外是 Rust crate，但底层大量依赖平台原生 API：
 | `Button` / `Input` / `Modal` | 常规交互 |
 | `Theme` | 暗色/亮色主题 |
 
-### 17.4 方案：Rust 侧编译 `libgpui_app.so`，暴露最小 C ABI
+### 20.4 方案：Rust 侧编译 `libgpui_app.so`，暴露最小 C ABI
 
 不暴露 GPUI 全部 API（太复杂，且依赖 Rust trait/闭包/生命周期），只在 Rust 侧实现一个稳定的应用骨架，暴露少量 C ABI：
 
@@ -891,7 +1446,7 @@ int main() {
 }
 ```
 
-### 17.5 Rust 侧负责什么
+### 20.5 Rust 侧负责什么
 
 - GPU 窗口创建与管理
 - 主题、布局、渲染
@@ -900,7 +1455,7 @@ int main() {
 - 把用户输入、命令提交通过 C 回调传给 C 端
 - 使用 `gpui-component` 的 `Dock`、`Editor`、`Markdown`、`List`、`Theme` 等组件
 
-### 17.6 C 侧负责什么
+### 20.6 C 侧负责什么
 
 - 主程序入口
 - Agent 核心逻辑
@@ -910,7 +1465,7 @@ int main() {
 - 代码索引（调用 `typescript-indexer` 等）
 - 会话状态管理
 
-### 17.7 与现有 my_db 工具链的整合
+### 20.7 与现有 my_db 工具链的整合
 
 | 已有组件 | 在新 UI 中的作用 |
 |---------|---------------|
@@ -921,7 +1476,7 @@ int main() {
 | `call_graph` | 调用关系展示 |
 | 语义向量/HNSW | 自然语言找代码 |
 
-### 17.8 为什么这个方案合理
+### 20.8 为什么这个方案合理
 
 1. **借力 GPUI + gpui-component 的 GPU 渲染和现成组件**，不用自己写 Metal/Vulkan/Win32，也不用从零造编辑器。
 2. **保留 C 核心技术栈**，Agent 逻辑、LLM、工具、KV Cache 继续用 C 写。
@@ -930,7 +1485,7 @@ int main() {
 5. **避免 Electron/Node.js 运行时**，启动快、内存低。
 6. **Zed 本身就是最好的 demo**，编辑器、LSP、多面板、文件树都有现成参考实现。
 
-### 17.9 风险与应对
+### 20.9 风险与应对
 
 | 风险 | 应对 |
 |------|------|
@@ -939,13 +1494,13 @@ int main() {
 | C ABI 设计复杂 | 先暴露 5-10 个函数，跑通后再扩展 |
 | 编译产物大 | Rust + GPUI 产物确实大，但运行内存小，可接受 |
 
-### 17.10 最小可验证原型
+### 20.10 最小可验证原型
 
 1. Rust 侧：一个 GPUI 窗口，左侧会话列表，右侧聊天面板，基于 `gpui-component` 的 `Dock` + `List`。
 2. C 侧：收到用户消息后，把消息 echo 回 UI。
 3. 跑通后，再加入：LLM 流式输出、代码编辑器上下文面板、Markdown 渲染、工具输出。
 4. 最终接入 `libmydb.so` 查询，实现自然语言找代码 + 代码上下文展示。
 
-### 17.11 一句话总结
+### 20.11 一句话总结
 
 > **用 GPUI + gpui-component 做 GPU 渲染和现成 UI，用 C 写 Agent 核心，通过稳定的 C ABI 桥接。既享受现代 GPU UI 框架和编辑器组件，又保留 my_db 的 C 工具链优势。**
