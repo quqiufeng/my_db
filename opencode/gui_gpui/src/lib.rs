@@ -1,6 +1,6 @@
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int, c_void};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, mpsc};
 
 use gpui::prelude::FluentBuilder;
@@ -34,11 +34,8 @@ pub struct GuiApp {
     /// Version label shown in the status bar.
     version: String,
 
-    /// Project root for the file explorer.
+    /// Project root shown in the status bar.
     project_root: PathBuf,
-
-    /// Cached file list for the file explorer.
-    files: Arc<Mutex<Vec<PathBuf>>>,
 
     /// Live todo list updated by the agent workflow.
     todos: Arc<Mutex<Vec<TodoItem>>>,
@@ -143,24 +140,6 @@ impl GuiApp {
 unsafe impl Send for GuiApp {}
 unsafe impl Sync for GuiApp {}
 
-fn list_files(root: &Path) -> Vec<PathBuf> {
-    let mut result = Vec::new();
-    if root.is_dir() {
-        if let Ok(entries) = std::fs::read_dir(root) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_dir() {
-                    result.push(path.clone());
-                    result.extend(list_files(&path));
-                } else {
-                    result.push(path);
-                }
-            }
-        }
-    }
-    result
-}
-
 #[no_mangle]
 pub extern "C" fn gui_app_create(config_json: *const c_char) -> *mut c_void {
     if config_json.is_null() {
@@ -199,8 +178,6 @@ pub extern "C" fn gui_app_create(config_json: *const c_char) -> *mut c_void {
         ),
     };
 
-    let files = list_files(&project_root);
-
     let app = GuiApp {
         on_user_message: None,
         user_data: std::ptr::null_mut(),
@@ -210,7 +187,6 @@ pub extern "C" fn gui_app_create(config_json: *const c_char) -> *mut c_void {
         model,
         version,
         project_root: project_root.clone(),
-        files: Arc::new(Mutex::new(files)),
         todos: Arc::new(Mutex::new(Vec::new())),
         view: Mutex::new(None),
         executor: Mutex::new(None),
@@ -385,9 +361,6 @@ struct TodoItem {
 struct ChatView {
     app: *mut GuiApp,
     input_state: Entity<InputState>,
-    editor_state: Entity<InputState>,
-    editor_path: Option<PathBuf>,
-    editor_visible: bool,
     session_start: String,
     tokens_used: usize,
     context_tokens: usize,
@@ -418,46 +391,12 @@ impl ChatView {
         cx.notify();
     }
 
-    fn open_file(
-        &mut self,
-        path: PathBuf,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let content = std::fs::read_to_string(&path)
-            .unwrap_or_else(|e| format!("Error reading file: {}", e));
-        let lang = language_for_path(&path);
-        self.editor_state.update(cx, |state, _cx| {
-            state.set_value(content, window, _cx);
-        });
-        self.editor_path = Some(path);
-        self.editor_visible = true;
-        let _ = lang;
-        cx.notify();
-    }
-
     fn toggle_todo(&mut self, idx: usize, cx: &mut Context<Self>) {
         let app: &mut GuiApp = unsafe { &mut *self.app };
         if let Some(todo) = app.todos.lock().unwrap().get_mut(idx) {
             todo.done = !todo.done;
         }
         cx.notify();
-    }
-}
-
-fn language_for_path(path: &Path) -> &'static str {
-    match path.extension().and_then(|e| e.to_str()) {
-        Some("rs") => "rust",
-        Some("py") => "python",
-        Some("js") | Some("ts") | Some("jsx") | Some("tsx") => "javascript",
-        Some("c") | Some("h") | Some("cpp") | Some("hpp") | Some("cc") => "c",
-        Some("go") => "go",
-        Some("lua") => "lua",
-        Some("md") | Some("markdown") => "markdown",
-        Some("json") => "json",
-        Some("toml") => "toml",
-        Some("yaml") | Some("yml") => "yaml",
-        _ => "plaintext",
     }
 }
 
@@ -470,7 +409,6 @@ impl Render for ChatView {
         let app = self.app;
         let app_ref: &GuiApp = unsafe { &*app };
         let messages = app_ref.messages.lock().unwrap().clone();
-        let files = app_ref.files.lock().unwrap().clone();
         let project_root = app_ref.project_root.clone();
         let model = app_ref.model.clone();
         let version = app_ref.version.clone();
@@ -651,52 +589,7 @@ impl Render for ChatView {
             .child(session_info)
             .child(context_info)
             .child(lsp_info)
-            .child(todo_info)
-            .child(
-                div()
-                    .flex_1()
-                    .border_t_1()
-                    .border_color(theme.colors.border)
-                    .child(
-                        div()
-                            .p_2()
-                            .font_weight(FontWeight::BOLD)
-                            .child("Files"),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .overflow_y_scrollbar()
-                            .child(
-                                v_flex()
-                                    .gap_1()
-                                    .p_2()
-                                    .children(files.into_iter().enumerate().map({
-                                        let cx_ref = &cx;
-                                        move |(idx, path)| {
-                                            let rel = path
-                                                .strip_prefix(&project_root)
-                                                .unwrap_or(&path)
-                                                .to_string_lossy()
-                                                .to_string();
-                                            let is_dir = path.is_dir();
-                                            let icon = if is_dir { "📁" } else { "📄" };
-                                            let path_for_click = path.clone();
-                                            div()
-                                                .id(format!("file-{}", idx))
-                                                .child(format!("{} {}", icon, rel))
-                                                .text_sm()
-                                                .cursor_pointer()
-                                                .when(!is_dir, |this| {
-                                                    this.on_click(cx_ref.listener(move |this, _event, window, cx| {
-                                                        this.open_file(path_for_click.clone(), window, cx);
-                                                    }))
-                                                })
-                                        }
-                                    })),
-                            ),
-                    ),
-            );
+            .child(todo_info);
 
         // Bottom input + status bar
         let input_bar = h_flex()
@@ -731,44 +624,10 @@ impl Render for ChatView {
             .child(div().child(format!("{}:main", project_name)))
             .child(div().child("OpenCode ".to_string() + &version));
 
-        // Top menu bar
-        let menu_item = |label: &str| {
-            div()
-                .px_2()
-                .py_1()
-                .child(label.to_string())
-                .cursor_pointer()
-                .hover(|style| style.bg(theme.colors.muted))
-                .into_any_element()
-        };
-        let menu_bar = h_flex()
-            .border_b_1()
-            .border_color(theme.colors.border)
-            .child(menu_item("文件"))
-            .child(menu_item("动作"))
-            .child(menu_item("编辑"))
-            .child(menu_item("查看"))
-            .child(menu_item("帮助"));
-
-        // Tabs
-        let tab_bar = h_flex()
-            .border_b_1()
-            .border_color(theme.colors.border)
-            .child(
-                div()
-                    .px_3()
-                    .py_1()
-                    .bg(theme.colors.primary)
-                    .text_color(theme.colors.background)
-                    .child("OpenCode"),
-            );
-
         // Main area: messages above, input/status below
         let main_area = v_flex()
             .flex_1()
             .size_full()
-            .child(menu_bar)
-            .child(tab_bar)
             .child(message_list)
             .child(input_bar)
             .child(status_bar);
@@ -821,19 +680,10 @@ pub extern "C" fn gui_run(app_ptr: *mut c_void) -> c_int {
                         .tab_size(TabSize { tab_size: 4, ..Default::default() })
                 });
                 let input_state_for_view = input_state.clone();
-                let editor_state = cx.new(|cx| {
-                    InputState::new(window, cx)
-                        .code_editor("plaintext")
-                        .multi_line(true)
-                        .tab_size(TabSize { tab_size: 4, ..Default::default() })
-                });
                 let chat_view = cx.new(|cx| {
                     let view = ChatView {
                         app: app_ptr,
                         input_state,
-                        editor_state,
-                        editor_path: None,
-                        editor_visible: false,
                         session_start: "2026-06-15T12:00:00".to_string(),
                         tokens_used: 179011,
                         context_tokens: 262144,
