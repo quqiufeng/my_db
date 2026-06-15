@@ -685,6 +685,10 @@ pub extern "C" fn gui_run(app_ptr: *mut c_void) -> c_int {
                 window_background: gpui::WindowBackgroundAppearance::Opaque,
                 #[cfg(target_os = "linux")]
                 window_decorations: Some(gpui::WindowDecorations::Client),
+                window_min_size: Some(gpui::Size {
+                    width: px(640.),
+                    height: px(480.),
+                }),
                 ..Default::default()
             },
             move |window, cx| {
