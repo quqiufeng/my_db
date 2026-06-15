@@ -696,6 +696,9 @@ pub extern "C" fn gui_run(app_ptr: *mut c_void) -> c_int {
                     InputState::new(window, cx)
                         .code_editor("markdown")
                         .multi_line(true)
+                        .rows(5)
+                        .line_number(false)
+                        .folding(false)
                         .tab_size(TabSize { tab_size: 4, ..Default::default() })
                 });
                 let input_state_for_view = input_state.clone();
