@@ -75,7 +75,7 @@ int wal_append(db_wal_t* wal, int op, const char* table_name,
     offset += row_size;
     
     // 计算 CRC
-    *crc_ptr = crc32(buf + 8, total_size - 8);
+    *crc_ptr = mydb_crc32(buf + 8, total_size - 8);
     
     // 写入文件（不 fsync，依赖 OS page cache 或显式 db_sync）
     ssize_t written = write(wal->fd, buf, total_size);
@@ -139,7 +139,7 @@ int wal_replay(db_wal_t* wal, db_instance_t* db) {
         uint32_t entry_crc = *(uint32_t*)(buf + offset);
         offset += 4;
         
-        uint32_t calc_crc = crc32(buf + offset, entry_len - 4);
+        uint32_t calc_crc = mydb_crc32(buf + offset, entry_len - 4);
         if (entry_crc != calc_crc) {
             fprintf(stderr, "WAL CRC mismatch, skipping entry\n");
             offset += entry_len - 4;

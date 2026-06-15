@@ -67,7 +67,7 @@ static const uint32_t crc32_table[256] = {
     0xb40bbe37, 0xc30c8ea1, 0x5a05df1b, 0x2d02ef8d,
 };
 
-uint32_t crc32(const void* data, size_t len) {
+uint32_t mydb_crc32(const void* data, size_t len) {
     const uint8_t* buf = (const uint8_t*)data;
     uint32_t crc = 0xffffffff;
     for (size_t i = 0; i < len; i++) {

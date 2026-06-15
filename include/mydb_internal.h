@@ -120,7 +120,7 @@ typedef struct db_instance {
 } db_instance_t;
 
 // ====== 工具函数 ======
-uint32_t crc32(const void* data, size_t len);
+uint32_t mydb_crc32(const void* data, size_t len);
 void db_set_error(db_instance_t* db, int code, const char* fmt, ...);
 
 // ====== 池操作 ======
