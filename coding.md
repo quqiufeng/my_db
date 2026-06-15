@@ -21,7 +21,8 @@
 │       ├── {project}.jina.idx
 │       └── {project}.jina.bin.hnsw
 ├── explore_repo.sh               # 项目探索脚本（软链接到项目根目录）
-└── analyze_repo.sh               # 项目分析脚本（软链接到项目根目录）
+├── analyze_repo.sh               # 项目分析脚本（软链接到项目根目录）
+└── analyze_nodejs_repo.sh        # Node.js/TypeScript 项目专用分析脚本
 ```
 
 > **注意**: KV Cache 二进制数据（`cache.bin` + `index.bin` + `vectors/`）保存在 `/memory/` 目录下；`/code/{project}/` 下存放的是可读的分析产出（文本、JSON、向量等临时文件）。
@@ -156,6 +157,7 @@
 | `--cache-dir <dir>` | 否 | KV Cache 目录（默认: /memory） |
 | `--jobs <n>` | 否 | 并行工作进程数（默认: CPU 核心数） |
 | `--name <name>` | 否 | 项目名（用于目录命名） |
+| `--plugins <path>` | 否 | 插件注册表 JSON（推荐 Node.js/TypeScript 项目使用） |
 
 **命名空间自动检测**：
 - GitHub URL: `https://github.com/owner/repo` → `/code/owner/repo`
@@ -181,6 +183,47 @@
 # 指定并行度和缓存目录
 ./analyze_repo.sh /opt/linux/src/linux-7.0.11 /code/linux --jobs 8 --cache-dir /data/cache
 ```
+
+### Node.js / TypeScript 项目专用分析
+
+对于 Node.js / TypeScript 项目（包括 React/Vue/SolidJS、Bun、Effect-TS 等），推荐使用 TypeScript AST 插件替代默认 ctags，可获得更精准的函数/类型/类/接口级 chunks，避免成员变量和局部变量噪声。
+
+**前置条件**：
+```bash
+# 插件已经预置在 /opt/my_db/plugins/typescript-indexer/
+cd /opt/my_db/plugins/typescript-indexer
+make                    # 首次编译
+ldd bin/typescript-indexer   # 确认只依赖 libjansson.so.4 和 libc
+```
+
+**一键分析命令**：
+```bash
+./analyze_repo.sh /opt/opencode /code/opencode \
+  --name opencode \
+  --plugins /opt/my_db/plugins/typescript-indexer/plugin.json \
+  --jobs 4
+```
+
+**便捷包装脚本**（无需记忆插件路径）：
+```bash
+./analyze_nodejs_repo.sh /opt/opencode /code/opencode
+```
+
+**命名空间自动检测示例**：
+| 源码路径 | 自动命名空间 |
+|----------|--------------|
+| `/opt/opencode` | `/code/local/opencode` |
+| `/opt/my-app` | `/code/local/my-app` |
+| `https://github.com/anomalyco/opencode` | `/code/anomalyco/opencode` |
+
+**与默认 ctags 对比**：
+| 指标 | ctags | TS AST 插件 |
+|------|-------|-------------|
+| opencode chunks | 31691 | 10218 |
+| 噪声（成员/字段/变量） | 高 | 低 |
+| 函数/类型/类/接口 | 较少 | 主导 |
+| TypeScript 泛型/类型别名 | 不支持 | 支持 |
+| 导出标记 | 无 | 有（tags 含 `export`） |
 
 **6 步流水线详解**：
 

@@ -41,6 +41,25 @@ The plugin is registered via `plugin.json`. `code_indexer` will:
 3. Read JSON Lines output
 4. Fall back to ctags if the plugin fails
 
+## Integration with analyze_repo.sh
+
+For Node.js / TypeScript projects, pass the plugin registry to `analyze_repo.sh`:
+
+```bash
+./analyze_repo.sh /opt/opencode /code/opencode \
+  --name opencode \
+  --plugins /opt/my_db/plugins/typescript-indexer/plugin.json \
+  --jobs 4
+```
+
+Or use the convenience wrapper from the repo root:
+
+```bash
+./analyze_nodejs_repo.sh /opt/opencode /code/opencode
+```
+
+The wrapper auto-detects namespace, compiles the plugin if needed, and passes all common Node.js excludes (e.g. `node_modules,dist,build,.next`).
+
 ## Output Records
 
 - `chunk`: extracted symbol (function, class, interface, type alias, enum, variable, namespace)
