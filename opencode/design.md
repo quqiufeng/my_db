@@ -760,3 +760,192 @@ prompt 里只放：
 4. 跑通端到端示例：用户提问 → 搜索代码 → 深度上下文 → 生成回答。
 5. 增加第三方代码识别与拦截配置。
 6. 实现第三方依赖自动预索引流程。
+
+## 17. UI 层实现方案：GPUI 编译为 `.so` + C 调用
+
+### 17.1 为什么选 GPUI
+
+opencode 的核心产品线其实是 **TUI/终端交互** + **代码编辑**。原生 opencode TUI 基于 Node.js/Bun + SolidJS + 自定义终端库，启动慢、内存占用高、渲染经过 JS 事件循环。
+
+Zed 的 **GPUI** 框架正好适合重写这条产品线：
+
+- GPU 加速的 2D 渲染（Metal/Vulkan/DirectX）
+- 响应式 UI 模型，类似 React/Solid
+- 跨平台窗口和输入事件系统
+- 已被 Zed 编辑器验证过
+
+### 17.2 GPUI 不是纯 Rust，底层是 C/C++/Objective-C
+
+GPUI 对外是 Rust crate，但底层大量依赖平台原生 API：
+
+| 平台 | 底层技术 |
+|------|---------|
+| macOS | Cocoa/AppKit (Objective-C)、Metal |
+| Linux | Wayland/X11 (C)、Vulkan/OpenGL |
+| Windows | Win32 (C)、DirectX/DirectWrite |
+| 字体 | CoreText / DirectWrite / font-kit (C/C++) |
+| 输入 | 各平台原生事件 API |
+
+所以 GPUI 的“Rust 上层 + C/C++ 底层”结构，很适合包装成 `.so` 给 C 调用。
+
+### 17.3 现成组件库：`gpui-component`
+
+不必从零写 GPUI 组件，可直接使用 [longbridge/gpui-component](https://github.com/longbridge/gpui-component)：
+
+- 60+ 跨平台桌面 UI 组件
+- Dock 布局系统（面板、分割、标签页、自由拖拽）
+- 虚拟化 Table / List，支持大数据量
+- 内置 Markdown / 简单 HTML 渲染
+- 代码编辑器（支持 LSP、Tree-sitter 语法高亮，标称 20 万行稳定）
+- 图表、按钮、输入框、弹窗、菜单、主题系统
+- 最小二进制约 12MB
+- 已用于 Longbridge Pro 等实际产品
+
+对 opencode 复刻版最有价值的组件：
+
+| 组件 | 用途 |
+|------|------|
+| `Dock` | 会话列表面板 + 聊天面板 + 代码编辑器 + 工具输出 |
+| `Editor` | 代码编辑 + 语法高亮 + LSP |
+| `Markdown` | 渲染 LLM 回复、文档 |
+| `List` / `Table` | 文件树、搜索结果显示 |
+| `Button` / `Input` / `Modal` | 常规交互 |
+| `Theme` | 暗色/亮色主题 |
+
+### 17.4 方案：Rust 侧编译 `libgpui_app.so`，暴露最小 C ABI
+
+不暴露 GPUI 全部 API（太复杂，且依赖 Rust trait/闭包/生命周期），只在 Rust 侧实现一个稳定的应用骨架，暴露少量 C ABI：
+
+```rust
+// Rust side (crate-type = ["cdylib"])
+#[no_mangle]
+pub extern "C" fn gpui_app_create(config_json: *const c_char) -> *mut AppState;
+
+#[no_mangle]
+pub extern "C" fn gpui_app_run(app: *mut AppState);
+
+#[no_mangle]
+pub extern "C" fn gpui_app_quit(app: *mut AppState);
+
+#[no_mangle]
+pub extern "C" fn gpui_window_open(app: *mut AppState, title: *const c_char);
+
+#[no_mangle]
+pub extern "C" fn gpui_panel_set_chat(
+    app: *mut AppState,
+    session_id: *const c_char,
+    messages_json: *const c_char,
+);
+
+#[no_mangle]
+pub extern "C" fn gpui_panel_set_code_context(
+    app: *mut AppState,
+    file_path: *const c_char,
+    line_start: i32,
+    line_end: i32,
+    content: *const c_char,
+);
+
+#[no_mangle]
+pub extern "C" fn gpui_on_user_message(
+    app: *mut AppState,
+    callback: extern "C" fn(*const c_char, *mut c_void),
+    userdata: *mut c_void,
+);
+
+#[no_mangle]
+pub extern "C" fn gpui_on_tool_call(
+    app: *mut AppState,
+    callback: extern "C" fn(*const c_char, *mut c_void) -> *mut c_char,
+    userdata: *mut c_void,
+);
+
+#[no_mangle]
+pub extern "C" fn gpui_send_stream_delta(
+    app: *mut AppState,
+    session_id: *const c_char,
+    delta: *const c_char,
+);
+
+#[no_mangle]
+pub extern "C" fn gpui_send_tool_output(
+    app: *mut AppState,
+    tool_id: *const c_char,
+    output: *const c_char,
+);
+```
+
+```c
+// C side
+#include "gpui_app.h"
+
+int main() {
+    gpui_app_t* app = gpui_app_create("{\"theme\":\"dark\"}");
+    gpui_window_open(app, "opencode-rs");
+
+    gpui_on_user_message(app, on_user_message, NULL);
+    gpui_on_tool_call(app, on_tool_call, NULL);
+
+    gpui_app_run(app);   // blocks, runs event loop
+    return 0;
+}
+```
+
+### 17.5 Rust 侧负责什么
+
+- GPU 窗口创建与管理
+- 主题、布局、渲染
+- 键盘/鼠标事件路由
+- 组件树：会话列表、聊天面板、代码编辑器视图、文件树、工具输出面板
+- 把用户输入、命令提交通过 C 回调传给 C 端
+- 使用 `gpui-component` 的 `Dock`、`Editor`、`Markdown`、`List`、`Theme` 等组件
+
+### 17.6 C 侧负责什么
+
+- 主程序入口
+- Agent 核心逻辑
+- LLM 调用（流式输出回传给 Rust UI）
+- 工具执行（bash、文件读写、git）
+- KV Cache 查询（调用 `libmydb.so`）
+- 代码索引（调用 `typescript-indexer` 等）
+- 会话状态管理
+
+### 17.7 与现有 my_db 工具链的整合
+
+| 已有组件 | 在新 UI 中的作用 |
+|---------|---------------|
+| `libmydb.so` / KV Cache | 代码记忆、语义搜索、会话持久化 |
+| `typescript-indexer` | 索引项目代码 |
+| `analyze_nodejs_repo.sh` | 一键索引用户项目 |
+| `cache_query` | 符号上下文查询 |
+| `call_graph` | 调用关系展示 |
+| 语义向量/HNSW | 自然语言找代码 |
+
+### 17.8 为什么这个方案合理
+
+1. **借力 GPUI + gpui-component 的 GPU 渲染和现成组件**，不用自己写 Metal/Vulkan/Win32，也不用从零造编辑器。
+2. **保留 C 核心技术栈**，Agent 逻辑、LLM、工具、KV Cache 继续用 C 写。
+3. **Rust 只当 UI 驱动**，职责清晰。
+4. **C ABI 稳定后**，以后换其他 UI 框架也容易。
+5. **避免 Electron/Node.js 运行时**，启动快、内存低。
+6. **Zed 本身就是最好的 demo**，编辑器、LSP、多面板、文件树都有现成参考实现。
+
+### 17.9 风险与应对
+
+| 风险 | 应对 |
+|------|------|
+| GPUI API 还在快速演进 | 只依赖少量稳定概念：window、div、text、list、editor；使用 gpui-component 进一步隔离 |
+| GPUI 没有独立发布 | 基于 Zed 源码 + gpui-component 构建，可 fork 固定版本 |
+| C ABI 设计复杂 | 先暴露 5-10 个函数，跑通后再扩展 |
+| 编译产物大 | Rust + GPUI 产物确实大，但运行内存小，可接受 |
+
+### 17.10 最小可验证原型
+
+1. Rust 侧：一个 GPUI 窗口，左侧会话列表，右侧聊天面板，基于 `gpui-component` 的 `Dock` + `List`。
+2. C 侧：收到用户消息后，把消息 echo 回 UI。
+3. 跑通后，再加入：LLM 流式输出、代码编辑器上下文面板、Markdown 渲染、工具输出。
+4. 最终接入 `libmydb.so` 查询，实现自然语言找代码 + 代码上下文展示。
+
+### 17.11 一句话总结
+
+> **用 GPUI + gpui-component 做 GPU 渲染和现成 UI，用 C 写 Agent 核心，通过稳定的 C ABI 桥接。既享受现代 GPU UI 框架和编辑器组件，又保留 my_db 的 C 工具链优势。**
