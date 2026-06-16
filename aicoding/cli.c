@@ -401,6 +401,11 @@ int main(int argc, char** argv) {
            session_id, project_ns, cfg.model);
 
     int use_gui = getenv("OPENCODE_GUI") != NULL;
+    if (!use_gui) {
+        /* Default to GUI for interactive runs. CLI remains available via
+         * OPENCODE_GUI=0 or stdin redirection. */
+        use_gui = 1;
+    }
     if (use_gui) {
         printf("Starting GUI...\n");
         const char* gui_args[] = { session_id, project_ns };
