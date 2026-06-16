@@ -37,9 +37,19 @@ function M.run(cmd, args)
     return out, ok
 end
 
--- mkdir -p with safe quoting.
+-- mkdir -p with safe quoting. Silently skip if not writable.
 function M.mkdir_p(path)
-    return os.execute("mkdir -p " .. M.quote(path))
+    if not path then return false end
+    -- Check if parent exists and is writable before trying
+    local parent = path:match("^(.*/)") or "."
+    local p = io.popen("test -w " .. M.quote(parent) .. " 2>/dev/null && echo ok || echo no")
+    if not p then return false end
+    local ok = p:read("*a") or ""
+    p:close()
+    if ok:match("ok") then
+        return os.execute("mkdir -p " .. M.quote(path) .. " 2>/dev/null")
+    end
+    return false
 end
 
 -- ls -1 in a directory, returning a list of filenames.

@@ -621,7 +621,7 @@ M.tools = {
 
             local dir = path:match("^(.*)/")
             if dir then
-                os.execute("mkdir -p " .. shell.quote(dir))
+                shell.mkdir_p(dir)
             end
 
             local cok, cerr = write_file(path, content)

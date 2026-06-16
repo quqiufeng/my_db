@@ -10,6 +10,7 @@ local cjson = require("cjson")
 local json = require("json")
 local memory = require("memory")
 local log = require("log")
+local shell = require("shell")
 
 local M = {}
 
@@ -33,7 +34,7 @@ end
 local function copy_file(src, dst)
     local dir = dst:match("^(.*)/[^/]$")
     if dir then
-        os.execute("mkdir -p " .. cjson.encode(dir))
+        shell.mkdir_p(dir)
     end
     local in_f = io.open(src, "rb")
     if not in_f then return false, "cannot read " .. src end
@@ -56,7 +57,7 @@ function M.create(session_id, project_root, files, reason)
     local ts = tostring(os.time())
     local root = checkpoint_root(session_id, project_root)
     local cp_dir = root .. "/" .. ts
-    os.execute("mkdir -p " .. cjson.encode(cp_dir))
+    shell.mkdir_p(cp_dir)
 
     local backed = {}
     for _, f in ipairs(files) do
