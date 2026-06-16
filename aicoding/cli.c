@@ -99,8 +99,12 @@ static int parse_json_models(const char* text) {
 
 static int load_models_json(void) {
     char path[1024];
-    snprintf(path, sizeof(path), "%s/.aicoding/models.json", get_home_dir());
-    FILE* f = fopen(path, "r");
+    /* Priority: /etc/aicoding/models.json (system-wide), ~/.aicoding/models.json (user), built-in */
+    FILE* f = fopen("/etc/aicoding/models.json", "r");
+    if (!f) {
+        snprintf(path, sizeof(path), "%s/.aicoding/models.json", get_home_dir());
+        f = fopen(path, "r");
+    }
     if (!f) {
         f = fopen("/opt/my_db/aicoding/models.json", "r");
     }
@@ -310,12 +314,12 @@ int main(int argc, char** argv) {
         }
     }
 
-    /* Load env files. Global ~/.aicoding/.env is always loaded first
-     * (lower priority), then project ./.env or --env FILE overwrites
-     * (higher priority). This way a project can override specific vars
-     * while the global file provides defaults for all providers
-     * (e.g. both OPENAI_* and DEEPSEEK_* keys coexist).
+    /* Load env files. System-wide /etc/aicoding/.env is loaded first
+     * (lowest priority), then global ~/.aicoding/.env, then project
+     * ./.env or --env FILE (highest priority). This way all users
+     * (including root via sudo) share the same config.
      */
+    load_env_file("/etc/aicoding/.env");
     char global_env[1024];
     snprintf(global_env, sizeof(global_env), "%s/.aicoding/.env", get_home_dir());
     load_env_file(global_env);
