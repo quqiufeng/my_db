@@ -11,14 +11,21 @@ local M = {}
 
 M.session_id = "default"
 M.project_root = "."
+M.project_basename = "default"
+M._trace_dir = nil
 
-function M.init(session_id, project_root)
+function M.init(session_id, project_root, basename)
     M.session_id = session_id or "default"
     M.project_root = project_root or "."
+    M.project_basename = basename or "default"
+    M._trace_dir = nil
 end
 
 function M.trace_dir()
-    return M.project_root .. "/.opencode/traces"
+    if not M._trace_dir then
+        M._trace_dir = shell.runtime_dir(M.project_root, "traces", M.project_basename)
+    end
+    return M._trace_dir
 end
 
 function M.trace_path()
@@ -26,7 +33,8 @@ function M.trace_path()
 end
 
 function M.ensure_dir()
-    shell.mkdir_p(M.trace_dir())
+    -- runtime_dir already creates the directory
+    M.trace_dir()
 end
 
 -- Append a structured event to the trace file.

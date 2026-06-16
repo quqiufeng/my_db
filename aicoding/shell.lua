@@ -37,19 +37,14 @@ function M.run(cmd, args)
     return out, ok
 end
 
--- mkdir -p with safe quoting. Silently skip if not writable.
+-- mkdir -p with safe quoting. Returns true if the directory exists (or was created).
+-- Errors are silently ignored.
 function M.mkdir_p(path)
-    if not path then return false end
-    -- Check if parent exists and is writable before trying
-    local parent = path:match("^(.*/)") or "."
-    local p = io.popen("test -w " .. M.quote(parent) .. " 2>/dev/null && echo ok || echo no")
-    if not p then return false end
-    local ok = p:read("*a") or ""
-    p:close()
-    if ok:match("ok") then
-        return os.execute("mkdir -p " .. M.quote(path) .. " 2>/dev/null")
-    end
-    return false
+    if not path or path == "" then return false end
+    -- Try mkdir -p directly; suppress stderr to avoid noise on read-only dirs.
+    os.execute("mkdir -p " .. M.quote(path) .. " 2>/dev/null")
+    -- Verify the directory was actually created.
+    return os.execute("test -d " .. M.quote(path) .. " 2>/dev/null") == 0
 end
 
 -- ls -1 in a directory, returning a list of filenames.
@@ -63,6 +58,28 @@ function M.ls(dir)
         table.insert(files, line)
     end
     return files
+end
+
+-- Return a writable runtime directory for a project.
+-- Tries project_root/.opencode/<subdir> first; if not writable,
+-- falls back to ~/.aicoding/runtime/<project_basename>/<subdir>.
+-- Automatically creates the directory if it doesn't exist.
+function M.runtime_dir(project_root, subdir, project_basename)
+    project_root = project_root or "."
+    subdir = subdir or ""
+    project_basename = project_basename or "default"
+
+    -- Try project-local .opencode first
+    local local_dir = project_root .. "/.opencode" .. (subdir ~= "" and "/" .. subdir or "")
+    if M.mkdir_p(local_dir) then
+        return local_dir
+    end
+
+    -- Fallback to home runtime directory
+    local home = os.getenv("HOME") or "/tmp"
+    local fallback = home .. "/.aicoding/runtime/" .. project_basename .. (subdir ~= "" and "/" .. subdir or "")
+    M.mkdir_p(fallback)
+    return fallback
 end
 
 return M

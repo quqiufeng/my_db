@@ -17,7 +17,7 @@ local M = {}
 -- 获取 checkpoint 根目录
 local function checkpoint_root(session_id, project_root)
     project_root = project_root or "."
-    return project_root .. "/.opencode/checkpoints/" .. session_id
+    return shell.runtime_dir(project_root, "checkpoints/" .. (session_id or "default"))
 end
 
 -- 把绝对路径转成相对路径（用于备份结构）
