@@ -9,6 +9,7 @@
 local cjson = require("cjson")
 local json = require("json")
 local memory = require("memory")
+local log = require("log")
 
 local M = {}
 
@@ -94,6 +95,7 @@ function M.create(session_id, project_root, files, reason)
     while #manifest > 20 do table.remove(manifest) end
 
     memory.write(manifest_key, cjson.encode(manifest))
+    log.info("checkpoint created: %s (%d files)", ts, #backed)
 
     return { ok = true, checkpoint_id = ts, files_backed = backed, dir = cp_dir }
 end
@@ -135,6 +137,7 @@ function M.restore(session_id, project_root, checkpoint_id)
         if ok then
             table.insert(restored, rel)
         else
+            log.error("restore failed for %s: %s", rel, err)
             return { ok = false, error = err, restored = restored }
         end
     end
@@ -144,6 +147,7 @@ end
 
 -- 撤销最近一次 checkpoint
 function M.undo_last(session_id, project_root)
+    log.info("undo_last requested for session %s", session_id)
     local list_result = M.list(session_id)
     if not list_result.ok then return list_result end
     if #list_result.checkpoints == 0 then

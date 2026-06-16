@@ -10,6 +10,7 @@ local knowledge = require("knowledge")
 local trace = require("trace")
 local shell = require("shell")
 local json = require("json")
+local log = require("log")
 
 -- Pure Lua helpers: base64 and sha256 (avoid requiring unregistered C functions)
 local base64_chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
@@ -237,15 +238,18 @@ end
 local function permit(action, resource)
     local effect = permissions.check(action, resource)
     if effect == "deny" then
+        log.warn("permission denied: %s %s", action, resource)
         return false, "denied by permission rule"
     end
     if action == "bash" and resource then
         local dangerous, reason = permissions.is_dangerous_bash(resource)
         if dangerous then
+            log.warn("dangerous bash command blocked: %s (%s)", resource, reason)
             return false, "dangerous bash command blocked: " .. tostring(reason)
         end
     end
     if effect == "ask" then
+        log.info("asking user for permission: %s %s", action, resource)
         local answer = permissions.prompt_user(action, resource)
         if answer == "deny" then
             return false, "denied by user"
@@ -1139,7 +1143,9 @@ function M.register_tools(agent_ns)
             parameters = finalize_schema(schema_from_params(t.parameters))
         }
         local key = agent_ns .. "tools/" .. t.name
-        opencode.cache_set(key, cjson.encode(schema), 0)
+        if opencode and opencode.cache_set then
+            opencode.cache_set(key, cjson.encode(schema), 0)
+        end
     end
 end
 

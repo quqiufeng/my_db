@@ -22,6 +22,7 @@ end
 
 local cjson  = require("cjson")
 local json   = require("json")
+local log    = require("log")
 local prompt = require("prompts.default")
 local tools  = require("tools.default")
 local context = require("context")
@@ -47,12 +48,12 @@ function gui_on_copy(text)
     if opencode.set_clipboard then
         local ok, err = opencode.set_clipboard(text)
         if ok then
-            opencode.log_info("copied to clipboard (" .. tostring(#text) .. " bytes)")
+            log.info("copied to clipboard (" .. tostring(#text) .. " bytes)")
         else
-            opencode.log_info("clipboard copy failed: " .. tostring(err))
+            log.warn("clipboard copy failed: " .. tostring(err))
         end
     else
-        opencode.log_info("set_clipboard not available")
+        log.warn("set_clipboard not available")
     end
 end
 
@@ -63,7 +64,7 @@ function gui_tick()
         if coroutine.status(co) == "suspended" then
             local ok, err = coroutine.resume(co)
             if not ok then
-                opencode.log_info("coroutine error: " .. tostring(err))
+                log.error("coroutine error: %s", err)
                 table.remove(pending_coroutines, i)
             else
                 i = i + 1
@@ -208,10 +209,10 @@ end
 -- Execute tool_calls and append tool result messages.
 local function execute_tools(messages, tool_calls)
     for _, tc in ipairs(tool_calls) do
-        opencode.log_info("executing tool: " .. tc.name)
+        log.info("executing tool: %s", tc.name)
         trace.tool_call(tc.name, tc.arguments)
         local result = tools.dispatch(tc)
-        opencode.log_info("tool result: " .. cjson.encode(result):sub(1, 300))
+        log.debug("tool result: %s", cjson.encode(result):sub(1, 300))
         trace.tool_result(tc.name, result)
         table.insert(messages, {
             role = "tool",
@@ -271,12 +272,12 @@ function chat_once(session_id, project_ns, user_query)
 
             local max_iterations = 8
     for i = 1, max_iterations do
-        opencode.log_info("llm iteration " .. tostring(i))
+        log.info("llm iteration %d", i)
 
         -- Apply sliding-window + LRU compression before sending
         local request_messages, archived = context.build_messages(session_id, system, messages)
         if archived and #archived > 0 then
-            opencode.log_info("archived " .. tostring(#archived) .. " old messages to KV Cache")
+            log.info("archived %d old messages to KV Cache", #archived)
             trace.context_archive(#archived)
         end
 
@@ -302,16 +303,16 @@ function chat_once(session_id, project_ns, user_query)
         end
 
         local body_json = cjson.encode(request_body)
-        opencode.log_info("request body (first 500): " .. body_json:sub(1, 500))
+        log.debug("request body (first 500): %s", body_json:sub(1, 500))
         trace.llm_request(body_json:sub(1, 500))
 
         local response = opencode.llm_complete_raw(body_json)
         if not response then
-            opencode.log_info("llm_complete_raw returned nil")
+            log.warn("llm_complete_raw returned nil")
             trace.error("llm_complete_raw returned nil")
             return nil
         end
-        opencode.log_info("llm response: " .. response:sub(1, 200))
+        log.debug("llm response: %s", response:sub(1, 200))
         trace.llm_response(response:sub(1, 500))
 
         local content, reasoning, err, tool_calls
@@ -321,7 +322,7 @@ function chat_once(session_id, project_ns, user_query)
             content, reasoning, err, tool_calls = parse_openai_response(response)
         end
         if err then
-            opencode.log_info("parse error: " .. err)
+            log.error("parse error: %s", err)
             trace.error("response parse error", { error = err })
             return content or "(parse error)"
         end
@@ -341,7 +342,7 @@ end
 function generate_summary(session_id, reason)
     local messages = _G.session_messages and _G.session_messages[session_id]
     if not messages or #messages == 0 then
-        opencode.log_info("generate_summary: no messages for session " .. tostring(session_id))
+        log.warn("generate_summary: no messages for session %s", session_id)
         return
     end
     local summarize = require("summarize")
@@ -351,9 +352,13 @@ end
 function handle_tool_call(tool_call_json)
     local call, decode_err = json.decode(tool_call_json)
     if not call then
+        log.error("handle_tool_call: invalid JSON: %s", decode_err)
+        trace.error("handle_tool_call invalid JSON", { error = decode_err })
         return json.encode({ ok = false, error = "invalid tool call JSON: " .. tostring(decode_err) })
     end
+    trace.tool_call(call.name, call.arguments)
     local result = tools.dispatch(call)
+    trace.tool_result(call.name, result)
     return json.encode(result)
 end
 
@@ -364,9 +369,11 @@ end
 function save_facts(session_id, facts_json)
     local facts, decode_err = json.decode(facts_json)
     if not facts then
-        opencode.log_info("save_facts: invalid JSON: " .. tostring(decode_err))
+        log.error("save_facts: invalid JSON: %s", decode_err)
+        trace.error("save_facts invalid JSON", { error = decode_err })
         return
     end
+    trace.context_archive(#facts)
     prompt.save_facts(session_id, facts)
 end
 
@@ -430,13 +437,13 @@ function run_gui(session_id, project_ns)
     local max_iterations = 8
 
             for i = 1, max_iterations do
-                opencode.log_info("gui llm iteration " .. tostring(i))
+                log.info("gui llm iteration %d", i)
                 gui.add_todo(app, "LLM iteration " .. tostring(i))
 
                 -- Apply sliding-window + LRU compression before sending
                 local request_messages, archived = context.build_messages(sid, system, messages)
                 if archived and #archived > 0 then
-                    opencode.log_info("gui archived " .. tostring(#archived) .. " old messages to KV Cache")
+                    log.info("gui archived %d old messages to KV Cache", #archived)
                     trace.context_archive(#archived)
                 end
 
@@ -487,7 +494,7 @@ function run_gui(session_id, project_ns)
                     trace.error("gui llm request failed", { error = err })
                     return
                 end
-                opencode.log_info("llm response preview: " .. response:sub(1, 500))
+                log.debug("llm response preview: %s", response:sub(1, 500))
                 trace.llm_response(response:sub(1, 500))
 
                 -- Report real token usage to GUI if available.
@@ -540,14 +547,14 @@ function run_gui(session_id, project_ns)
 
                 append_assistant(messages, content, reasoning, tool_calls)
                 for _, tc in ipairs(tool_calls) do
-                    opencode.log_info("gui executing tool: " .. tc.name)
+                    log.info("gui executing tool: %s", tc.name)
                     trace.tool_call(tc.name, tc.arguments)
                     gui.add_todo(app, "Run tool: " .. tc.name)
                     gui.tool_output(app, sid, tc.name, "running...")
                     -- Allow GUI to show the "running..." state briefly
                     coroutine.yield()
                     local result = tools.dispatch(tc)
-                    opencode.log_info("gui tool result: " .. cjson.encode(result):sub(1, 300))
+                    log.debug("gui tool result: %s", cjson.encode(result):sub(1, 300))
                     trace.tool_result(tc.name, result)
                     gui.tool_output(app, sid, tc.name, format_tool_result(tc.name, result):sub(1, 16000))
                     gui.set_todo_done(app, "Run tool: " .. tc.name, true)
@@ -570,7 +577,7 @@ function run_gui(session_id, project_ns)
     -- Automated GUI test script (optional)
     local test_script = os.getenv("OPENCODE_GUI_TEST_SCRIPT")
     if test_script then
-        opencode.log_info("scheduling gui test script: " .. test_script)
+        log.info("scheduling gui test script: %s", test_script)
         local test_co = coroutine.create(function()
             -- Wait briefly for GUI setup
             for _ = 1, 10 do coroutine.yield() end
@@ -600,11 +607,11 @@ function run_gui(session_id, project_ns)
                 setfenv(chunk, test_env)
                 local ok, res = pcall(chunk)
                 if not ok then
-                    opencode.log_info("gui test script error: " .. tostring(res))
+                    log.error("gui test script error: %s", res)
                     print("TEST FAILED: " .. tostring(res))
                 end
             else
-                opencode.log_info("failed to load gui test script: " .. tostring(err))
+                log.error("failed to load gui test script: %s", err)
                 print("TEST FAILED: cannot load script: " .. tostring(err))
             end
         end)
@@ -617,4 +624,4 @@ function run_gui(session_id, project_ns)
     return "gui exit code " .. tostring(code)
 end
 
-opencode.log_info("opencode Lua runtime loaded")
+log.info("opencode Lua runtime loaded")

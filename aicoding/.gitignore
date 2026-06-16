@@ -13,3 +13,4 @@ target/
 .DS_Store
 test/test_session
 
+.opencode/

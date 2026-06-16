@@ -55,7 +55,7 @@ local function load_config(path)
     if not text then return nil end
     local cfg = parse_jsonc(text)
     if not cfg then
-        opencode.log_info("failed to parse config " .. path)
+        log.warn("failed to parse config %s", path)
         return nil
     end
     return cfg

@@ -17,6 +17,7 @@
 local json = require("json")
 local tools = require("tools.default")
 local memory = require("memory")
+local log = require("log")
 
 local M = {}
 
@@ -24,9 +25,10 @@ local function kv_key(session_id, suffix)
     return string.format("/agent/%s/plan/%s", session_id or "default", suffix)
 end
 
-local function log(session_id, msg)
+local function log_agent(session_id, msg)
     local line = "[PLAN AGENT] " .. tostring(msg)
     print(line)
+    log.info("%s", line)
     local key = kv_key(session_id, "log")
     local existing = memory.read(key) or ""
     memory.write(key, existing .. os.date("%H:%M:%S ") .. msg .. "\n", 3600)
@@ -187,7 +189,7 @@ function M.run(task_description, opts)
     local verify_build = opts.verify_build ~= false  -- default true
     local max_steps = opts.max_steps or 8
 
-    log(session_id, "starting plan agent: " .. tostring(task_description))
+    log_agent(session_id, "starting plan agent: " .. tostring(task_description))
     memory.write(kv_key(session_id, "status"), json.encode({
         task = task_description,
         state = "planning",
@@ -196,16 +198,16 @@ function M.run(task_description, opts)
 
     local plan, err = generate_plan(session_id, project_ns, task_description)
     if not plan then
-        log(session_id, "failed to generate plan: " .. tostring(err))
+        log_agent(session_id, "failed to generate plan: " .. tostring(err))
         return { ok = false, error = err }
     end
 
-    log(session_id, "generated plan with " .. tostring(#plan) .. " steps")
+    log_agent(session_id, "generated plan with " .. tostring(#plan) .. " steps")
     memory.write(kv_key(session_id, "plan"), json.encode(plan), 3600)
 
     local order, order_err = topological_order(plan)
     if not order then
-        log(session_id, "plan dependency error: " .. tostring(order_err))
+        log_agent(session_id, "plan dependency error: " .. tostring(order_err))
         return { ok = false, error = order_err }
     end
 
@@ -216,12 +218,12 @@ function M.run(task_description, opts)
 
     for _, idx in ipairs(order) do
         if #step_results >= max_steps then
-            log(session_id, "reached max_steps limit")
+            log_agent(session_id, "reached max_steps limit")
             break
         end
         attempts = attempts + 1
         local step = plan[idx]
-        log(session_id, "executing step " .. tostring(idx) .. ": " .. tostring(step.description))
+        log_agent(session_id, "executing step " .. tostring(idx) .. ": " .. tostring(step.description))
 
         local summary = execute_step(session_id, project_ns, step, idx, prior_summaries)
         table.insert(prior_summaries, { step = "step " .. tostring(idx), summary = summary })
@@ -236,7 +238,7 @@ function M.run(task_description, opts)
         local build_ok = true
         local build_output = ""
         if verify_build and step.verify then
-            log(session_id, "verifying step with build agent")
+            log_agent(session_id, "verifying step with build agent")
             local build_agent = require("agents.build")
             local build_result = build_agent.run("verify the project still compiles", {
                 session_id = session_id,
@@ -253,23 +255,23 @@ function M.run(task_description, opts)
         memory.write(kv_key(session_id, "step/" .. tostring(idx)), json.encode(step_record), 3600)
 
         if not build_ok then
-            log(session_id, "build verification failed for step " .. tostring(idx))
+            log_agent(session_id, "build verification failed for step " .. tostring(idx))
             failed_step = {
                 description = step.description,
                 error = "build verification failed: " .. tostring(build_output),
             }
             -- Attempt one re-plan.
-            log(session_id, "re-planning after failure")
+            log_agent(session_id, "re-planning after failure")
             local new_plan, new_err = generate_plan(session_id, project_ns, task_description, prior_summaries, failed_step)
             if not new_plan then
-                log(session_id, "re-plan failed: " .. tostring(new_err))
+                log_agent(session_id, "re-plan failed: " .. tostring(new_err))
                 break
             end
             plan = new_plan
             memory.write(kv_key(session_id, "plan"), json.encode(plan), 3600)
             order, order_err = topological_order(plan)
             if not order then
-                log(session_id, "re-plan dependency error: " .. tostring(order_err))
+                log_agent(session_id, "re-plan dependency error: " .. tostring(order_err))
                 break
             end
             -- Reset execution from the new plan, preserving history.

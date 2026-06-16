@@ -224,7 +224,7 @@ function M.extract(session_id, messages, project_root, reason)
         prompt.save_facts(session_id, facts)
     end
 
-    opencode.log_info(string.format("[summarize] saved summary for session %s (turn %d, %d facts)", session_id, turn_id, #facts))
+    log.info("[summarize] saved summary for session %s (turn %d, %d facts)", session_id, turn_id, #facts)
     return true, { summary = summary, facts = facts }
 end
 

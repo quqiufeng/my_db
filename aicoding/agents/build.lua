@@ -16,6 +16,7 @@
 
 local cjson = require("cjson")
 local tools = require("tools.default")
+local log = require("log")
 local memory = require("memory")
 
 local M = {}
@@ -24,7 +25,7 @@ local function kv_key(session_id, suffix)
     return string.format("/agent/%s/build/%s", session_id or "default", suffix)
 end
 
-local function log(session_id, msg)
+local function agent_log(session_id, msg)
     local line = "[BUILD AGENT] " .. tostring(msg)
     print(line)
     -- Keep a lightweight log in KV Cache for cross-turn inspection.
@@ -74,7 +75,8 @@ function M.run(goal, opts)
     local max_attempts = opts.max_attempts or 3
     local timeout = opts.timeout or 120
 
-    log(session_id, "starting build agent: " .. tostring(goal))
+    agent_log(session_id, "starting build agent: " .. tostring(goal))
+    log.error("build agent failed after %d attempts", max_attempts)
     memory.write(kv_key(session_id, "status"), cjson.encode({
         goal = goal,
         workdir = workdir,
@@ -83,7 +85,7 @@ function M.run(goal, opts)
     }), 3600)
 
     for attempt = 1, max_attempts do
-        log(session_id, "build attempt " .. tostring(attempt))
+        agent_log(session_id, "build attempt " .. tostring(attempt))
         local result = run_build(workdir, timeout)
         memory.write(kv_key(session_id, "attempt/" .. tostring(attempt)), cjson.encode({
             attempt = attempt,
@@ -95,7 +97,7 @@ function M.run(goal, opts)
         }), 3600)
 
         if result.ok then
-            log(session_id, "build succeeded on attempt " .. tostring(attempt))
+            agent_log(session_id, "build succeeded on attempt " .. tostring(attempt))
             memory.write(kv_key(session_id, "status"), cjson.encode({
                 goal = goal,
                 workdir = workdir,
@@ -111,19 +113,19 @@ function M.run(goal, opts)
             }
         end
 
-        log(session_id, "build failed, asking LLM for fix")
+        agent_log(session_id, "build failed, asking LLM for fix")
         if attempt == max_attempts then
             break
         end
         local fix_response, fix_err = request_fix(session_id, project_ns, goal, attempt, result.output or "", workdir)
         if not fix_response then
-            log(session_id, "failed to get fix from LLM: " .. tostring(fix_err))
+            agent_log(session_id, "failed to get fix from LLM: " .. tostring(fix_err))
             break
         end
-        log(session_id, "LLM fix response: " .. fix_response:gsub("\n", " "):sub(1, 200))
+        agent_log(session_id, "LLM fix response: " .. fix_response:gsub("\n", " "):sub(1, 200))
     end
 
-    log(session_id, "build agent gave up after " .. tostring(max_attempts) .. " attempts")
+    agent_log(session_id, "build agent gave up after " .. tostring(max_attempts) .. " attempts")
     memory.write(kv_key(session_id, "status"), cjson.encode({
         goal = goal,
         workdir = workdir,

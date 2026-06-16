@@ -227,6 +227,53 @@ static int l_log_info(lua_State* L) {
     return 0;
 }
 
+static int log_level_from_env(void) {
+    static int level = -1;
+    if (level >= 0) return level;
+    const char* env = getenv("OPENCODE_LOG_LEVEL");
+    if (!env) {
+        level = 2; /* default: info */
+    } else if (strcasecmp(env, "debug") == 0) {
+        level = 1;
+    } else if (strcasecmp(env, "info") == 0) {
+        level = 2;
+    } else if (strcasecmp(env, "warn") == 0) {
+        level = 3;
+    } else if (strcasecmp(env, "error") == 0) {
+        level = 4;
+    } else if (strcasecmp(env, "none") == 0 || strcasecmp(env, "off") == 0) {
+        level = 5;
+    } else {
+        level = 2;
+    }
+    return level;
+}
+
+static void log_at_level(const char* level_tag, const char* msg) {
+    fprintf(stderr, "[LUA] [%s] %s\n", level_tag, msg);
+}
+
+static int l_log_debug(lua_State* L) {
+    if (log_level_from_env() <= 1) {
+        log_at_level("DEBUG", luaL_checkstring(L, 1));
+    }
+    return 0;
+}
+
+static int l_log_warn(lua_State* L) {
+    if (log_level_from_env() <= 3) {
+        log_at_level("WARN", luaL_checkstring(L, 1));
+    }
+    return 0;
+}
+
+static int l_log_error(lua_State* L) {
+    if (log_level_from_env() <= 4) {
+        log_at_level("ERROR", luaL_checkstring(L, 1));
+    }
+    return 0;
+}
+
 static int l_set_clipboard(lua_State* L) {
     const char* text = luaL_checkstring(L, 1);
     const char* cmd = NULL;
@@ -424,6 +471,9 @@ static const luaL_Reg opencode_lib[] = {
     {"vector_search",      l_vector_search},
     {"source_read",        l_source_read},
     {"log_info",           l_log_info},
+    {"log_debug",          l_log_debug},
+    {"log_warn",           l_log_warn},
+    {"log_error",          l_log_error},
     {"set_clipboard",      l_set_clipboard},
     {"llm_complete",       l_llm_complete},
     {"llm_complete_messages", l_llm_complete_messages},
