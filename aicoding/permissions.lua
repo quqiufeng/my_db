@@ -227,7 +227,11 @@ function M.is_dangerous_bash(cmd)
         "mkfs",
         "dd%s+if=",
         ":(){",
-        ">/dev/",
+        -- Write raw data to block devices (e.g. dd of=/dev/sda, cat > /dev/sda)
+        "dd[^i].*of=/dev/s",
+        ">/dev/sd",
+        ">/dev/nvme",
+        ">/dev/mmc",
         "curl%s+.*%|%s*sh",
         "wget%s+.*%|%s*sh",
     }
