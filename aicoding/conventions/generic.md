@@ -6,7 +6,7 @@ This is the default workflow for projects that do not match a specific type.
 
 When asked to implement or fix something:
 
-1. **Explore first**: use `glob` and `kv_search` to find relevant files.
+1. **Explore first**: use `glob` and `kv_search` to find relevant files. The code index is AST-aware where supported (e.g. TypeScript via tree-sitter), so `kv_search` with `search_type=semantic` understands functions, classes, and symbols, not just text.
 2. **Read before editing**: always `read` the current content before using `edit`.
 3. **Make minimal changes**: match existing style, naming, and file organization.
 4. **Verify**: run `build` or the project's standard test command after changes.

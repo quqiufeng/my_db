@@ -7,6 +7,7 @@
 --   4. undo_last 恢复最近一次 checkpoint 的所有文件
 
 local cjson = require("cjson")
+local json = require("json")
 local memory = require("memory")
 
 local M = {}
@@ -77,8 +78,8 @@ function M.create(session_id, project_root, files, reason)
     local manifest_json = memory.read(manifest_key)
     local manifest = {}
     if manifest_json then
-        local ok, v = json.decode(manifest_json)
-        if ok and type(v) == "table" then manifest = v end
+        local v, _ = json.decode(manifest_json)
+        if v and type(v) == "table" then manifest = v end
     end
 
     table.insert(manifest, 1, {

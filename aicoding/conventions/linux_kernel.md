@@ -6,7 +6,7 @@ These conventions apply to the Linux kernel source tree.
 
 When modifying the kernel:
 
-1. **Identify the subsystem**: use `kv_search` or `grep` to find relevant code.
+1. **Identify the subsystem**: use `kv_search` (semantic symbol search where indexed) or `grep` to find relevant code.
 2. **Find a template**: locate a similar existing implementation to copy structure from.
 3. **Read Kconfig/Makefile**: understand how the subsystem is built and configured.
 4. **Implement**: follow `Documentation/process/coding-style.rst`.

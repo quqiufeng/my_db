@@ -29,6 +29,7 @@
 - **语义搜索**：基于 Jina embeddings + HNSW 近似索引，用自然语言找代码。
 - **调用图分析**：自动构建 caller/callee 关系，支持符号上下文查询。
 - **数据流追踪**：字段级 + 跨函数变量生命周期追踪。
+- **AST 感知索引**：TypeScript 等语言通过 tree-sitter C API 提取函数、类、导入等精确符号。
 - **超大项目支持**：Linux 内核（5万+文件）已预索引到 `/opt/code_caches/linux_cache`。
 - **完全本地运行**：代码不离开本地机器，GPU 加速（TensorRT + CUDA）。
 
