@@ -202,6 +202,7 @@ static void ensure_dir(const char* path) {
 
 static const char* project_basename(const char* project_ns) {
     if (!project_ns || *project_ns == '\0') return "default";
+    if (strcmp(project_ns, ".") == 0) return "default";
     const char* last = strrchr(project_ns, '/');
     if (last && last[1] != '\0') return last + 1;
     return project_ns;
@@ -266,7 +267,7 @@ static void print_help(void) {
     printf("aicoding CLI\n");
     printf("Usage: aicoding [options]\n");
     printf("  --session ID       Session ID (default: default)\n");
-    printf("  --project NS       Project namespace (default: /code/current)\n");
+    printf("  --project NS       Project directory (default: current dir)\n");
     printf("  --cache DIR        KV Cache directory (default: ~/aicoding/<project_basename>)\n");
     printf("  --env FILE         Load env file (default: ./.env, fallback: ~/.aicoding/.env)\n");
     printf("  --model NAME       Use model from models.json (skips interactive picker)\n");
@@ -283,7 +284,7 @@ static void print_help(void) {
 
 int main(int argc, char** argv) {
     const char* session_id = "default";
-    const char* project_ns = "/code/current";
+    const char* project_ns = ".";
     const char* cache_dir = NULL;
     const char* env_file = "./.env";
     const char* model_name = NULL;
