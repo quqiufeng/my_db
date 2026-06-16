@@ -60,6 +60,7 @@ agent 运行时的所有项目知识、代码索引、会话事实都落盘在�
 | **统一工具基础模块** | `shell.lua` / `json.lua` / `tokens.lua` 统一处理命令引用、JSON 编解码、token 估算 |
 | **项目类型约定注入** | 自动检测 linux_kernel/cargo/npm/python/go/cmake 等项目类型，注入对应的最佳实践 workflow、检查清单、常见错误 |
 | **安全护栏** | 默认禁止写/删 `/usr`、`/etc`、`/bin`、`/sbin`、`/lib*`、`/opt/my_db`、`~/*`；拦截危险 bash 模式 |
+| **结构化日志** | `log.lua` 统一日志模块；`OPENCODE_LOG_LEVEL=debug/info/warn/error` 控制输出级别 |
 | **LuaJIT 脚本层** | Prompt、工具定义、调度逻辑、Agent 全部用 Lua 编写，改逻辑不重编译 |
 | **实验性 GUI** | Rust/gpui-component 编译为 `.so`，LuaJIT FFI 驱动，可弹出聊天窗口 |
 | **代码语法高亮** | GUI 代码块使用 syntect 按语言着色 |
@@ -298,6 +299,8 @@ aicoding 的 `messages` 永远 bounded → 旧信息去 KV Cache → 需要时�
 | `OPENCODE_GUI_TEST_MSG` | — | GUI 启动后自动发送的测试消息 |
 | `OPENCODE_GUI_TEST_SCRIPT` | — | 可编程 GUI 测试脚本路径 |
 | `OPENCODE_SESSION` | `default` | Session ID |
+| `OPENCODE_LOG_LEVEL` | `info` | 日志级别：`debug`/`info`/`warn`/`error`/`none` |
+| `OPENCODE_DEBUG` | — | C 层 HTTP 调试开关（任意非空值开启） |
 
 > 环境变量前缀保留 `OPENCODE_` 以兼容 opencode 生态。
 
@@ -568,7 +571,7 @@ tools.dispatch({
 
 ### 6. 结构化执行轨迹
 
-每轮对话的 LLM 请求、工具调用、错误等信息自动写入 `.opencode/traces/{session}.jsonl`。可用 `trace_query` 工具或 `/lua` 查询：
+每轮对话的 LLM 请求、工具调用、错误、checkpoint 等信息自动写入 `.opencode/traces/{session}.jsonl`。可用 `trace_query` 工具或 `/lua` 查询：
 
 ```lua
 local tools = require("tools.default")
@@ -579,7 +582,22 @@ local r = tools.dispatch({
 print(require("cjson").encode(r))
 ```
 
-### 7. 索引新项目到记忆系统
+### 7. 日志级别
+
+通过 `OPENCODE_LOG_LEVEL` 控制日志详细程度：
+
+```bash
+# 默认 info，只输出关键路径
+./aicoding --project /path/to/repo
+
+# 排查问题时开启 debug，查看 LLM 请求/响应、工具结果详情
+OPENCODE_LOG_LEVEL=debug ./aicoding --project /path/to/repo
+
+# 只输出警告和错误
+OPENCODE_LOG_LEVEL=error ./aicoding --project /path/to/repo
+```
+
+### 8. 索引新项目到记忆系统
 
 如果要用 agent 探索一个尚未索引的项目，调用 `code_index` 工具即可。底层会调用 `/opt/my_db/analyze_repo.sh`（Node.js/TypeScript 项目则调用 `analyze_nodejs_repo.sh`）完成：代码分块、语义向量生成、调用图/数据流分析、导入 KV Cache。
 
@@ -603,7 +621,7 @@ print(result.output)
 
 完成后即可用 `kv_search search_type=semantic namespace=/code/local/redis` 对新项目做自然语言搜索。
 
-### 8. CLI 调试命令
+### 9. CLI 调试命令
 
 启动 CLI 后可用 `/lua <code>` 直接执行 Lua：
 
@@ -966,7 +984,7 @@ done
 | H5 | **Build Agent 针对内核** | 当前 build 工具只检测 cargo/npm/make/cmake/go/python | Linux 内核用 kbuild，需要 `make menuconfig`、`make -j$(nproc)`、处理 .config | 扩展 build 检测：识别 `Kconfig`、`Makefile`（内核风格）、`scripts/kconfig/`；支持指定 target 和 defconfig；失败时只返回前 N 个 error 和对应文件 |
 | H6 | **Plan Agent 自省** | Plan Agent 生成计划后执行，但计划本身不经过可行性评估 | 内核任务可能计划不可行（如修改不存在的子系统） | 在生成计划后增加"plan_review"步骤：检查涉及文件/符号是否存在、依赖是否合理、是否需要配置变更 |
 | H7 | **错误恢复与熔断** | chat_once 8 次迭代后返回"too many tool iterations"，没有分类错误 | 网络错误、API 限流、解析错误、工具失败混为一谈 | 对错误分类：retry（网络/限流）、replan（工具链失败）、abort（权限/安全）；支持指数退避重试 LLM 请求 |
-| H8 | **结构化日志级别** | 只有 `opencode.log_info`，没有 debug/warn/error | 排查问题时日志 noise 大，关键错误被淹没 | 增加 `opencode.log_debug/warn/error`，受 `OPENCODE_LOG_LEVEL` 控制；关键路径统一使用 |
+| H8 | **结构化日志级别** | ✅ 已完成：`log.lua` 统一模块 + C 层 `log_debug/warn/error`，受 `OPENCODE_LOG_LEVEL` 控制；关键路径已迁移（commit `1bde760f`） | 排查问题时日志 noise 大，关键错误被淹没 | 增加 `opencode.log_debug/warn/error`，受 `OPENCODE_LOG_LEVEL` 控制；关键路径统一使用 |
 | H9 | **可观测性查询** | `trace_query` 已支持事件过滤 | 缺少成本、延迟、token 使用、工具成功率的聚合 | 在 trace 中记录 token usage、latency；提供 `metric_summary` 工具输出 scorecard |
 | H10 | **评估 benchmark** | 只有 8 个 GUI 冒烟测试 | 无法量化 prompt/context/agent 改动的影响 | 建立 `benchmarks/`：内核符号问答、已知 bug 修复、新驱动函数添加、跨文件重构；输出 pass / cost / turns |
 

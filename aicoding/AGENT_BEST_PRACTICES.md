@@ -168,7 +168,7 @@ Harness 不是单一规范，而是一套工程实践的总称。它解决的是
 | **工具调用系统** | 让模型安全操作外部世界 | `tools.default.lua` 统一调度 |
 | **权限控制** | 哪些能做、哪些需确认 | `permissions.lua` 支持 allow/deny/ask；内置对 `/usr`、`/etc`、`/bin`、`/sbin`、`/lib*`、`/opt/my_db`、`~/*` 的写/删保护；`OPENCODE_ALLOW_ALL=1` 可全局放行（测试/自动化场景） |
 | **错误处理** | 失败如何恢复 | tool 返回 `{ok=false, error=...}` |
-| **日志追踪** | 模型做了什么、为什么做 | `opencode.log_info` 记录调用过程 |
+| **日志追踪** | 模型做了什么、为什么做 | `log.lua` 统一模块 + `OPENCODE_LOG_LEVEL` 控制；`trace.lua` 结构化 JSONL 轨迹；关键事件已埋点 |
 | **Guardrails** | 内容安全、敏感操作限制 | `permissions.is_dangerous_bash()` 拦截 rm -rf /、mkfs、dd、fork bomb、curl\|sh 等危险命令；默认写保护系统目录 |
 | **评估系统** | 标准任务衡量效果 | GUI 测试脚本覆盖核心路径 |
 | **版本管理** | prompt/agent 可回滚 | Lua 模块天然 git 管理 |
