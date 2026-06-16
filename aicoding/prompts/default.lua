@@ -5,6 +5,7 @@
 -- cjson is available via /usr/local/lualib/cjson.so
 
 local cjson = require("cjson")
+local json = require("json")
 local compress = require("compress")
 
 local M = {}
@@ -14,9 +15,8 @@ M.MAX_SUMMARIES = 3
 
 local function parse_json(s)
     if not s then return nil end
-    local ok, v = json.decode(s)
-    if ok then return v end
-    return nil
+    local v, _ = json.decode(s)
+    return v
 end
 
 -- Read a project instruction file if it exists. Large files are truncated to avoid blowing up the prompt.
@@ -71,19 +71,34 @@ function M.build_system_prompt(session_id, project_ns, project_root)
     push("Memory/code: kv_search, kv_get, kv_set, kv_context, code_index, read, knowledge_read, knowledge_write, knowledge_search, trace_query.")
     push("Edit: edit, write, apply_patch, file_delete.")
     push("Explore: glob, grep.")
-    push("Execute: bash, git, diff.")
-    push("Extend: plugin_create(name, code), plugin_load(name) — add new tools at runtime without restart.")
+    push("Execute: bash, git, diff, build.")
+    push("Fetch: web_fetch(url) — fetch external docs/APIs/RFCs and summarize.")
+    push("Undo/checkpoint: checkpoint_list, undo_last, rollback_to(checkpoint_id) — list checkpoints, undo the last destructive operation, or restore the whole project to a checkpoint.")
+    push("Extend: plugin_create(name, code), plugin_load(name), plugin_list() — add new tools at runtime without restart.")
+    push("")
+    push("## Tool usage rules")
+    push("- Use `build` to compile/test projects. It auto-detects cargo/npm/make/cmake/go/python and reports concise errors.")
+    push("- Use `web_fetch` when the user references an external URL, RFC, API doc, or latest release notes.")
+    push("- Use `plugin_create` + `plugin_load` when the existing tools cannot express an operation (e.g. domain-specific search). Prefer this over brittle `bash` scripts.")
+    push("- Use `checkpoint_list`, `undo_last`, or `rollback_to` to recover from mistakes. A checkpoint is created automatically before every destructive edit.")
+    push("- Use `trace_query` to inspect your own recent tool calls and outcomes when debugging.")
     push("")
     push("## Plugin development")
-    push("If a tool is missing, create a Lua plugin that returns a list of `{name, description, parameters, handler}` tables. Save it with plugin_create, then plugin_load. The tools become available immediately in the same conversation.")
+    push("If a tool is missing, create a Lua plugin that returns a list of `{name, description, parameters, handler}` tables. Save it with plugin_create, then plugin_load. The tools become available immediately in the same conversation. Use `plugin_list` to see already-loaded plugins.")
     push("")
     push("## Workflow")
     push("1. Search first (`kv_search`), read second (`read`). Do not repeat the same search.")
     push("2. For specific functions, use `kv_context(symbol, repo)` to see callers/callees.")
     push("3. Index unknown repos with `code_index(source, namespace)` before searching.")
     push("4. Edit with exact `old_string`; verify with `diff` or `git status`.")
-    push("5. Summarize progress periodically into `/agent/{session}/facts` and project knowledge with `knowledge_write`.")
-    push("6. Be concise. Only load information relevant to the current task.")
+    push("5. After editing, run `build` (or the project-specific test command) to verify.")
+    push("6. Summarize progress periodically into `/agent/{session}/facts` and project knowledge with `knowledge_write`.")
+    push("7. Be concise. Only load information relevant to the current task.")
+    push("")
+    push("## Safety and permissions")
+    push("- Some paths are write-protected by default (system dirs and home root). If a write is denied, ask the user to confirm or run with explicit permissions.")
+    push("- Obviously dangerous shell commands are blocked by default.")
+    push("- Prefer targeted file edits over broad shell commands when the same result can be achieved with `edit`/`write`.")
 
     -- Project instructions from AGENTS.md / instructions.md / claude.md
     local instruction_files = {"AGENTS.md", "instructions.md", "claude.md"}
