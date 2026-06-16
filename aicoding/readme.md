@@ -216,6 +216,29 @@ cp /opt/my_db/aicoding/.env.example ~/.aicoding/.env
 
 后面的配置不会覆盖前面的配置。
 
+### 支持的 LLM 提供商
+
+aicoding 支持所有 OpenAI/Anthropic 兼容 API：
+
+| 提供商 | 协议 | 变量名 | 示例 base_url |
+|--------|------|--------|---------------|
+| **Kimi** | `openai` | `OPENAI_*` | `https://api.kimi.com/coding/v1` |
+| **DeepSeek** | `openai` | `DEEPSEEK_*` 或 `OPENAI_*` | `https://api.deepseek.com` |
+| **Anthropic/Claude** | `anthropic` | `ANTHROPIC_*` | `https://api.anthropic.com` |
+| **其他 OpenAI 兼容服务** | `openai` | `OPENAI_*` | 服务商提供 |
+
+DeepSeek 使用 OpenAI 兼容协议，可直接使用 `DEEPSEEK_*` 变量：
+
+```bash
+LLM_PROTOCOL=openai
+DEEPSEEK_API_KEY=your-deepseek-key
+DEEPSEEK_BASE_URL=https://api.deepseek.com
+DEEPSEEK_MODEL=deepseek-v4-flash
+LLM_TEMPERATURE=1.0
+```
+
+完整示例见 `.env.example`。
+
 ### 3. 运行 CLI
 
 ```bash

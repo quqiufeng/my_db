@@ -78,6 +78,11 @@ static void configure_llm(llm_config_t* cfg) {
         cfg->base_url = getenv("OPENAI_BASE_URL");
         cfg->api_key = getenv("OPENAI_API_KEY");
         cfg->model = getenv("OPENAI_MODEL");
+
+        /* DeepSeek uses OpenAI-compatible protocol but has its own env vars as aliases. */
+        if (!cfg->base_url) cfg->base_url = getenv("DEEPSEEK_BASE_URL");
+        if (!cfg->api_key) cfg->api_key = getenv("DEEPSEEK_API_KEY");
+        if (!cfg->model) cfg->model = getenv("DEEPSEEK_MODEL");
     }
     cfg->user_agent = getenv("LLM_USER_AGENT");
     cfg->extra_header = getenv("LLM_EXTRA_HEADER");
@@ -91,11 +96,10 @@ static int is_configured(llm_config_t* cfg) {
 }
 
 static void print_config_help(const char* env_file) {
-    fprintf(stderr, "LLM not configured. Set OPENAI_BASE_URL, OPENAI_API_KEY, OPENAI_MODEL\n");
-    fprintf(stderr, "or ANTHROPIC_BASE_URL, ANTHROPIC_API_KEY, ANTHROPIC_MODEL in one of:\n");
-    fprintf(stderr, "  - %s\n", env_file);
-    fprintf(stderr, "  - ~/.aicoding/.env\n");
-    fprintf(stderr, "or via environment variables.\n");
+    fprintf(stderr, "LLM not configured. Set one of the following groups in %s, ~/.aicoding/.env, or environment variables:\n", env_file);
+    fprintf(stderr, "  OpenAI-compatible: OPENAI_BASE_URL, OPENAI_API_KEY, OPENAI_MODEL\n");
+    fprintf(stderr, "  DeepSeek (OpenAI-compatible): DEEPSEEK_BASE_URL, DEEPSEEK_API_KEY, DEEPSEEK_MODEL\n");
+    fprintf(stderr, "  Anthropic: ANTHROPIC_BASE_URL, ANTHROPIC_API_KEY, ANTHROPIC_MODEL\n");
 }
 
 static void print_help(void) {
