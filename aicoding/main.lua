@@ -3,6 +3,9 @@
 -- Global project root (set from C CLI via tools module)
 local project_root = "."
 
+-- Keep conversation history per session for end-of-turn summarization.
+_G.session_messages = {}
+
 function set_project_root(path)
     tools.set_project_root(path)
     project_root = tools.get_project_root()
@@ -22,6 +25,7 @@ local prompt = require("prompts.default")
 local tools  = require("tools.default")
 local context = require("context")
 local async_http = require("async_http")
+local trace = require("trace")
 
 -- Register tools into KV Cache so C kernel/prompt builder can discover them.
 tools.register_tools("/agent/default")
@@ -204,8 +208,10 @@ end
 local function execute_tools(messages, tool_calls)
     for _, tc in ipairs(tool_calls) do
         opencode.log_info("executing tool: " .. tc.name)
+        trace.tool_call(tc.name, tc.arguments)
         local result = tools.dispatch(tc)
         opencode.log_info("tool result: " .. cjson.encode(result):sub(1, 300))
+        trace.tool_result(tc.name, result)
         table.insert(messages, {
             role = "tool",
             tool_call_id = tc.id,
@@ -258,6 +264,9 @@ function chat_once(session_id, project_ns, user_query)
     local messages = {
         { role = "user", content = user_query }
     }
+    _G.session_messages[session_id] = messages
+    trace.init(session_id, tools.get_project_root())
+    trace.agent_start(user_query)
 
             local max_iterations = 8
     for i = 1, max_iterations do
@@ -267,6 +276,7 @@ function chat_once(session_id, project_ns, user_query)
         local request_messages, archived = context.build_messages(session_id, system, messages)
         if archived and #archived > 0 then
             opencode.log_info("archived " .. tostring(#archived) .. " old messages to KV Cache")
+            trace.context_archive(#archived)
         end
 
         -- Build full request body in Lua for easy debugging
@@ -292,13 +302,16 @@ function chat_once(session_id, project_ns, user_query)
 
         local body_json = cjson.encode(request_body)
         opencode.log_info("request body (first 500): " .. body_json:sub(1, 500))
+        trace.llm_request(body_json:sub(1, 500))
 
         local response = opencode.llm_complete_raw(body_json)
         if not response then
             opencode.log_info("llm_complete_raw returned nil")
+            trace.error("llm_complete_raw returned nil")
             return nil
         end
         opencode.log_info("llm response: " .. response:sub(1, 200))
+        trace.llm_response(response:sub(1, 500))
 
         local content, reasoning, err, tool_calls
         if protocol == "anthropic" then
@@ -308,6 +321,7 @@ function chat_once(session_id, project_ns, user_query)
         end
         if err then
             opencode.log_info("parse error: " .. err)
+            trace.error("response parse error", { error = err })
             return content or "(parse error)"
         end
 
@@ -323,10 +337,14 @@ function chat_once(session_id, project_ns, user_query)
     return "(too many tool iterations)"
 end
 
-function generate_summary(session_id, text)
-    -- In a real implementation, call a small LLM to summarize.
-    -- For now, just store a stub summary.
-    prompt.save_summary(session_id, os.time(), text:sub(1, 200))
+function generate_summary(session_id, reason)
+    local messages = _G.session_messages and _G.session_messages[session_id]
+    if not messages or #messages == 0 then
+        opencode.log_info("generate_summary: no messages for session " .. tostring(session_id))
+        return
+    end
+    local summarize = require("summarize")
+    summarize.extract(session_id, messages, tools.get_project_root(), reason)
 end
 
 function handle_tool_call(tool_call_json)
@@ -361,6 +379,8 @@ function run_gui(session_id, project_ns)
     gui.on_user_message(app, function(sid, text)
         gui.append_message(app, sid, "user", text)
         gui.clear_todos(app)
+        trace.init(sid, tools.get_project_root())
+        trace.agent_start(text)
 
         -- Agent command: /plan runs the autonomous plan-and-execute agent.
         if text:match("^/plan%s+(.+)") or text == "/plan" then
@@ -409,6 +429,7 @@ function run_gui(session_id, project_ns)
                 local request_messages, archived = context.build_messages(sid, system, messages)
                 if archived and #archived > 0 then
                     opencode.log_info("gui archived " .. tostring(#archived) .. " old messages to KV Cache")
+                    trace.context_archive(#archived)
                 end
 
                 local request_body = {
@@ -431,6 +452,7 @@ function run_gui(session_id, project_ns)
                 end
 
                 local body_json = cjson.encode(request_body)
+                trace.llm_request(body_json:sub(1, 500))
 
                 -- Build URL and headers for async HTTP
                 local base_url = os.getenv("OPENAI_BASE_URL") or "https://api.openai.com/v1"
@@ -454,9 +476,11 @@ function run_gui(session_id, project_ns)
                 local response, err = async_http.request(url, "POST", headers, body_json)
                 if not response then
                     gui.append_message(app, sid, "assistant", "(no response: " .. tostring(err) .. ")")
+                    trace.error("gui llm request failed", { error = err })
                     return
                 end
                 opencode.log_info("llm response preview: " .. response:sub(1, 500))
+                trace.llm_response(response:sub(1, 500))
 
                 -- Report real token usage to GUI if available.
                 local usage = response:match('"usage":(%b{})')
@@ -477,6 +501,7 @@ function run_gui(session_id, project_ns)
                 end
                 if parse_err then
                     gui.append_message(app, sid, "assistant", "(parse error: " .. tostring(parse_err) .. ")")
+                    trace.error("gui response parse error", { error = parse_err })
                     return
                 end
 
@@ -508,12 +533,14 @@ function run_gui(session_id, project_ns)
                 append_assistant(messages, content, reasoning, tool_calls)
                 for _, tc in ipairs(tool_calls) do
                     opencode.log_info("gui executing tool: " .. tc.name)
+                    trace.tool_call(tc.name, tc.arguments)
                     gui.add_todo(app, "Run tool: " .. tc.name)
                     gui.tool_output(app, sid, tc.name, "running...")
                     -- Allow GUI to show the "running..." state briefly
                     coroutine.yield()
                     local result = tools.dispatch(tc)
                     opencode.log_info("gui tool result: " .. cjson.encode(result):sub(1, 300))
+                    trace.tool_result(tc.name, result)
                     gui.tool_output(app, sid, tc.name, format_tool_result(tc.name, result):sub(1, 16000))
                     gui.set_todo_done(app, "Run tool: " .. tc.name, true)
                     table.insert(messages, {

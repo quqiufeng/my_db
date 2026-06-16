@@ -6,6 +6,8 @@ local cjson = require("cjson")
 local permissions = require("permissions")
 local memory = require("memory")
 local checkpoint = require("checkpoint")
+local knowledge = require("knowledge")
+local trace = require("trace")
 
 -- Shell-quote a string for use inside a POSIX shell command.
 -- Uses single quotes so the only thing to escape is a single quote itself.
@@ -268,16 +270,22 @@ end
 M.tools = {
     {
         name = "kv_search",
-        description = "Search the KV Cache for relevant code, facts, or history. Use search_type='semantic' for natural language code search over indexed repos.",
+        description = "Search the KV Cache for relevant code, facts, or history. Use search_type='semantic' for natural language code search over indexed repos. Results are reranked locally; use min_score to filter noise.",
         parameters = {
             query = { type = "string", required = true },
             namespace = { type = "string", required = false, description = "KV namespace prefix (e.g. /agent/default/facts) or repo namespace for semantic search (e.g. /code/local/linux)" },
-            search_type = { type = "string", enum = {"semantic", "prefix", "regex", "tag"}, required = false }
+            search_type = { type = "string", enum = {"semantic", "prefix", "regex", "tag"}, required = false },
+            top_k = { type = "integer", required = false, description = "Maximum results to return (default 10 for semantic, 100 otherwise)" },
+            min_score = { type = "number", required = false, description = "Minimum normalized relevance score [0,1] to keep a result (default 0)" },
+            rerank = { type = "boolean", required = false, description = "Run local reranking/filtering (default true)" }
         },
         handler = function(args)
             local results, err = memory.search(args.query, {
                 namespace = args.namespace,
-                search_type = args.search_type
+                search_type = args.search_type,
+                top_k = args.top_k,
+                min_score = args.min_score,
+                rerank = args.rerank
             })
             if not results then
                 return { ok = false, error = tostring(err) }
@@ -313,14 +321,92 @@ M.tools = {
     },
     {
         name = "kv_context",
-        description = "Get full context for a symbol (callers/callees) from a repo namespace.",
+        description = "Get full context for one or more symbols (callers/callees/call-paths) from a repo namespace. Set depth to control call-chain expansion.",
         parameters = {
-            symbol = { type = "string", required = true },
-            repo = { type = "string", required = true }
+            symbol = { type = "string", required = true, description = "Symbol name, or comma-separated list of symbols" },
+            repo = { type = "string", required = true },
+            depth = { type = "integer", required = false, description = "Call-chain expansion depth (0-5, default 1)" },
+            batch = { type = "boolean", required = false, description = "Treat symbol as comma-separated batch" }
         },
         handler = function(args)
-            local ok, out = memory.context(args.symbol, args.repo)
+            local symbols = args.symbol
+            local opts = { depth = args.depth }
+            if args.batch then
+                local list = {}
+                for s in symbols:gmatch("[^,]+") do
+                    s = s:gsub("^%s+", ""):gsub("%s+$", "")
+                    if s ~= "" then table.insert(list, s) end
+                end
+                symbols = list
+                opts.batch = true
+            end
+            local ok, out = memory.context(symbols, args.repo, opts)
             return { ok = ok, output = truncate(out) }
+        end
+    },
+    {
+        name = "knowledge_read",
+        description = "Read a project-level knowledge file from .opencode/knowledge/ (shared across sessions).",
+        parameters = {
+            name = { type = "string", required = true, description = "Knowledge file name (e.g. architecture.md)" }
+        },
+        handler = function(args)
+            local content, err = knowledge.read(project_root, args.name)
+            if not content then
+                return { ok = false, error = err }
+            end
+            return { ok = true, name = args.name, content = content }
+        end
+    },
+    {
+        name = "knowledge_write",
+        description = "Write a project-level knowledge file to .opencode/knowledge/ (shared across sessions). Auto-syncs to KV Cache.",
+        parameters = {
+            name = { type = "string", required = true, description = "Knowledge file name (e.g. decisions.md)" },
+            content = { type = "string", required = true, description = "File content" }
+        },
+        handler = function(args)
+            local ok, path = knowledge.write(project_root, args.name, args.content)
+            if not ok then
+                return { ok = false, error = path }
+            end
+            return { ok = true, path = path }
+        end
+    },
+    {
+        name = "knowledge_search",
+        description = "Semantic search over project-level knowledge files.",
+        parameters = {
+            query = { type = "string", required = true },
+            top_k = { type = "integer", required = false }
+        },
+        handler = function(args)
+            knowledge.sync_to_kv(project_root)
+            local results, err = knowledge.search(project_root, args.query, args.top_k)
+            if not results then
+                return { ok = false, error = tostring(err) }
+            end
+            return { ok = true, results = results }
+        end
+    },
+    {
+        name = "trace_query",
+        description = "Query the structured agent trace for this session. Useful for debugging loops, repeated tool calls, and failures.",
+        parameters = {
+            event = { type = "string", required = false, description = "Filter by event type: agent_start, llm_request, llm_response, tool_call, tool_result, context_archive, error" },
+            tool = { type = "string", required = false, description = "Filter tool_call/tool_result by tool name" },
+            limit = { type = "integer", required = false, description = "Maximum events to return (default 50)" },
+            reverse = { type = "boolean", required = false, description = "Return newest first (default true)" }
+        },
+        handler = function(args)
+            trace.init(session_id, project_root)
+            local results = trace.query({
+                event = args.event,
+                tool = args.tool,
+                limit = args.limit or 50,
+                reverse = args.reverse ~= false
+            })
+            return { ok = true, count = #results, events = results }
         end
     },
     {

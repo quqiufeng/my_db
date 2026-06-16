@@ -8,6 +8,8 @@
 --        /agent/{session}/history  历史动作
 --        /code/local/{repo}        代码库语义记忆（只读，由 analyze_repo.sh 导入）
 
+local rerank = require("rerank")
+
 local M = {}
 
 -- 默认会话命名空间，可由外部设置
@@ -64,11 +66,15 @@ end
 --   opts.search_type: "semantic" | "prefix" | "regex" | "tag" (default "prefix")
 --   opts.namespace:   KV 前缀（如 /agent/default/facts）或代码库命名空间（如 /code/local/linux）
 --   opts.top_k:       最大返回数（semantic 默认 10，其它默认 100）
+--   opts.min_score:   归一化后最低分数，过滤噪声（默认 0）
+--   opts.rerank:      是否本地重排序（默认 true）
 function M.search(query, opts)
     opts = opts or {}
     local stype = opts.search_type or "prefix"
     local ns = opts.namespace or ""
     local top_k = opts.top_k or (stype == "semantic" and 10 or 100)
+    local min_score = opts.min_score or 0
+    local do_rerank = opts.rerank ~= false
 
     if stype == "semantic" then
         local cache_dir = M.namespace_to_cache_dir(ns)
@@ -78,6 +84,9 @@ function M.search(query, opts)
         local results, err = opencode.vector_search(cache_dir, query, ns ~= "" and ns or nil, top_k)
         if not results then
             return nil, err
+        end
+        if do_rerank then
+            results = rerank.rerank(query, results, { top_k = top_k, min_score = min_score })
         end
         return results
     end
@@ -97,16 +106,37 @@ function M.search(query, opts)
     for _, r in ipairs(raw) do
         table.insert(out, { key = r.key, value = r.value, score = r.score })
     end
+    if do_rerank then
+        out = rerank.rerank(query, out, { top_k = top_k, min_score = min_score })
+    end
     return out
 end
 
 -- 获取符号上下文（caller/callee）
 -- repo: 代码库命名空间，如 /code/local/linux
-function M.context(symbol, repo)
+-- opts:
+--   depth:      call-chain expansion depth (default 1, max 5)
+--   batch:      table of symbols to query in one call
+function M.context(symbol, repo, opts)
+    opts = opts or {}
+    local depth = opts.depth or 1
+    if depth < 0 then depth = 0 end
+    if depth > 5 then depth = 5 end
+
+    if opts.batch and type(symbol) == "table" then
+        local outs = {}
+        for _, sym in ipairs(symbol) do
+            local ok, out = M.context(sym, repo, { depth = depth })
+            table.insert(outs, string.format("--- %s ---\n%s", sym, out or ""))
+        end
+        return true, table.concat(outs, "\n")
+    end
+
     local cmd = string.format(
-        "cd /opt/my_db && ./tools/cache_query %s --repo %s --type context 2>&1",
+        "cd /opt/my_db && ./tools/cache_query %s --repo %s --type context --depth %d 2>&1",
         require("cjson").encode(symbol),
-        require("cjson").encode(repo)
+        require("cjson").encode(repo),
+        depth
     )
     local f = io.popen(cmd)
     local out = f:read("*a") or ""

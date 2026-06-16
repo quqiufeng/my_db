@@ -68,7 +68,7 @@ function M.build_system_prompt(session_id, project_ns, project_root)
     push("After reading code, store the minimum fact needed to avoid re-reading.")
     push("")
     push("## Tool capabilities")
-    push("Memory/code: kv_search, kv_get, kv_set, kv_context, code_index, read.")
+    push("Memory/code: kv_search, kv_get, kv_set, kv_context, code_index, read, knowledge_read, knowledge_write, knowledge_search, trace_query.")
     push("Edit: edit, write, apply_patch, file_delete.")
     push("Explore: glob, grep.")
     push("Execute: bash, git, diff.")
@@ -82,7 +82,7 @@ function M.build_system_prompt(session_id, project_ns, project_root)
     push("2. For specific functions, use `kv_context(symbol, repo)` to see callers/callees.")
     push("3. Index unknown repos with `code_index(source, namespace)` before searching.")
     push("4. Edit with exact `old_string`; verify with `diff` or `git status`.")
-    push("5. Summarize progress periodically into `/agent/{session}/facts`.")
+    push("5. Summarize progress periodically into `/agent/{session}/facts` and project knowledge with `knowledge_write`.")
     push("6. Be concise. Only load information relevant to the current task.")
 
     -- Project instructions from AGENTS.md / instructions.md / claude.md
@@ -97,6 +97,14 @@ function M.build_system_prompt(session_id, project_ns, project_root)
             end
             push("\n## %s\n%s", path, content)
         end
+    end
+
+    -- Project-level knowledge (shared across sessions)
+    local knowledge = require("knowledge")
+    local kfrag = knowledge.prompt_fragment(project_root)
+    if kfrag and kfrag:match("%S") then
+        push("\n# Project Knowledge")
+        push(kfrag)
     end
 
     -- Current task
@@ -177,6 +185,12 @@ function M.save_summary(session_id, turn_id, summary)
         ts = os.time() * 1000
     }
     opencode.cache_set(key, cjson.encode(value), 0)
+end
+
+-- Full prompt for simple callers (e.g. C unit tests).
+function M.build_prompt(session_id, project_ns, user_query, project_root)
+    local system = M.build_system_prompt(session_id, project_ns, project_root)
+    return system .. "\n\n# User\n" .. tostring(user_query or "")
 end
 
 return M

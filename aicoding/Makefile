@@ -6,7 +6,7 @@ LDFLAGS = -L$(LUAJIT)/lib -lluajit-5.1 -L.. -lmydb -lvector_engine -lm -ldl -lpt
 SRCS = session.c lua_engine.c llm_client.c http_async.c gui_tick.c
 OBJS = $(SRCS:.c=.o)
 
-.PHONY: all clean test cli
+.PHONY: all clean test cli regression
 
 all: libaicoding_agent.a aicoding
 
@@ -20,7 +20,10 @@ aicoding: cli.c libaicoding_agent.a
 	$(CC) $(CFLAGS) $< gui_tick.o -o $@ -L. -laicoding_agent $(LDFLAGS) $(shell pkg-config --libs libcurl) -Wl,--export-dynamic
 
 test: test/test_session libaicoding_agent.a
-	./test/test_session
+	LD_LIBRARY_PATH=/opt/my_db:/usr/local/luajit/lib:./ ./test/test_session
+
+regression: all
+	./tests/run_regression.sh .
 
 test/test_session: test/test_session.c libaicoding_agent.a
 	$(CC) $(CFLAGS) $< -o $@ -L. -laicoding_agent $(LDFLAGS) $(shell pkg-config --libs libcurl)
