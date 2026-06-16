@@ -521,12 +521,22 @@ function run_gui(session_id, project_ns)
                 end
 
                 -- Stream assistant content word-by-word into the GUI.
+                -- Use UTF-8 safe chunking: never split a multi-byte character.
                 if content and content ~= "" then
                     gui.append_message(app, sid, "assistant", "")
-                    local chunk_size = 3
+                    local chunk_size = 20  -- bytes per chunk, adjusted to safe boundary
                     local pos = 1
                     while pos <= #content do
                         local next_pos = math.min(pos + chunk_size, #content + 1)
+                        -- If next_pos lands in the middle of a UTF-8 character,
+                        -- back up to its start. Continuation bytes are 0x80-0xBF.
+                        while next_pos > pos do
+                            local byte = content:byte(next_pos)
+                            if byte == nil or byte < 128 or byte >= 192 then
+                                break  -- start of a new UTF-8 sequence or ASCII
+                            end
+                            next_pos = next_pos - 1
+                        end
                         local chunk = content:sub(pos, next_pos - 1)
                         gui.stream_delta(app, sid, chunk)
                         pos = next_pos
