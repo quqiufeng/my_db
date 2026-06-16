@@ -239,7 +239,45 @@ LLM_TEMPERATURE=1.0
 
 完整示例见 `.env.example`。
 
-### 3. 运行 CLI
+### 3. 多模型切换
+
+aicoding 支持在多个 LLM 之间切换。模型列表来自 `~/.aicoding/models.json`，没有则使用内置的 `/opt/my_db/aicoding/models.json`。
+
+内置模型：
+
+| 名称 | 提供商 | 模型 ID |
+|------|--------|---------|
+| `kimi-latest` | openai | `kimi-latest` |
+| `deepseek-v4-flash` | deepseek | `deepseek-v4-flash` |
+| `deepseek-v3` | deepseek | `deepseek-v3` |
+| `claude-3-5-sonnet` | anthropic | `claude-3-5-sonnet-20241022` |
+
+启动时选择（终端交互）：
+
+```bash
+aicoding --project /path/to/repo
+# 然后按提示输入 1-4
+```
+
+命令行直接指定：
+
+```bash
+aicoding --model deepseek-v4-flash --project /path/to/repo
+aicoding --model kimi-latest --project /path/to/repo
+```
+
+要在 `.env` 里同时配置多个 key，例如 Kimi + DeepSeek：
+
+```bash
+OPENAI_API_KEY=sk-kimi-...
+OPENAI_BASE_URL=https://api.kimi.com/coding/v1
+DEEPSEEK_API_KEY=sk-deepseek-...
+DEEPSEEK_BASE_URL=https://api.deepseek.com
+```
+
+切换模型时会自动使用对应 provider 的 base_url/api_key。
+
+### 4. 运行 CLI
 
 ```bash
 ./aicoding --project /path/to/your/repo
@@ -252,7 +290,7 @@ LLM_TEMPERATURE=1.0
 cd gui_gpui && cargo build --release && cd ..
 cp gui_gpui/target/release/libopencode_gui.so ./libaicoding_gui.so
 
-# 启动 GUI 模式
+# 启动 GUI 模式（先选择模型，再启动 GUI）
 OPENCODE_GUI=1 ./aicoding --project /path/to/your/repo
 ```
 

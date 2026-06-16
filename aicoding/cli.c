@@ -27,6 +27,150 @@ static const char* get_home_dir(void) {
     return ".";
 }
 
+#define MAX_MODELS 32
+#define MODEL_NAME_LEN 64
+#define MODEL_PROVIDER_LEN 16
+#define MODEL_ID_LEN 64
+
+typedef struct {
+    char name[MODEL_NAME_LEN];
+    char provider[MODEL_PROVIDER_LEN];
+    char model[MODEL_ID_LEN];
+} model_entry_t;
+
+static int models_count = 0;
+static model_entry_t models[MAX_MODELS];
+
+static int parse_json_models(const char* text) {
+    models_count = 0;
+    if (!text || !*text) return 0;
+    const char* p = text;
+    while (*p && models_count < MAX_MODELS) {
+        p = strchr(p, '{');
+        if (!p) break;
+        p++;
+        char name[MODEL_NAME_LEN] = {0};
+        char provider[MODEL_PROVIDER_LEN] = {0};
+        char model[MODEL_ID_LEN] = {0};
+        while (*p && *p != '}') {
+            char key[64] = {0};
+            char val[128] = {0};
+            while (*p && (*p == ' ' || *p == '\n' || *p == '\r' || *p == '\t' || *p == ',')) p++;
+            if (*p == '}') break;
+            const char* q = p;
+            while (*q && *q != '"') q++;
+            if (*q != '"') break;
+            q++;
+            const char* kstart = q;
+            while (*q && *q != '"') q++;
+            if (*q != '"') break;
+            size_t klen = q - kstart;
+            if (klen >= sizeof(key)) klen = sizeof(key) - 1;
+            strncpy(key, kstart, klen);
+            q++;
+            while (*q && *q != ':') q++;
+            if (*q != ':') break;
+            q++;
+            while (*q && (*q == ' ' || *q == '\n' || *q == '\r' || *q == '\t')) q++;
+            if (*q != '"') break;
+            q++;
+            const char* vstart = q;
+            while (*q && *q != '"') q++;
+            if (*q != '"') break;
+            size_t vlen = q - vstart;
+            if (vlen >= sizeof(val)) vlen = sizeof(val) - 1;
+            strncpy(val, vstart, vlen);
+            q++;
+            p = q;
+            if (strcmp(key, "name") == 0) strncpy(name, val, sizeof(name) - 1);
+            else if (strcmp(key, "provider") == 0) strncpy(provider, val, sizeof(provider) - 1);
+            else if (strcmp(key, "model") == 0) strncpy(model, val, sizeof(model) - 1);
+        }
+        if (name[0] && provider[0] && model[0]) {
+            strncpy(models[models_count].name, name, sizeof(models[models_count].name) - 1);
+            strncpy(models[models_count].provider, provider, sizeof(models[models_count].provider) - 1);
+            strncpy(models[models_count].model, model, sizeof(models[models_count].model) - 1);
+            models_count++;
+        }
+        while (*p && *p != '}' && *p != '{') p++;
+    }
+    return models_count;
+}
+
+static int load_models_json(void) {
+    char path[1024];
+    snprintf(path, sizeof(path), "%s/.aicoding/models.json", get_home_dir());
+    FILE* f = fopen(path, "r");
+    if (!f) {
+        f = fopen("/opt/my_db/aicoding/models.json", "r");
+    }
+    if (!f) return 0;
+    char text[8192];
+    size_t n = fread(text, 1, sizeof(text) - 1, f);
+    text[n] = '\0';
+    fclose(f);
+    return parse_json_models(text);
+}
+
+static int find_model_index(const char* name) {
+    for (int i = 0; i < models_count; i++) {
+        if (strcmp(models[i].name, name) == 0) return i;
+        if (strcmp(models[i].model, name) == 0) return i;
+    }
+    return -1;
+}
+
+static void apply_model_config(int idx) {
+    if (idx < 0 || idx >= models_count) return;
+    const model_entry_t* m = &models[idx];
+    setenv("LLM_PROTOCOL", m->provider, 1);
+    if (strcmp(m->provider, "anthropic") == 0) {
+        setenv("ANTHROPIC_MODEL", m->model, 1);
+    } else if (strcmp(m->provider, "deepseek") == 0) {
+        setenv("DEEPSEEK_MODEL", m->model, 1);
+    } else {
+        setenv("OPENAI_MODEL", m->model, 1);
+    }
+}
+
+static int select_model_interactive(const char* default_model) {
+    if (models_count <= 1) return 0;
+    if (default_model) {
+        int idx = find_model_index(default_model);
+        if (idx >= 0) {
+            apply_model_config(idx);
+            return idx;
+        }
+        fprintf(stderr, "Model '%s' not found in models.json.\n", default_model);
+    }
+    fprintf(stderr, "\nAvailable models:\n");
+    for (int i = 0; i < models_count; i++) {
+        fprintf(stderr, "  %d. %s (%s)\n", i + 1, models[i].name, models[i].provider);
+    }
+    fprintf(stderr, "Select model (1-%d, or press Enter for %s): ", models_count, models[0].name);
+    fflush(stderr);
+    char buf[64];
+    if (!fgets(buf, sizeof(buf), stdin)) return 0;
+    char* line = trim(buf);
+    if (*line == '\0') {
+        apply_model_config(0);
+        return 0;
+    }
+    int choice = atoi(line);
+    if (choice < 1 || choice > models_count) {
+        int idx = find_model_index(line);
+        if (idx >= 0) {
+            apply_model_config(idx);
+            return idx;
+        }
+        fprintf(stderr, "Invalid selection. Using default model: %s\n", models[0].name);
+        apply_model_config(0);
+        return 0;
+    }
+    apply_model_config(choice - 1);
+    return choice - 1;
+}
+
 static void ensure_dir(const char* path) {
     char tmp[1024];
     snprintf(tmp, sizeof(tmp), "%s", path);
@@ -109,6 +253,7 @@ static void print_help(void) {
     printf("  --project NS       Project namespace (default: /code/current)\n");
     printf("  --cache DIR        KV Cache directory (default: ~/aicoding/<project_basename>)\n");
     printf("  --env FILE         Load env file (default: ./.env, fallback: ~/.aicoding/.env)\n");
+    printf("  --model NAME       Use model from models.json (skips interactive picker)\n");
     printf("  --yes, --non-interactive  Auto-allow all permission prompts\n");
     printf("  --gui-test-script FILE  Load Lua script to drive GUI and exit\n");
     printf("  --test-compress    Run compression test and exit\n");
@@ -125,6 +270,7 @@ int main(int argc, char** argv) {
     const char* project_ns = "/code/current";
     const char* cache_dir = NULL;
     const char* env_file = "./.env";
+    const char* model_name = NULL;
     int non_interactive = 0;
     int allow_all = 0;
     int test_compress = 0;
@@ -135,6 +281,7 @@ int main(int argc, char** argv) {
         else if (strcmp(argv[i], "--project") == 0 && i + 1 < argc) project_ns = argv[++i];
         else if (strcmp(argv[i], "--cache") == 0 && i + 1 < argc) cache_dir = argv[++i];
         else if (strcmp(argv[i], "--env") == 0 && i + 1 < argc) env_file = argv[++i];
+        else if (strcmp(argv[i], "--model") == 0 && i + 1 < argc) model_name = argv[++i];
         else if (strcmp(argv[i], "--yes") == 0) allow_all = 1;
         else if (strcmp(argv[i], "--gui-test-script") == 0 && i + 1 < argc) {
             gui_test_script = argv[++i];
@@ -161,6 +308,23 @@ int main(int argc, char** argv) {
         snprintf(global_env, sizeof(global_env), "%s/.aicoding/.env", get_home_dir());
         load_env_file(global_env);
     }
+
+    /* Load model list and apply selection before configuring LLM. */
+    load_models_json();
+    if (models_count > 1 && !non_interactive) {
+        select_model_interactive(model_name);
+    } else if (model_name) {
+        int idx = find_model_index(model_name);
+        if (idx >= 0) {
+            apply_model_config(idx);
+        } else {
+            fprintf(stderr, "Unknown model: %s\n", model_name);
+            return 1;
+        }
+    } else if (models_count == 1) {
+        apply_model_config(0);
+    }
+
     if (non_interactive) setenv("OPENCODE_NON_INTERACTIVE", "1", 1);
     if (allow_all) setenv("OPENCODE_ALLOW_ALL", "1", 1);
     if (gui_test_script) setenv("OPENCODE_GUI_TEST_SCRIPT", gui_test_script, 1);
