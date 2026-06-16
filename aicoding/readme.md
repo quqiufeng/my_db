@@ -55,7 +55,9 @@ agent 运行时的所有项目知识、代码索引、会话事实都落盘在�
 | **独立二进制** | 编译成单个 `aicoding`，无需 Node.js / Bun / Electron |
 | **KV Cache 记忆** | 项目知识、代码索引、会话事实全部落盘，进程重启不丢失 |
 | **工具调用** | 读文件、编辑文件、运行 bash/git、搜索代码记忆、编译验证 |
-| **权限系统** | 兼容 opencode 的 `permissions` 规则，支持 `allow`/`deny`/`ask` |
+| **权限系统** | 兼容 opencode 的 `permissions` 规则，支持 `allow`/`deny`/`ask`，默认保护系统与用户目录 |
+| **统一工具基础模块** | `shell.lua` / `json.lua` / `tokens.lua` 统一处理命令引用、JSON 编解码、token 估算 |
+| **安全护栏** | 默认禁止写/删 `/usr`、`/etc`、`/bin`、`/sbin`、`/lib*`、`/opt/my_db`、`~/*`；拦截危险 bash 模式 |
 | **LuaJIT 脚本层** | Prompt、工具定义、调度逻辑、Agent 全部用 Lua 编写，改逻辑不重编译 |
 | **实验性 GUI** | Rust/gpui-component 编译为 `.so`，LuaJIT FFI 驱动，可弹出聊天窗口 |
 | **代码语法高亮** | GUI 代码块使用 syntect 按语言着色 |
@@ -104,8 +106,11 @@ agent 运行时的所有项目知识、代码索引、会话事实都落盘在�
 │  - summarize.lua        会话摘要与事实提取 │
 │  - knowledge.lua        项目级知识记忆     │
 │  - trace.lua            结构化执行轨迹     │
+│  - shell.lua            POSIX shell 引用与安全命令执行 │
+│  - json.lua             统一 JSON 编解码与错误处理 │
+│  - tokens.lua           统一 token 估算器 │
 │  - tools/default.lua    工具定义与调度    │
-│  - permissions.lua      权限规则解析      │
+│  - permissions.lua      权限规则解析与安全护栏 │
 │  - agents/build.lua     自主 Build Agent │
 │  - agents/plan.lua      自主 Plan Agent  │
 │  - gui.lua              GUI FFI 封装      │
@@ -908,7 +913,7 @@ done
 
 | # | 事项 | 现状 | 风险/差距 | 期望的"完成标准" |
 |---|------|------|-----------|------------------|
-| C1 | **token 估算器校准** | `context.lua`、`rerank.lua`、`compress.lua` 各有一套 ASCII/中文估算逻辑，互不统一 | 上下文压缩边界不准确，可能提前归档或超限；成本预测不准 | 提供一个 `tokens.lua`，统一基于 tiktoken 近似或字符统计，被 context/compress/summarize 共享；单元测试覆盖中英文、代码块、工具调用 |
+| C1 | **token 估算器校准** | ✅ 已完成：`tokens.lua` 已创建并被 context/compress/summarize 共享（commit `3ee5758e`） | 上下文压缩边界不准确，可能提前归档或超限；成本预测不准 | 提供一个 `tokens.lua`，统一基于 tiktoken 近似或字符统计，被 context/compress/summarize 共享；单元测试覆盖中英文、代码块、工具调用 |
 | C2 | **归档内容可召回** | `context.lua` 把旧消息写入 `/agent/{session}/history/`，但系统 prompt 没有提示模型去召回 | 被移出窗口的信息理论上存在，但模型不知道在何时、如何读取 | 在系统 prompt 中加入"如需历史信息，用 `kv_search` 搜索 `/agent/{session}/history/`"；并提供一个 `recall_turns(query)` 辅助函数 |
 | C3 | **跨 session 记忆预热** | 新 session 启动时只读取 facts/summaries，不会主动搜索相关历史 | 换一个 session 后，模型对之前分析过的模块一无所知 | 启动时根据当前 task/current 自动 `kv_search` 相关 facts + summaries + knowledge，把最相关的 N 条注入 prompt |
 | C4 | **facts 质量与去重** | `prompts/default.lua` 取最近 10 条 facts，按 importance 排序；`rerank.lua` 按查询重排 | facts 可能重复、过期、互相矛盾；没有垃圾回收 | 给 fact 增加 source/action/evidence 字段；定期合并重复 fact，标记过期；提供 `fact_gc` 工具 |
@@ -921,7 +926,7 @@ done
 
 | # | 事项 | 现状 | 风险/差距 | 期望的"完成标准" |
 |---|------|------|-----------|------------------|
-| H1 | **权限系统更细粒度** | `permissions.lua` 支持 action/resource/effect，但 resource 对 edit/write/bash 只是路径通配 | 无法限制"只能改 .c/.h"、"不能删文件"、"bash 不能执行 rm -rf /" | 增加 action 细分：edit_filetype、delete、bash_command；resource 支持 glob 和否定模式；默认规则对危险操作更保守 |
+| H1 | **权限系统更细粒度** | ✅ 已完成：内置 deny 规则覆盖 `/usr`、`/etc`、`/bin`、`/sbin`、`/lib*`、`/opt/my_db`、`~/*`；增加 `is_dangerous_bash()` 危险命令检测（commit `3ee5758e`） | 无法限制"只能改 .c/.h"、"不能删文件"、"bash 不能执行 rm -rf /" | 增加 action 细分：edit_filetype、delete、bash_command；resource 支持 glob 和否定模式；默认规则对危险操作更保守 |
 | H2 | **敏感操作二次确认** | 依赖 permissions 的 ask 模式，但没有针对"大面积删除/网络/格式化"的特殊提示 | 模型可能在长任务中误触高破坏操作 | 对 `file_delete`、`bash` 中 rm/dd/mkfs、`write` 覆盖多文件等触发二次确认，并记录到 trace |
 | H3 | **插件沙箱与签名** | `plugin_create`/`plugin_load` 直接加载任意 Lua，没有沙箱 | 恶意或被误导的插件可执行任意系统命令 | 插件加载前可选沙箱：限制 `os.execute`/`io.popen`、禁止 require C 模块、只开放白名单 API；提供 `plugin_validate` |
 | H4 | **Agent 状态机持久化** | Plan/Build Agent 状态存在 KV Cache，但只保留最近一条 status | 进程崩溃后无法准确恢复执行到哪一步 | 每条 agent 事件写入 trace + KV；提供 `agent_resume` 命令从最近 checkpoint 恢复 |
@@ -975,8 +980,8 @@ done
 
 | # | 事项 | 现状 | 风险/差距 | 期望的"完成标准" |
 |---|------|------|-----------|------------------|
-| S1 | **内容安全过滤** | 无 | 模型可能输出或执行有害内容 | 对 LLM 输出做关键词/命令黑名单检查；对 bash 命令做危险命令检测 |
-| S2 | **写保护目录** | permissions 可以配置，但默认没有保护系统目录 | 模型可能误写 `/usr`、`/etc`、内核源码外的路径 | 默认 deny 对 `/usr`、`/etc`、`/opt/my_db`（除项目目录外）、`~` 根目录的 write/delete |
+| S1 | **内容安全过滤** | ✅ 已完成：`permissions.is_dangerous_bash()` 拦截 rm -rf /、mkfs、dd、fork bomb、重定向到 /dev、curl | sh 等模式（commit `3ee5758e`） | 模型可能输出或执行有害内容 | 对 LLM 输出做关键词/命令黑名单检查；对 bash 命令做危险命令检测 |
+| S2 | **写保护目录** | ✅ 已完成：`permissions.lua` 默认 deny 对 `/usr`、`/etc`、`/bin`、`/sbin`、`/lib*`、`/opt/my_db`、`~/*` 的 write/file_create/file_delete/delete（commit `3ee5758e`） | 模型可能误写 `/usr`、`/etc`、内核源码外的路径 | 默认 deny 对 `/usr`、`/etc`、`/opt/my_db`（除项目目录外）、`~` 根目录的 write/delete |
 | S3 | **资源限制** | 无 | 长循环或大量搜索可能耗尽资源 | 对 tool calls / LLM calls / bash timeout / 文件读取大小设置全局限制；超限时熔断 |
 | S4 | **checkpoint 自动策略** | 只在 edit/write 前备份 | delete、apply_patch、bash 也可能破坏 | 对 delete、apply_patch、file_create 也触发 checkpoint；大修改前自动备份整个项目 |
 
@@ -995,8 +1000,8 @@ done
 
 | # | 事项 | 现状 | 风险/差距 | 期望的"完成标准" |
 |---|------|------|-----------|------------------|
-| D1 | **统一 shell_quote** | `tools/default.lua`、`knowledge.lua`、`trace.lua` 各有一份 | 新增模块容易漏引或写错 | 抽一个 `shell.lua` 模块，所有 os.execute/io.popen 统一使用；回归测试覆盖含空格/单引号路径 |
-| D2 | **统一 JSON 处理** | 多处 `pcall(cjson.decode, ...)` 重复 | 错误处理不一致 | 提供 `json.lua` 封装 decode/encode，统一错误处理 |
+| D1 | **统一 shell_quote** | ✅ 已完成：`shell.lua` 提供 `quote`/`quote_args`/`run`，`tools/default.lua`、`knowledge.lua`、`trace.lua` 已迁移（commit `3ee5758e`） | 新增模块容易漏引或写错 | 抽一个 `shell.lua` 模块，所有 os.execute/io.popen 统一使用；回归测试覆盖含空格/单引号路径 |
+| D2 | **统一 JSON 处理** | ✅ 已完成：`json.lua` 封装 decode/encode，统一 `(val, err)` 返回签名；`main.lua`、agents、checkpoints、prompts 已迁移（commit `3ee5758e`） | 错误处理不一致 | 提供 `json.lua` 封装 decode/encode，统一错误处理 |
 | D3 | **减少全局函数** | `main.lua` 暴露多个全局函数供 C 调用，但没有命名空间 | 命名冲突风险 | 把全局入口整理到 `aicoding.*` 命名空间，或在文档中明确列出 |
 | D4 | **错误码与日志统一** | tool 返回 `{ok, error}`，但 error 信息格式不一 | 下游解析困难 | 定义 error taxonomy：FILE_NOT_FOUND、PERMISSION_DENIED、LLM_ERROR、TIMEOUT 等 |
 | D5 | **模块依赖图清晰** | 模块间 require 关系隐含 | 新增循环依赖风险 | 绘制模块依赖图；禁止 tools -> main 反向依赖；lint 检查 |
