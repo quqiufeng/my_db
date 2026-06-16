@@ -896,3 +896,117 @@ done
 ---
 
 *基于 my_db KV Cache 构建。*
+
+---
+
+## 下一步：把 aicoding 基座打扎实（面向 Linux 内核级开发）
+
+> 目标：让 aicoding 成为市面上第一个真正可用于 Linux 内核开发、不需要担心上下文窗口的 AI Coding Agent。
+> 以下清单基于 AGENT_BEST_PRACTICES.md 的 Prompt / Context / Harness 三层框架，结合现有代码逐项复盘得出。
+
+### 一、Context Engineering：让模型在长周期内核任务中始终"记得住、找得到"
+
+| # | 事项 | 现状 | 风险/差距 | 期望的"完成标准" |
+|---|------|------|-----------|------------------|
+| C1 | **token 估算器校准** | `context.lua`、`rerank.lua`、`compress.lua` 各有一套 ASCII/中文估算逻辑，互不统一 | 上下文压缩边界不准确，可能提前归档或超限；成本预测不准 | 提供一个 `tokens.lua`，统一基于 tiktoken 近似或字符统计，被 context/compress/summarize 共享；单元测试覆盖中英文、代码块、工具调用 |
+| C2 | **归档内容可召回** | `context.lua` 把旧消息写入 `/agent/{session}/history/`，但系统 prompt 没有提示模型去召回 | 被移出窗口的信息理论上存在，但模型不知道在何时、如何读取 | 在系统 prompt 中加入"如需历史信息，用 `kv_search` 搜索 `/agent/{session}/history/`"；并提供一个 `recall_turns(query)` 辅助函数 |
+| C3 | **跨 session 记忆预热** | 新 session 启动时只读取 facts/summaries，不会主动搜索相关历史 | 换一个 session 后，模型对之前分析过的模块一无所知 | 启动时根据当前 task/current 自动 `kv_search` 相关 facts + summaries + knowledge，把最相关的 N 条注入 prompt |
+| C4 | **facts 质量与去重** | `prompts/default.lua` 取最近 10 条 facts，按 importance 排序；`rerank.lua` 按查询重排 | facts 可能重复、过期、互相矛盾；没有垃圾回收 | 给 fact 增加 source/action/evidence 字段；定期合并重复 fact，标记过期；提供 `fact_gc` 工具 |
+| C5 | **代码检索结果可信度** | `rerank.lua` 用 token 重叠打分，没有利用代码结构信息 | 对长函数、宏、Kconfig 等召回可能不准 | 重排时加入 kind（function/struct/macro）、调用图热度、文件路径匹配、签名匹配等信号；对内核专用符号做 boost |
+| C6 | **调用图深度与循环控制** | `kv_context` 已支持 depth/batch，但 `cache_query` 的输出是原始 JSON，未针对 LLM 阅读优化 | 深调用链输出冗长，容易塞爆上下文 | 对 `kv_context` 结果做摘要：每层只保留关键调用点，检测循环，支持 `max_nodes` 限制 |
+| C7 | **项目级知识自动维护** | `knowledge.lua` 支持读写和注入 prompt，但靠模型自觉 | 模型可能不写、写乱、写重复 | 在 Plan/Build Agent 结束时自动提取并写入 `knowledge_write`；提供 knowledge 模板（architecture.md、decisions.md、patterns.md、errors.md） |
+| C8 | **外部文档持久化索引** | `web_fetch` 只把摘要写入 KV，不做向量索引 | 抓取过的 RFC/文档无法语义搜索 | 对 web_fetch 内容做分块 + 向量索引，写入 `/agent/{session}/web_index/`，支持 `kv_search search_type=semantic` |
+
+### 二、Harness Engineering：让模型在内核这种高风险场景下可靠执行
+
+| # | 事项 | 现状 | 风险/差距 | 期望的"完成标准" |
+|---|------|------|-----------|------------------|
+| H1 | **权限系统更细粒度** | `permissions.lua` 支持 action/resource/effect，但 resource 对 edit/write/bash 只是路径通配 | 无法限制"只能改 .c/.h"、"不能删文件"、"bash 不能执行 rm -rf /" | 增加 action 细分：edit_filetype、delete、bash_command；resource 支持 glob 和否定模式；默认规则对危险操作更保守 |
+| H2 | **敏感操作二次确认** | 依赖 permissions 的 ask 模式，但没有针对"大面积删除/网络/格式化"的特殊提示 | 模型可能在长任务中误触高破坏操作 | 对 `file_delete`、`bash` 中 rm/dd/mkfs、`write` 覆盖多文件等触发二次确认，并记录到 trace |
+| H3 | **插件沙箱与签名** | `plugin_create`/`plugin_load` 直接加载任意 Lua，没有沙箱 | 恶意或被误导的插件可执行任意系统命令 | 插件加载前可选沙箱：限制 `os.execute`/`io.popen`、禁止 require C 模块、只开放白名单 API；提供 `plugin_validate` |
+| H4 | **Agent 状态机持久化** | Plan/Build Agent 状态存在 KV Cache，但只保留最近一条 status | 进程崩溃后无法准确恢复执行到哪一步 | 每条 agent 事件写入 trace + KV；提供 `agent_resume` 命令从最近 checkpoint 恢复 |
+| H5 | **Build Agent 针对内核** | 当前 build 工具只检测 cargo/npm/make/cmake/go/python | Linux 内核用 kbuild，需要 `make menuconfig`、`make -j$(nproc)`、处理 .config | 扩展 build 检测：识别 `Kconfig`、`Makefile`（内核风格）、`scripts/kconfig/`；支持指定 target 和 defconfig；失败时只返回前 N 个 error 和对应文件 |
+| H6 | **Plan Agent 自省** | Plan Agent 生成计划后执行，但计划本身不经过可行性评估 | 内核任务可能计划不可行（如修改不存在的子系统） | 在生成计划后增加"plan_review"步骤：检查涉及文件/符号是否存在、依赖是否合理、是否需要配置变更 |
+| H7 | **错误恢复与熔断** | chat_once 8 次迭代后返回"too many tool iterations"，没有分类错误 | 网络错误、API 限流、解析错误、工具失败混为一谈 | 对错误分类：retry（网络/限流）、replan（工具链失败）、abort（权限/安全）；支持指数退避重试 LLM 请求 |
+| H8 | **结构化日志级别** | 只有 `opencode.log_info`，没有 debug/warn/error | 排查问题时日志 noise 大，关键错误被淹没 | 增加 `opencode.log_debug/warn/error`，受 `OPENCODE_LOG_LEVEL` 控制；关键路径统一使用 |
+| H9 | **可观测性查询** | `trace_query` 已支持事件过滤 | 缺少成本、延迟、token 使用、工具成功率的聚合 | 在 trace 中记录 token usage、latency；提供 `metric_summary` 工具输出 scorecard |
+| H10 | **评估 benchmark** | 只有 8 个 GUI 冒烟测试 | 无法量化 prompt/context/agent 改动的影响 | 建立 `benchmarks/`：内核符号问答、已知 bug 修复、新驱动函数添加、跨文件重构；输出 pass / cost / turns |
+
+### 三、Prompt / System：让模型知道如何像一个内核开发者一样工作
+
+| # | 事项 | 现状 | 风险/差距 | 期望的"完成标准" |
+|---|------|------|-----------|------------------|
+| P1 | **内核专用系统 prompt** | 默认 prompt 是通用 coding assistant | 模型不了解 Linux 内核编码风格、Kconfig、头文件约定、许可证头 | 检测项目为内核源码时，注入 `prompts/linux_kernel.lua`：包含 CodingStyle、checkpatch、Kconfig、include 规则 |
+| P2 | **任务模板** | `/task` 只保存一句话描述 | 复杂内核任务（如"给某子系统加接口"）缺少标准分析路径 | 提供任务模板：探索子系统 → 读 Kconfig/Makefile → 找同类实现 → 修改 → 编译 → 运行 checkpatch |
+| P3 | **工作流强制** | 系统 prompt 列出 6 条 workflow，但靠模型自觉 | 模型可能跳过搜索直接编辑，导致破坏 | 在 prompt 中增加"必须完成 checklist"：每次编辑前说明依据、编辑后运行 build/diff、关键结论写 KV |
+| P4 | **输出格式稳定** | 工具调用由 schema 保证，但自然语言输出格式多变 | 长回复中关键信息（文件列表、测试结果）难以解析 | 要求模型在总结时使用结构化格式：```yaml status: ... files: ... tests: ...``` |
+
+### 四、Tool / Agent：补齐内核开发必备工具
+
+| # | 事项 | 现状 | 风险/差距 | 期望的"完成标准" |
+|---|------|------|-----------|------------------|
+| T1 | **跨文件批量编辑** | `edit` 一次只能替换一处，`apply_patch` 需要完整 patch | 内核修改常涉及多文件同模式替换 | 提供 `multi_edit` 工具：按 glob 批量应用相同模式替换，返回每个文件结果；提供 `sed_safe` 模式 |
+| T2 | **内核代码搜索增强** | `kv_search` 语义搜索已可用，`grep` 用 ripgrep | 缺少按子系统、按配置项、按 commit 搜索 | 增加 `kconfig_search`、`grep_commit`（git log -S）、`grep_defconfig` 工具 |
+| T3 | **checkpatch / sparse 集成** | build 工具不识别 checkpatch | 内核代码需要过风格检查 | 增加 `checkpatch` 工具：对修改文件运行 `scripts/checkpatch.pl`；`sparse` 工具静态检查 |
+| T4 | **配置系统交互** | 没有 Kconfig 相关工具 | 修改驱动时可能需要改 Kconfig/Makefile | 提供 `kconfig_read`（读 Kconfig 描述）、`kconfig_set`（修改 .config）工具 |
+| T5 | **测试执行工具** | `build` 只做编译，没有测试 | 内核修改后需要运行 qemu/boot test | 提供 `test` 工具：检测项目类型，运行 `make test` / `pytest` / `kselftest` / `qemu`（可配置） |
+| T6 | **Explore Agent** | roadmap 中标记为未完成 | 模型探索大型代码库时缺少导航 agent | 实现 `agents/explore.lua`：接受"了解某子系统"任务，自动搜索入口文件、核心结构体、关键函数，输出架构报告 |
+| T7 | **Review Agent** | 无 | 编辑后缺少代码审查 | 实现 `agents/review.lua`：对修改文件做静态检查、风格检查、架构约束检查，输出 review report |
+
+### 五、Observability / Traceability：让开发者能复盘 agent 行为
+
+| # | 事项 | 现状 | 风险/差距 | 期望的"完成标准" |
+|---|------|------|-----------|------------------|
+| O1 | **trace 持久化与轮转** | `trace.lua` 写入单文件，没有大小限制 | 长时间运行后 trace 文件无限增长 | 按天轮转，限制单文件大小；提供 `trace_prune` 工具 |
+| O2 | **trace 与 KV 关联** | trace 和 KV 分别存储 | 难以从一次 LLM 请求追踪到产生的 facts/checkpoints | trace 中记录相关 KV key、checkpoint_id、修改文件路径 |
+| O3 | **运行时 metric 看板** | 无 | 无法直观看到 agent 成本和成功率 | 在 GUI/CLI 中显示本次会话的 turns、tokens、tool calls、success rate |
+| O4 | **失败回放** | 无 | 线上问题难以本地复现 | 提供 `trace_replay`：读取 trace 文件，按顺序重放 tool calls（LLM 调用可 mock） |
+
+### 六、Testing / Evaluation：把回归变成基础设施
+
+| # | 事项 | 现状 | 风险/差距 | 期望的"完成标准" |
+|---|------|------|-----------|------------------|
+| E1 | **C 层单元测试覆盖** | 只有 `test/test_session.c` 一个冒烟测试 | C 核心（cache 绑定、llm_client、http_async）无单元测试 | 为 `lua_engine.c` 的绑定函数、`llm_client.c` 的请求构建、`http_async.c` 增加测试 |
+| E2 | **Lua 层单元测试** | 无 | rerank、context、permissions 等核心逻辑无独立测试 | 使用 busted 或纯 Lua 测试框架，覆盖 rerank、context.compress、permissions.check、checkpoint |
+| E3 | **回归测试并行化** | `make regression` 串行运行 GUI 测试 | 时间长，依赖 LLM，不稳定 | 支持非 GUI 的 CLI 回归；对不依赖 LLM 的模块单独跑；关键路径加 mock LLM |
+| E4 | **内核基准任务** | 无 | 无法证明 aicoding 能做内核开发 | 在 `benchmarks/linux/` 中准备 3-5 个真实任务：添加 sysfs 属性、修复已知 simple bug、refactor 一个 helper |
+
+### 七、Safety / Guardrails：让 agent 不会被自己或模型搞坏
+
+| # | 事项 | 现状 | 风险/差距 | 期望的"完成标准" |
+|---|------|------|-----------|------------------|
+| S1 | **内容安全过滤** | 无 | 模型可能输出或执行有害内容 | 对 LLM 输出做关键词/命令黑名单检查；对 bash 命令做危险命令检测 |
+| S2 | **写保护目录** | permissions 可以配置，但默认没有保护系统目录 | 模型可能误写 `/usr`、`/etc`、内核源码外的路径 | 默认 deny 对 `/usr`、`/etc`、`/opt/my_db`（除项目目录外）、`~` 根目录的 write/delete |
+| S3 | **资源限制** | 无 | 长循环或大量搜索可能耗尽资源 | 对 tool calls / LLM calls / bash timeout / 文件读取大小设置全局限制；超限时熔断 |
+| S4 | **checkpoint 自动策略** | 只在 edit/write 前备份 | delete、apply_patch、bash 也可能破坏 | 对 delete、apply_patch、file_create 也触发 checkpoint；大修改前自动备份整个项目 |
+
+### 八、Linux 内核开发专属：让 aicoding 真正懂内核
+
+| # | 事项 | 现状 | 风险/差距 | 期望的"完成标准" |
+|---|------|------|-----------|------------------|
+| L1 | **内核索引预加载** | `/opt/code_caches/linux_cache` 已存在 | 但 aicoding 启动时不会自动把它作为可用 repo 提示给模型 | 系统 prompt 自动列出 `/opt/code_caches` 中可访问的 repo；对 `/code/local/linux` 做特殊别名 |
+| L2 | **内核文件类型识别** | `read` 工具对所有文本文件一视同仁 | 对 Kconfig、.config、dts、Makefile、头文件没有特殊处理 | 在 read 结果中返回文件类型提示；提供 `kconfig_read`、`dts_read` 等专用工具 |
+| L3 | **头文件/导出符号追踪** | `kv_context` 有 caller/callee，但缺少 include/export 关系 | 内核修改常需要加 include、EXPORT_SYMBOL、头文件声明 | 扩展 cache_query 输出 include 关系、EXPORT_SYMBOL 列表；工具提示模型检查 |
+| L4 | **编译-配置联动** | build 工具对内核对 .config 变化不敏感 | 修改 Kconfig 后需要重新配置，否则编译失败 | build 工具检测到 Kconfig 变化时提示/运行 `make oldconfig`；支持保存/恢复 .config |
+| L5 | **版本与分支感知** | 无 | 模型不知道当前内核版本、目标分支 | 从 Makefile 读取版本注入 prompt；git branch/tag 注入 prompt |
+| L6 | **checkpatch 风格内化** | 无 | 模型生成的补丁风格不符，每次靠 checkpatch 后返工 | 在 prompt 中注入常见 checkpatch 规则；edit 后自动调用 checkpatch 并反馈 |
+
+### 九、工程债务：把代码本身整理成 agent 能维护的样子
+
+| # | 事项 | 现状 | 风险/差距 | 期望的"完成标准" |
+|---|------|------|-----------|------------------|
+| D1 | **统一 shell_quote** | `tools/default.lua`、`knowledge.lua`、`trace.lua` 各有一份 | 新增模块容易漏引或写错 | 抽一个 `shell.lua` 模块，所有 os.execute/io.popen 统一使用；回归测试覆盖含空格/单引号路径 |
+| D2 | **统一 JSON 处理** | 多处 `pcall(cjson.decode, ...)` 重复 | 错误处理不一致 | 提供 `json.lua` 封装 decode/encode，统一错误处理 |
+| D3 | **减少全局函数** | `main.lua` 暴露多个全局函数供 C 调用，但没有命名空间 | 命名冲突风险 | 把全局入口整理到 `aicoding.*` 命名空间，或在文档中明确列出 |
+| D4 | **错误码与日志统一** | tool 返回 `{ok, error}`，但 error 信息格式不一 | 下游解析困难 | 定义 error taxonomy：FILE_NOT_FOUND、PERMISSION_DENIED、LLM_ERROR、TIMEOUT 等 |
+| D5 | **模块依赖图清晰** | 模块间 require 关系隐含 | 新增循环依赖风险 | 绘制模块依赖图；禁止 tools -> main 反向依赖；lint 检查 |
+
+### 十、文档与仓库即记录系统
+
+| # | 事项 | 现状 | 风险/差距 | 期望的"完成标准" |
+|---|------|------|-----------|------------------|
+| Doc1 | **AGENTS.md 变成地图** | 目前没有项目级 AGENTS.md | 新会话模型不知道项目结构 | 创建 `.opencode/AGENTS.md`，指向 `docs/ARCHITECTURE.md`、`docs/WORKFLOW.md`、`docs/CONVENTIONS.md` |
+| Doc2 | **架构约束文件** | 无 `.opencode/architecture.json` | 模型可能写出破坏依赖方向的代码 | 定义 `aicoding` 自身模块的层级和依赖规则，并提供 lint 工具验证 |
+| Doc3 | **决策记录模板** | `knowledge.lua` 已支持 knowledge_write | 但缺少标准模板 | 提供 `.opencode/knowledge/decisions.md` 模板和 `knowledge_write` 最佳实践 |
+| Doc4 | **更新本 README 底部 TODO** | 本次追加 | 后续每完成一项应更新状态 | 把本 TODO 改为 `.opencode/ROADMAP.md`，README 只保留链接；每项完成后在 ROADMAP 中标记并附提交 hash |
+
