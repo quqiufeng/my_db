@@ -1,157 +1,417 @@
-# OpenCode GUI 架构：Rust + LuaJIT FFI
+# GUI 架构：LuaJIT + Rust/gpui-component
 
-这是一个值得参考的 GUI 程序开发模式：**用 Rust 写渲染引擎和平台适配，用 LuaJIT 写业务逻辑和 UI 内容驱动**。两者通过稳定的 C ABI 隔离，Rust 编译为动态库，Lua 通过 FFI 加载并调用。
+本项目采用 **Lua 驱动业务逻辑、Rust 做 GPU 加速渲染** 的分层架构。两者通过 **稳定的 C ABI** 隔离——Rust 编译为 `.so` 动态库，LuaJIT 通过 FFI 加载调用。界面响应与 LLM 交互完全在 Lua 层完成，修改行为不需要重编译 Rust。
 
-## 整体分层
+---
+
+## 一、整体分层
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                         Lua 脚本层                           │
-│  main.lua  /  prompts/default.lua  /  tools/default.lua      │
-│  permissions.lua  /  gui.lua                                  │
-│  - 组装 LLM 请求                                              │
-│  - 调用 C HTTP 客户端发送请求                                  │
-│  - 解析 SSE/JSON 响应                                         │
-│  - 调用 GUI FFI 更新界面                                       │
-│  - 调度工具、检查权限、管理 Todo                              │
-├─────────────────────────────────────────────────────────────┤
-│                      LuaJIT FFI 绑定层                         │
-│  gui.lua 中通过 ffi.load("aicoding_gui") 加载 libaicoding_gui.so│
-│  暴露：gui.create / append_message / stream_delta /           │
-│        tool_output / add_todo / set_todo_done 等              │
-├─────────────────────────────────────────────────────────────┤
-│                       Rust GUI 引擎层                          │
-│  opencode/gui_gpui/src/lib.rs                                 │
-│  - GPUI / gpui-component 实现窗口、渲染、输入、事件            │
-│  - 暴露 #[no_mangle] C ABI 函数                               │
-│  - 维护 App 状态（messages / todos / callbacks）               │
-│  - 定时轮询刷新，把 C 回调的更新同步到 GPUI 主线程             │
-├─────────────────────────────────────────────────────────────┤
-│                        C 核心层                               │
-│  session.h/c, lua_engine.h/c, llm_client.h/c                  │
-│  - KV Cache 会话管理                                          │
-│  - LuaJIT 宿主 + C 函数注册                                   │
-│  - OpenAI/Anthropic HTTP 客户端                               │
-└─────────────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────┐
+│                    Lua 业务逻辑层                            │
+│  main.lua (run_gui)                                         │
+│  - 创建 GUI 实例、注册用户消息回调                            │
+│  - Coroutine 调度：LLM 请求、流式输出、工具执行               │
+│  - 组装 HTTP 请求头、解析响应                                │
+│  - 调用 gui.* FFI 更新界面                                  │
+├────────────────────────────────────────────────────────────┤
+│                  LuaJIT FFI 绑定层                           │
+│  gui.lua                                                    │
+│  - ffi.load("aicoding_gui", true) 加载 .so                  │
+│  - ffi.cdef 声明 Rust 导出的 C 函数                          │
+│  - ffi.cast 将 Lua 闭包转为 C 函数指针传递给 Rust            │
+│  - 管理回调生命周期，防止 GC 回收                             │
+├────────────────────────────────────────────────────────────┤
+│                    C 桥接层                                   │
+│  lua_engine.c / gui_tick.c                                  │
+│  - opencode.gui_set_tokens/input/submit (C → Lua binding)   │
+│  - dlsym 动态解析 Rust 导出的 GUI 符号                       │
+│  - gui_tick.c: Rust 定时器 → 调用 Lua gui_tick() 恢复协程   │
+│  - gui_tick.c: Rust 双击复制 → 调用 Lua gui_on_copy()       │
+├────────────────────────────────────────────────────────────┤
+│                  Rust 渲染引擎层                              │
+│  gui_gpui/src/lib.rs                                        │
+│  - gpui-component 窗口、输入框、按钮、布局                    │
+│  - syntect 代码语法高亮                                     │
+│  - Markdown / Diff / Reasoning 块渲染                       │
+│  - 60fps 定时器驱动 Lua tick + 界面刷新                      │
+└────────────────────────────────────────────────────────────┘
 ```
 
-## 为什么这样设计
+---
 
-### 1. Rust 做 GUI 引擎
+## 二、代码文件清单
 
-- **跨平台渲染**：GPUI 提供一致的 GPU 加速 UI
-- **内存安全**：窗口状态、跨线程通信不容易出 UB
-- **稳定 ABI**：`#[no_mangle] pub extern "C"` 导出固定符号，LuaJIT FFI 可以直接调用
-- **高性能重绘**：C 回调更新共享状态后，GPUI 定时轮询触发 `cx.notify()`
+| 文件 | 层 | 职责 |
+|------|-----|------|
+| `gui_gpui/src/lib.rs` | Rust | 窗口创建、消息列表、输入框、状态栏、右侧面板、代码高亮、Diff 视图 |
+| `gui.lua` | Lua FFI | `cdef` 声明、`ffi.load`、回调类型转换、`create`/`append_message`/`stream_delta` |
+| `lua_engine.c` | C | `l_gui_set_tokens`/`l_gui_set_input`/`l_gui_submit` 注册到 `opencode.` 表 |
+| `gui_tick.c` | C | `opencode_gui_tick`（定时器驱动协程）、`opencode_gui_notify_copy`（双击复制回调 Lua） |
+| `main.lua` | Lua | `run_gui()`——GUI 主入口，协程内的 LLM 调用、流式输出、工具执行 |
+| `async_http.lua` | Lua | 非阻塞 HTTP（配合协程 yield，避免 GUI 卡死） |
 
-### 2. LuaJIT 写业务逻辑
+---
 
-- **热更新**：修改 prompt、工具、交互逻辑不需要重新编译 Rust/C
-- **表达力强**：JSON 组装、字符串处理、权限规则都很方便
-- **体积小**：Lua 脚本轻量，适合作为 agent 的“大脑”
-- **生态借力**：可以用 `cjson.so` 等现有 Lua/C 扩展
+## 三、C ABI 契约（LuaJIT ↔ Rust）
 
-### 3. C ABI 作为边界
+所有跨语言调用都通过 `.so` 导出的 C 符号完成。
+
+### 3.1 Rust 导出的 C 函数（被 Lua 调用）
 
 ```rust
-// Rust 端导出的 C 函数
-#[no_mangle]
-pub extern "C" fn gui_append_message(
-    app: *mut c_void,
-    role: *const c_char,
-    text: *const c_char,
-);
+// lib.rs: #[no_mangle] pub extern "C" fn ...
+void*   gui_app_create(const char* config_json);
+void    gui_app_free(void* app);
+void    gui_on_user_message(void* app, callback_fn, void* userdata);
+void    gui_on_tool_call(void* app, callback_fn, void* userdata);
+int     gui_run(void* app, void* lua_state);
+
+void    gui_stream_delta(void* app, const char* session_id, const char* delta);
+void    gui_append_message(void* app, const char* session_id, const char* role, const char* text);
+void    gui_tool_output(void* app, const char* session_id, const char* tool_id, const char* output);
+void    gui_set_tokens(void* app, int total, int prompt, int completion);
+void    gui_set_input_value(void* app, const char* text);
+void    gui_submit_input(void* app);
+char*   gui_get_messages(void* app);
+void    gui_add_todo(void* app, const char* text);
+void    gui_set_todo_done(void* app, const char* text, int done);
+void    gui_clear_todos(void* app);
 ```
+
+### 3.2 C 层导出的函数（被 Rust 调用）
 
 ```c
-// C 头端看到的签名（概念上）
-void gui_append_message(void* app, const char* role, const char* text);
+// gui_tick.c: 可在 GPUI 主线程安全调用
+void opencode_gui_tick(void* lua_state);       // 恢复 Lua pending coroutines
+void opencode_gui_notify_copy(void* lua_state, const char* text);  // 双击复制通知 Lua
 ```
+
+### 3.3 Lua 端注册的全局函数（被 Rust/C 回调）
 
 ```lua
--- Lua 端通过 FFI 调用
-local gui = ffi.load("aicoding_gui")
-gui.gui_append_message(app, "assistant", delta)
+-- main.lua 定义的全局函数，被 gui_tick.c 通过 lua_getglobal 查找：
+function gui_tick()      -- 60fps 定时器每帧调用一次，恢复所有 pending coroutines
+function gui_on_copy(text)  -- 用户双击代码块/文本时调用
 ```
 
-三者共享同一套 C ABI，Rust 和 Lua 都不需要知道对方的具体实现。
+---
 
-## 数据流示例：LLM 回复更新到 GUI
+## 四、核心数据流
+
+### 4.1 启动流程
 
 ```
-用户按 Enter
-    ↓
-Lua send_message → C llm_complete_raw
-    ↓
-C HTTP 客户端流式读取 SSE
-    ↓
-每收到一个 delta，C 调用 Lua 回调
-    ↓
-Lua 调用 gui.stream_delta("assistant", delta)
-    ↓
-Rust GUI 引擎追加到 messages，刷新 UI
-    ↓
-GPUI 定时轮询触发 cx.notify()，窗口重绘
+cli.c main()
+  │
+  ├─ 加载 .env → 模型选择器 → configure_llm()
+  │
+  └─ opencode.llm_protocol() + llm_complete_raw (CLI 模式)
+     或
+     run_gui() (GUI 模式，默认)
+        │
+        ├─ gui = require("gui")
+        ├─ gui.create({title, project_root, model, version})
+        │     └─ Rust gui_app_create() → 初始化 GuiApp 结构体
+        │
+        ├─ gui.append_message(welcome)
+        ├─ gui.on_user_message(handler)
+        │     └─ Rust gui_on_user_message() → 存储回调指针
+        │
+        ├─ gui.run(app)
+        │     └─ Rust gui_run() → gpui_platform::application().run()
+        │           ├─ 创建窗口 → ChatView
+        │           ├─ 60fps 定时器 → opcode_gui_tick → Lua gui_tick()
+        │           └─ 阻塞直到窗口关闭
+        │
+        └─ gui.free(app)
 ```
 
-## 最小可运行 Demo
+### 4.2 用户输入 → LLM 响应 → 流式输出
 
-`opencode/gui_gpui/examples/minimal.rs` 是一个剥离了业务逻辑的最小 GPUI 窗口示例：
-
-- 直接调用 `gpui_platform::application().run`
-- 初始化 `gpui_component`
-- 打开一个 600×400 的窗口
-- 在 `Root` 中渲染一个纯绿色背景视图
-
-它的作用是验证编译环境、GPU 渲染和窗口创建是否正常。如果 GUI 出现窗口透明或无法渲染，可以先跑这个 demo 确认底层 GPUI 是否能正常工作：
-
-```bash
-cd /opt/my_db/aicoding/gui_gpui
-cargo run --release --example minimal
+```
+用户输入文本 → 回车
+  │
+  ├─ Rust: gui_submit_input()
+  │     ├─ 写入 messages: "user", text
+  │     └─ 调用 on_user_message 回调 (C 函数指针)
+  │           │
+  │           └─ Lua: gui.on_user_message 注册的 handler
+  │                 │
+  │                 ├─ gui.append_message(app, sid, "user", text)   → 界面显示用户消息
+  │                 ├─ gui.clear_todos(app)
+  │                 ├─ trace.agent_start(text)
+  │                 └─ 创建协程:
+  │                       coroutine.create(function()
+  │                         1. 组装 request_body (system + messages + tools)
+  │                         2. async_http.request(url, headers, body_json)
+  │                              ├─ opencode.http_request() → C 异步 HTTP
+  │                              └─ opencode.http_poll() + coroutine.yield() 循环
+  │                         3. 解析响应 → content + reasoning + tool_calls
+  │                         4. while content 未发送完:
+  │                              ├─ gui.stream_delta(app, sid, chunk)  → Rust 追加到 messages
+  │                              └─ coroutine.yield()                 → 让出给定时器
+  │                         5. 如果有 reasoning → gui.append_message("reasoning", ...)
+  │                         6. 如果有 tool_calls:
+  │                              ├─ gui.tool_output(app, sid, name, "running...")
+  │                              ├─ tools.dispatch(tc) → 执行工具
+  │                              ├─ gui.tool_output(app, sid, name, result)
+  │                              └─ 转到步骤 1（下一轮 LLM 调用）
+  │                         7. 完成
+  │                       end)
+  │
+  └─ coroutine.resume(co)
+        └─ 插入 pending_coroutines 表
 ```
 
-这是从完整 GUI 中抽取的最小骨架，适合作为新功能的起点。
+### 4.3 定时器驱动协程
 
-## 关键技巧：跨线程安全刷新
+```
+Rust 60fps 定时器 (16ms)
+  │
+  ├─ ① opencode_gui_tick(lua_state)   [C → Lua]
+  │     └─ Lua gui_tick()
+  │            └─ 遍历 pending_coroutines[]
+  │                  对于每个 suspended 的协程: coroutine.resume(co)
+  │                  协程执行到下一个 coroutine.yield() 后挂起
+  │                  协程的 stream_delta() 调用在 resume 中执行
+  │
+  └─ ② cx.notify()                    [Rust 重绘]
+        └─ ChatView::render()
+              ├─ 读取 app.messages → 消息列表
+              ├─ 读取 app.todos → 待办列表
+              ├─ 读取 app.token_* → 统计栏
+              └─ 渲染完整的 UI 树
+```
 
-Rust GUI 引擎不能在 C/Lua 回调线程直接调用 `cx.notify()`。本项目的做法：
+**关键：每帧先 tick 再 render。** 协程在 tick 阶段发送 stream delta 更新 Rust 共享状态，然后 render 阶段读取最新状态绘制，延迟控制在 1 帧（<16ms）。
 
-1. C 回调更新共享状态（`messages`、`todos`）
-2. Rust 引擎在 `ChatView` 创建时启动一个 GPUI 内部定时器：
+### 4.4 双击复制
+
+```
+用户双击消息/代码块
+  │
+  ├─ Rust 事件 → opencode_gui_notify_copy(lua_state, text)  [C → Lua]
+  │     └─ Lua gui_on_copy(text)
+  │            └─ opencode.set_clipboard(text)
+  │                  ├─ wl-copy / xclip / xsel
+  │                  └─ log.info("copied to clipboard")
+```
+
+---
+
+## 五、状态管理
+
+### 5.1 Rust 侧共享状态（`GuiApp` 结构体）
 
 ```rust
-cx.spawn(async move |this, cx| {
-    loop {
-        cx.background_executor()
-            .timer(Duration::from_millis(100))
-            .await;
-        this.update(cx, |_this, cx| cx.notify()).ok();
-    }
-})
-.detach();
+struct GuiApp {
+    on_user_message: Option<extern "C" fn(...)>,  // 用户消息回调
+    on_tool_call:    Option<extern "C" fn(...)>,   // 工具调用回调
+    messages:        Arc<Mutex<Vec<MessageRow>>>,  // 消息列表
+    model:           String,                        // 模型名
+    title:           String,                        // 窗口标题
+    version:         String,                        // 版本
+    project_root:    PathBuf,                       // 项目路径
+    todos:           Arc<Mutex<Vec<TodoItem>>>,     // 待办列表
+    input_buffer:    Arc<Mutex<String>>,            // 外部输入缓冲区
+    token_prompt:    Arc<Mutex<usize>>,             // prompt tokens
+    token_completion: Arc<Mutex<usize>>,            // completion tokens
+    token_total:     Arc<Mutex<usize>>,             // 总 tokens
+    lua_state:       *mut c_void,                   // LuaJIT 状态指针
+    view:            Mutex<Option<WeakEntity<ChatView>>>,  // GPUI 视图弱引用
+    executor:        Mutex<Option<ForegroundExecutor>>,    // GPUI 主线程执行器
+}
 ```
 
-3. 每 100ms 在 GPUI 主线程上触发一次重绘
+### 5.2 Lua 侧协程状态
 
-这样避免了外部 `mpsc` 通道与 GPUI 渲染冲突导致的窗口透明问题。
+```lua
+-- main.lua
+local pending_coroutines = {}  -- 全局待恢复协程列表
+_G.gui_mode = true              -- GUI 模式标志（控制 async_http.sleep 行为）
+```
 
-## 可复用模式
+协程内部有自己的闭包状态（`messages` 表、`request_body`、`tool_calls` 等），不需要额外的状态管理。
 
-如果你想做一个类似的 GUI 程序，可以照搬这个结构：
+---
 
-| 部分 | 技术 | 职责 |
-|------|------|------|
-| 渲染引擎 | Rust + GPUI/egui/tao | 窗口、绘制、输入、定时刷新 |
-| 业务逻辑 | LuaJIT | 数据获取、状态机、UI 内容生成 |
-| 绑定层 | LuaJIT FFI + C ABI | 稳定的跨语言接口 |
-| 核心库 | C/Rust | 文件、网络、数据库等底层能力 |
+## 六、UI 组件结构
 
-## 本项目相关文件
+```
+窗口
+├── 主区域 (Main Area)
+│   ├── 消息列表 (Message List) — 可滚动
+│   │   ├── User 消息（蓝色标签）
+│   │   ├── Assistant 消息（紫色标签）
+│   │   │   ├── Markdown 渲染（标题/列表/加粗/行内代码）
+│   │   │   └── 代码块（syntect 语法高亮）
+│   │   │       └── diff 检测 → side-by-side 分栏对比
+│   │   ├── Thinking 块（灰色标签，默认折叠）— reasoning_content
+│   │   └── Tool 消息（黄色标签，可折叠）
+│   ├── 输入栏 (Input Bar)
+│   │   └── gpui-component Input（多行文本、Shift+Enter 换行、Enter 发送）
+│   └── 状态栏 (Status Bar)
+│       ├── 模型名 · 版本
+│       ├── token 使用量 / 上限 (xx%) 进度条
+│       └── 项目名:main
+└── 右侧面板 (Right Panel)
+    ├── Session — 会话开始时间
+    ├── Context — token 使用详情 + 进度条
+    ├── LSP — LSP 状态（当前禁用）
+    └── Todo — Agent 待办列表（可点击切换完成状态）
+```
 
-- `opencode/gui_gpui/src/lib.rs`：Rust GUI 引擎
-- `opencode/gui.lua`：Lua FFI 绑定
-- `opencode/main.lua`：主循环、LLM 交互、GUI 内容驱动
-- `opencode/prompts/default.lua`：系统 prompt 组装
-- `opencode/tools/default.lua`：工具定义与调度
-- `opencode/permissions.lua`：权限规则
-- `opencode/reference/opencode-ui-layout.md`：UI 布局参考
+---
+
+## 七、关键设计细节
+
+### 7.1 Callback 生命周期管理
+
+```lua
+-- gui.lua
+M._apps[handle] = {
+    handle = handle,
+    user_cb = nil,   -- C 函数指针，防止 GC
+    tool_cb = nil,   -- C 函数指针，防止 GC
+}
+```
+
+Lua 的 `ffi.cast` 产生的函数指针如果被 GC 回收，C 侧调用时会崩溃。`gui.lua` 用 `M._apps` 表持有所有回调引用，确保在 GUI 生命周期内指针有效。
+
+### 7.2 流式输出 UTF-8 安全分块
+
+```lua
+-- main.lua: 流式输出 chunk
+local chunk_size = 20
+local pos = 1
+while pos <= #content do
+    local next_pos = math.min(pos + chunk_size, #content + 1)
+    -- 如果 next_pos 在多字节 UTF-8 字符中间，回退到字符起始
+    while next_pos > pos do
+        local byte = content:byte(next_pos)
+        if byte == nil or byte < 128 or byte >= 192 then break end
+        next_pos = next_pos - 1
+    end
+    local chunk = content:sub(pos, next_pos - 1)
+    gui.stream_delta(app, sid, chunk)
+    pos = next_pos
+    coroutine.yield()
+end
+```
+
+### 7.3 工具回调内存安全
+
+```lua
+-- 返回给 Rust 的字符串必须分配在 C 堆上
+local cstr = ffi.C.malloc(#out + 1)
+ffi.copy(cstr, out)
+ffi.cast("char*", cstr)[#out] = 0  -- null-terminate
+return cstr  -- Rust 侧通过 CString::from_raw 接管所有权
+```
+
+### 7.4 GUI 中的 LLM 请求：异步非阻塞
+
+GUI 模式不走 C 层的 `llm_complete_raw`（同步阻塞），而是走 `async_http.lua`：
+
+```lua
+-- main.lua / async_http.lua
+local req = opencode.http_request(url, method, headers, body)
+while true do
+    local status = opencode.http_poll(req)  -- 非阻塞
+    if status == 1 then return opencode.http_response(req) end
+    if status == -1 then return nil end
+    coroutine.yield()  -- 让出给 60fps 定时器
+end
+```
+
+### 7.5 线程安全
+
+- 所有跨语言调用都在 **GPUI 主线程** 上执行（LuaJIT 运行在主线程上，FFI 调用同步）
+- `Arc<Mutex<T>>` 保护 Rust 侧共享状态
+- **不需要** `mpsc` 通道或 `Send + Sync` 标记以外的同步机制
+
+---
+
+## 八、性能特性
+
+| 指标 | 值 |
+|------|-----|
+| UI 刷新率 | 60fps（16ms 定时器） |
+| 流式输出延迟 | <16ms（从 Lua yield 到界面显示） |
+| 代码高亮 | syntect（Rust 原生，比 browser-based 快） |
+| LLM HTTP | C 层 curl-multi 异步，不阻塞渲染 |
+| 二进制体积 | ~40MB（Rust .so）+ 2MB（aicoding 二进制） |
+
+---
+
+## 九、编译与运行
+
+```bash
+# 编译 Rust GUI
+cd gui_gpui && cargo build --release
+cp target/release/libopencode_gui.so ../libaicoding_gui.so
+
+# 编译 C 内核
+cd .. && make
+
+# 安装全局
+sudo make install
+
+# 运行 GUI（默认模式）
+aicoding --project /path/to/repo
+
+# 或强制 CLI
+OPENCODE_GUI=0 aicoding --project /path/to/repo
+```
+
+---
+
+## 十、架构图（简化调用链路）
+
+```
+  Lua                           C                        Rust
+─────                         ───                       ────
+main.lua                      gui_tick.c                lib.rs (gpui)
+  │                             │                         │
+  ├─ gui.run(app) ──────────────┼──────────────────────→ gui_run()
+  │                             │                         │
+  │                             │                    gpui::application().run()
+  │                             │                     ├─ Window → ChatView
+  │                             │                     ├─ 60fps timer ───┐
+  │                             │                     │                 │
+  │  gui_tick() ←─── opencode_gui_tick() ←───────────-┘                 │
+  │    ├─ resume coroutine ──→ stream_delta() ───────→ messages.push()  │
+  │    └─ 返回                                                           │
+  │                                  cx.notify() ←──────────────────────┘
+  │                                    │
+  │                                    └─ ChatView::render()
+  │                                         ├─ messages → 消息列表
+  │                                         ├─ todos → 待办面板
+  │                                         └─ tokens → 状态栏
+  │
+  ├─ gui.on_user_message(handler) ← Rust: 用户回车
+  │     │
+  │     └─ create coroutine {
+  │           1. async_http.request() ──→ C curl-multi
+  │           2. parse response
+  │           3. stream_delta() + yield()
+  │           4. tool_call → tools.dispatch()
+  │           5. repeat
+  │        }
+  │
+  └─ gui.free(app) ──────────────────→ gui_app_free()
+```
+
+---
+
+## 十一、与其他方案的对比
+
+| 方案 | 体积 | 启动速度 | 可热更新 | GPU 加速 |
+|------|------|---------|---------|---------|
+| Electron + React | ~150MB | 慢（需要 Node.js） | 否 | 浏览器引擎 |
+| Tauri + Rust | ~5MB | 快 | 否（前端代码可热更新） | WebView |
+| **本方案 (LuaJIT + gpui)** | **~42MB** | **快（直链动态库）** | **是（Lua 全量热更新）** | **原生 GPU** |
+| 纯 Rust（egui/imgui） | ~2MB | 快 | 否 | 原生 GPU |
+
+本方案的优势：**Lua 层（prompt、工具、GUI 交互逻辑）全部支持热更新**，不需要重编译 Rust。Rust 层只负责渲染，业务逻辑全部在 Lua 中定义。
