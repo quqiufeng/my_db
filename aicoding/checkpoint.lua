@@ -77,7 +77,7 @@ function M.create(session_id, project_root, files, reason)
     local manifest_json = memory.read(manifest_key)
     local manifest = {}
     if manifest_json then
-        local ok, v = pcall(cjson.decode, manifest_json)
+        local ok, v = json.decode(manifest_json)
         if ok and type(v) == "table" then manifest = v end
     end
 
@@ -103,8 +103,8 @@ function M.list(session_id)
     if not manifest_json then
         return { ok = true, checkpoints = {} }
     end
-    local ok, manifest = pcall(cjson.decode, manifest_json)
-    if not ok then
+    local manifest, _ = json.decode(manifest_json)
+    if not manifest then
         return { ok = false, error = "manifest parse error" }
     end
     return { ok = true, checkpoints = manifest }

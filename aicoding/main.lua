@@ -21,6 +21,7 @@ function get_project_root()
 end
 
 local cjson  = require("cjson")
+local json   = require("json")
 local prompt = require("prompts.default")
 local tools  = require("tools.default")
 local context = require("context")
@@ -82,12 +83,12 @@ end
 
 -- Extract assistant content, reasoning_content and tool_calls from OpenAI response.
 local function parse_openai_response(resp_json)
-    local ok, resp = pcall(cjson.decode, resp_json)
-    if not ok then
-        return nil, nil, "invalid json: " .. tostring(resp)
+    local resp, decode_err = json.decode(resp_json)
+    if not resp then
+        return nil, nil, "invalid json: " .. tostring(decode_err)
     end
     if resp.error then
-        local msg = resp.error.message or resp.error.type or cjson.encode(resp.error)
+        local msg = resp.error.message or resp.error.type or json.encode(resp.error)
         return nil, nil, "api error: " .. msg
     end
     local choice = resp.choices and resp.choices[1]
@@ -102,7 +103,7 @@ local function parse_openai_response(resp_json)
                 table.insert(tool_calls, {
                     id = tc.id,
                     name = tc["function"].name,
-                    arguments = cjson.decode(tc["function"].arguments)
+                    arguments = json.decode(tc["function"].arguments)
                 })
             end
         end
@@ -112,12 +113,12 @@ end
 
 -- Extract assistant content, reasoning_content and tool_uses from Anthropic response.
 local function parse_anthropic_response(resp_json)
-    local ok, resp = pcall(cjson.decode, resp_json)
-    if not ok then
-        return nil, nil, "invalid json: " .. tostring(resp)
+    local resp, decode_err = json.decode(resp_json)
+    if not resp then
+        return nil, nil, "invalid json: " .. tostring(decode_err)
     end
     if resp.error then
-        local msg = resp.error.message or resp.error.type or cjson.encode(resp.error)
+        local msg = resp.error.message or resp.error.type or json.encode(resp.error)
         return nil, nil, "api error: " .. msg
     end
     local content_parts = {}
@@ -348,9 +349,12 @@ function generate_summary(session_id, reason)
 end
 
 function handle_tool_call(tool_call_json)
-    local call = cjson.decode(tool_call_json)
+    local call, decode_err = json.decode(tool_call_json)
+    if not call then
+        return json.encode({ ok = false, error = "invalid tool call JSON: " .. tostring(decode_err) })
+    end
     local result = tools.dispatch(call)
-    return cjson.encode(result)
+    return json.encode(result)
 end
 
 function save_turn_summary(session_id, turn_id, summary)
@@ -358,7 +362,11 @@ function save_turn_summary(session_id, turn_id, summary)
 end
 
 function save_facts(session_id, facts_json)
-    local facts = cjson.decode(facts_json)
+    local facts, decode_err = json.decode(facts_json)
+    if not facts then
+        opencode.log_info("save_facts: invalid JSON: " .. tostring(decode_err))
+        return
+    end
     prompt.save_facts(session_id, facts)
 end
 

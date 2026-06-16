@@ -14,7 +14,7 @@ M.MAX_SUMMARIES = 3
 
 local function parse_json(s)
     if not s then return nil end
-    local ok, v = pcall(cjson.decode, s)
+    local ok, v = json.decode(s)
     if ok then return v end
     return nil
 end

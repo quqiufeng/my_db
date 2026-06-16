@@ -5,6 +5,7 @@
 -- The trace can be queried by event type, tool name, or time range.
 
 local cjson = require("cjson")
+local shell = require("shell")
 
 local M = {}
 
@@ -16,10 +17,6 @@ function M.init(session_id, project_root)
     M.project_root = project_root or "."
 end
 
-local function shell_quote(s)
-    return "'" .. tostring(s):gsub("'", "'\"'\"'") .. "'"
-end
-
 function M.trace_dir()
     return M.project_root .. "/.opencode/traces"
 end
@@ -29,7 +26,7 @@ function M.trace_path()
 end
 
 function M.ensure_dir()
-    os.execute("mkdir -p " .. shell_quote(M.trace_dir()))
+    shell.mkdir_p(M.trace_dir())
 end
 
 -- Append a structured event to the trace file.

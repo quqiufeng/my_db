@@ -14,7 +14,7 @@
 -- main chat_once loop, optionally verifies with the build agent, and re-plans
 -- on failure. The plan and step results are persisted to KV Cache.
 
-local cjson = require("cjson")
+local json = require("json")
 local tools = require("tools.default")
 local memory = require("memory")
 
@@ -39,8 +39,8 @@ local function extract_json(text)
     -- Try fenced code block first.
     local fenced = text:match("```json\n(.-)\n```") or text:match("```\n(.-)\n```")
     if fenced then
-        local ok, val = pcall(cjson.decode, fenced)
-        if ok then return val end
+        local val, _ = json.decode(fenced)
+            if val then return val end
     end
     -- Fall back to first { ... } or [ ... ] span.
     local first_brace = text:find("[%[{]")
@@ -68,8 +68,8 @@ local function extract_json(text)
             elseif ch == end_char then
                 depth = depth - 1
                 if depth == 0 then
-                    local ok, val = pcall(cjson.decode, text:sub(first_brace, i))
-                    if ok then return val end
+                    local val, _ = json.decode(text:sub(first_brace, i))
+            if val then return val end
                 end
             end
         end
@@ -188,7 +188,7 @@ function M.run(task_description, opts)
     local max_steps = opts.max_steps or 8
 
     log(session_id, "starting plan agent: " .. tostring(task_description))
-    memory.write(kv_key(session_id, "status"), cjson.encode({
+    memory.write(kv_key(session_id, "status"), json.encode({
         task = task_description,
         state = "planning",
         started_at = os.time(),
@@ -201,7 +201,7 @@ function M.run(task_description, opts)
     end
 
     log(session_id, "generated plan with " .. tostring(#plan) .. " steps")
-    memory.write(kv_key(session_id, "plan"), cjson.encode(plan), 3600)
+    memory.write(kv_key(session_id, "plan"), json.encode(plan), 3600)
 
     local order, order_err = topological_order(plan)
     if not order then
@@ -250,7 +250,7 @@ function M.run(task_description, opts)
         end
 
         table.insert(step_results, step_record)
-        memory.write(kv_key(session_id, "step/" .. tostring(idx)), cjson.encode(step_record), 3600)
+        memory.write(kv_key(session_id, "step/" .. tostring(idx)), json.encode(step_record), 3600)
 
         if not build_ok then
             log(session_id, "build verification failed for step " .. tostring(idx))
@@ -266,7 +266,7 @@ function M.run(task_description, opts)
                 break
             end
             plan = new_plan
-            memory.write(kv_key(session_id, "plan"), cjson.encode(plan), 3600)
+            memory.write(kv_key(session_id, "plan"), json.encode(plan), 3600)
             order, order_err = topological_order(plan)
             if not order then
                 log(session_id, "re-plan dependency error: " .. tostring(order_err))
@@ -282,7 +282,7 @@ function M.run(task_description, opts)
     end
 
     local final_status = failed_step and "failed" or "success"
-    memory.write(kv_key(session_id, "status"), cjson.encode({
+    memory.write(kv_key(session_id, "status"), json.encode({
         task = task_description,
         state = final_status,
         steps_completed = #step_results,

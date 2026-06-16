@@ -8,13 +8,8 @@ local memory = require("memory")
 local checkpoint = require("checkpoint")
 local knowledge = require("knowledge")
 local trace = require("trace")
-
--- Shell-quote a string for use inside a POSIX shell command.
--- Uses single quotes so the only thing to escape is a single quote itself.
-local function shell_quote(s)
-    if not s then return "''" end
-    return "'" .. s:gsub("'", "'\"'\"'") .. "'"
-end
+local shell = require("shell")
+local json = require("json")
 
 -- Pure Lua helpers: base64 and sha256 (avoid requiring unregistered C functions)
 local base64_chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
@@ -163,7 +158,7 @@ local function git_diff_for_file(path)
     end
     if rel == "" then rel = "." end
     local cmd = string.format("git -C %s diff -- %s 2>&1",
-                              shell_quote(root), shell_quote(rel))
+                              shell.quote(root), shell.quote(rel))
     local f = io.popen(cmd)
     local out = f:read("*a") or ""
     f:close()
@@ -243,6 +238,12 @@ local function permit(action, resource)
     local effect = permissions.check(action, resource)
     if effect == "deny" then
         return false, "denied by permission rule"
+    end
+    if action == "bash" and resource then
+        local dangerous, reason = permissions.is_dangerous_bash(resource)
+        if dangerous then
+            return false, "dangerous bash command blocked: " .. tostring(reason)
+        end
     end
     if effect == "ask" then
         local answer = permissions.prompt_user(action, resource)
@@ -616,7 +617,7 @@ M.tools = {
 
             local dir = path:match("^(.*)/")
             if dir then
-                os.execute("mkdir -p " .. shell_quote(dir))
+                os.execute("mkdir -p " .. shell.quote(dir))
             end
 
             local cok, cerr = write_file(path, content)
@@ -666,8 +667,8 @@ M.tools = {
             if not f then return { ok = false, error = "cannot create temp patch file" } end
             f:write(patch)
             f:close()
-            local cmd = target ~= "" and string.format("patch -p0 --forward -i %s -- %s 2>&1", shell_quote(tmp), shell_quote(target))
-                or string.format("patch -p1 --forward -i %s 2>&1", shell_quote(tmp))
+            local cmd = target ~= "" and string.format("patch -p0 --forward -i %s -- %s 2>&1", shell.quote(tmp), shell.quote(target))
+                or string.format("patch -p1 --forward -i %s 2>&1", shell.quote(tmp))
             local p = io.popen(cmd)
             local out = p:read("*a") or ""
             local pok = p:close()
@@ -685,7 +686,7 @@ M.tools = {
         handler = function(args)
             local base = resolve_path(args.path or ".")
             local pattern = args.pattern
-            local cmd = string.format("cd %s && find . -name %s -print 2>/dev/null | head -200", shell_quote(base), shell_quote(pattern))
+            local cmd = string.format("cd %s && find . -name %s -print 2>/dev/null | head -200", shell.quote(base), shell.quote(pattern))
             local f = io.popen(cmd)
             local out = f:read("*a") or ""
             f:close()
@@ -707,9 +708,9 @@ M.tools = {
         handler = function(args)
             local base = resolve_path(args.path or ".")
             local pattern = args.pattern
-            local glob = args.glob and string.format("-g %s", shell_quote(args.glob)) or ""
+            local glob = args.glob and string.format("-g %s", shell.quote(args.glob)) or ""
             local cmd = string.format("cd %s && rg --line-number --no-heading %s %s 2>/dev/null | head -200",
-                                      shell_quote(base), glob, shell_quote(pattern))
+                                      shell.quote(base), glob, shell.quote(pattern))
             local f = io.popen(cmd)
             local out = f:read("*a") or ""
             f:close()
@@ -766,9 +767,9 @@ M.tools = {
             if not ok then return { ok = false, error = err } end
             local cmd = args.command
             local timeout = args.timeout or 30
-            local workdir = shell_quote(resolve_path(args.workdir) or project_root)
+            local workdir = shell.quote(resolve_path(args.workdir) or project_root)
             local f = io.popen(string.format("cd %s && timeout %d bash -c %s 2>&1",
-                                             workdir, timeout, shell_quote(cmd)))
+                                             workdir, timeout, shell.quote(cmd)))
             local out = f:read("*a") or ""
             local bok = f:close()
             return { ok = bok, output = truncate(out) }
@@ -785,7 +786,7 @@ M.tools = {
             local ok, err = permit("git", args.command)
             if not ok then return { ok = false, error = err } end
             local repo = resolve_path(args.repo_path) or project_root
-            local cmd = string.format("cd %s && git %s 2>&1", shell_quote(repo), args.command)
+            local cmd = string.format("cd %s && git %s 2>&1", shell.quote(repo), args.command)
             local f = io.popen(cmd)
             local out = f:read("*a") or ""
             local gok = f:close()
@@ -804,9 +805,9 @@ M.tools = {
             local file = args.file_path or ""
             local cmd
             if file ~= "" then
-                cmd = string.format("cd %s && git diff -- %s 2>&1", shell_quote(repo), shell_quote(file))
+                cmd = string.format("cd %s && git diff -- %s 2>&1", shell.quote(repo), shell.quote(file))
             else
-                cmd = string.format("cd %s && git diff 2>&1", shell_quote(repo))
+                cmd = string.format("cd %s && git diff 2>&1", shell.quote(repo))
             end
             local f = io.popen(cmd)
             local out = f:read("*a") or ""
@@ -864,7 +865,7 @@ M.tools = {
             end
 
             local full_cmd = string.format("cd %s && timeout %d bash -c %s 2>&1",
-                                           shell_quote(workdir), timeout, shell_quote(cmd))
+                                           shell.quote(workdir), timeout, shell.quote(cmd))
             local f = io.popen(full_cmd)
             local out = f:read("*a") or ""
             local bok = f:close()
@@ -934,7 +935,7 @@ M.tools = {
 
             -- Prefer lynx/w3m/pandoc for cleaner text/markdown output if available.
             local function command_available(name)
-                local p = io.popen("command -v " .. shell_quote(name) .. " 2>/dev/null")
+                local p = io.popen("command -v " .. shell.quote(name) .. " 2>/dev/null")
                 local out = p:read("*a") or ""
                 p:close()
                 return out:gsub("%s+", "") ~= ""
@@ -943,29 +944,29 @@ M.tools = {
             local cmd
             if fmt == "html" then
                 cmd = string.format("curl -sL --max-time %d --user-agent %s %s 2>&1",
-                                    timeout, shell_quote("opencode/1.0"), shell_quote(url))
+                                    timeout, shell.quote("opencode/1.0"), shell.quote(url))
             elseif fmt == "markdown" then
                 if command_available("pandoc") then
                     cmd = string.format("curl -sL --max-time %d --user-agent %s %s 2>&1 | pandoc -f html -t markdown --wrap=none 2>&1",
-                                        timeout, shell_quote("opencode/1.0"), shell_quote(url))
+                                        timeout, shell.quote("opencode/1.0"), shell.quote(url))
                 elseif command_available("lynx") then
                     cmd = string.format("curl -sL --max-time %d --user-agent %s %s 2>&1 | lynx -stdin -dump 2>&1",
-                                        timeout, shell_quote("opencode/1.0"), shell_quote(url))
+                                        timeout, shell.quote("opencode/1.0"), shell.quote(url))
                 else
                     cmd = string.format("curl -sL --max-time %d --user-agent %s %s 2>&1",
-                                        timeout, shell_quote("opencode/1.0"), shell_quote(url))
+                                        timeout, shell.quote("opencode/1.0"), shell.quote(url))
                 end
             else
                 if command_available("lynx") then
                     cmd = string.format("curl -sL --max-time %d --user-agent %s %s 2>&1 | lynx -stdin -dump 2>&1",
-                                        timeout, shell_quote("opencode/1.0"), shell_quote(url))
+                                        timeout, shell.quote("opencode/1.0"), shell.quote(url))
                 elseif command_available("w3m") then
                     cmd = string.format("curl -sL --max-time %d --user-agent %s %s 2>&1 | w3m -T text/html -dump 2>&1",
-                                        timeout, shell_quote("opencode/1.0"), shell_quote(url))
+                                        timeout, shell.quote("opencode/1.0"), shell.quote(url))
                 else
                     -- Last resort: strip HTML tags with sed.
                     cmd = string.format("curl -sL --max-time %d --user-agent %s %s 2>&1 | sed 's/<[^>]*>//g' 2>&1",
-                                        timeout, shell_quote("opencode/1.0"), shell_quote(url))
+                                        timeout, shell.quote("opencode/1.0"), shell.quote(url))
                 end
             end
 
@@ -1164,7 +1165,11 @@ function M.dispatch(tool_call)
     local name = tool_call.name
     local args = tool_call.arguments or tool_call.parameters or {}
     if type(args) == "string" then
-        args = cjson.decode(args)
+        local decoded, err = json.decode(args)
+        if not decoded then
+            return { ok = false, error = "invalid tool arguments JSON: " .. tostring(err) }
+        end
+        args = decoded
     end
     for _, t in ipairs(M.tools) do
         if t.name == name then

@@ -7,8 +7,8 @@
 --   4. 任何被移出窗口的事实都可以从 KV Cache 通过 kv_search/kv_get 重新召回。
 --   5. 模型读代码后，应主动用 kv_set 把关键结论写回记忆。
 
-local cjson  = require("cjson")
 local memory = require("memory")
+local tokens = require("tokens")
 
 local M = {}
 
@@ -21,33 +21,14 @@ M.SYSTEM_PROMPT_RATIO = 0.35
 -- 最近 N 轮对话必须保留，除非超出硬上限
 M.MIN_RECENT_TURNS = 4
 
--- 简单 token 估算：中文 ~2 token/char，英文 ~0.25 token/char，混合 ~0.5
+-- Estimate tokens using the shared estimator.
 local function estimate_tokens(text)
-    if not text then return 0 end
-    local s = tostring(text)
-    local len = #s
-    local non_ascii = 0
-    for i = 1, len do
-        if s:byte(i) > 127 then non_ascii = non_ascii + 1 end
-    end
-    local ascii = len - non_ascii
-    return math.floor(ascii * 0.25 + non_ascii * 2.0 + 0.5)
+    return tokens.estimate(text)
 end
 
 -- 从 messages 数组估算总 token
 function M.count_messages(messages)
-    local total = 0
-    for _, m in ipairs(messages) do
-        total = total + estimate_tokens(m.role or "")
-        total = total + estimate_tokens(m.content or "")
-        if m.tool_calls then
-            total = total + estimate_tokens(cjson.encode(m.tool_calls))
-        end
-        if m.tool_call_id then
-            total = total + estimate_tokens(m.tool_call_id)
-        end
-    end
-    return total
+    return tokens.estimate_messages(messages)
 end
 
 -- 把一条 message 归档为记忆

@@ -14,6 +14,8 @@
 
 local M = {}
 
+local tokens = require("tokens")
+
 -- Natural language / technical term dictionary.
 -- Longest/most frequent terms first to avoid partial replacements.
 M.NL_DICT = {
@@ -86,17 +88,9 @@ M.CODE_DICT = {
     {"nil", "nl3"},
 }
 
--- Simple token estimator.
+-- Token estimator (delegates to tokens.lua for consistency).
 local function estimate_tokens(text)
-    if not text then return 0 end
-    local s = tostring(text)
-    local len = #s
-    local non_ascii = 0
-    for i = 1, len do
-        if s:byte(i) > 127 then non_ascii = non_ascii + 1 end
-    end
-    local ascii = len - non_ascii
-    return math.floor(ascii * 0.25 + non_ascii * 2.0 + 0.5)
+    return tokens.estimate(text)
 end
 
 -- Replace all occurrences of dictionary keys with values, in order.

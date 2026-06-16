@@ -4,18 +4,13 @@
 -- project memory. They are loaded into the system prompt and synced to KV
 -- Cache so semantic search can recall them.
 
-local cjson = require("cjson")
 local memory = require("memory")
+local shell = require("shell")
 
 local M = {}
 
 local MAX_FILE_SIZE = 8192
 local MAX_PROMPT_SIZE = 8192
-
--- Shell-quote a path for use with os.execute.
-local function shell_quote(s)
-    return "'" .. tostring(s):gsub("'", "'\"'\"'") .. "'"
-end
 
 function M.root(project_root)
     return (project_root or ".") .. "/.opencode/knowledge"
@@ -29,25 +24,22 @@ end
 -- Ensure knowledge directory exists.
 function M.ensure_dir(project_root)
     local root = M.root(project_root)
-    os.execute("mkdir -p " .. shell_quote(root))
+    shell.mkdir_p(root)
     return root
 end
 
 -- List knowledge files (markdown and plain text).
 function M.list(project_root)
     local root = M.root(project_root)
-    local p = io.popen("ls -1 " .. shell_quote(root) .. " 2>/dev/null")
-    if not p then return {} end
-    local out = p:read("*a") or ""
-    p:close()
-    local files = {}
-    for name in out:gmatch("[^\r\n]+") do
+    local files = shell.ls(root)
+    local out = {}
+    for _, name in ipairs(files) do
         if name:match("%.md$") or name:match("%.txt$") then
-            table.insert(files, name)
+            table.insert(out, name)
         end
     end
-    table.sort(files)
-    return files
+    table.sort(out)
+    return out
 end
 
 -- Read a knowledge file.

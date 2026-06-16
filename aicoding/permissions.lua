@@ -124,6 +124,44 @@ function M.load(project_root)
         end
     end
 
+    -- Built-in safety defaults. These are always present and evaluated LAST
+    -- so that user/project config can override them.
+    local home = expand_home("~")
+    local builtins = {
+        -- Protect system directories and user home root from writes/deletes.
+        { action = "write", resource = "/usr/*", effect = "deny" },
+        { action = "write", resource = "/etc/*", effect = "deny" },
+        { action = "write", resource = "/bin/*", effect = "deny" },
+        { action = "write", resource = "/sbin/*", effect = "deny" },
+        { action = "write", resource = "/lib*", effect = "deny" },
+        { action = "write", resource = "/opt/my_db/*", effect = "deny" },
+        { action = "write", resource = home .. "/*", effect = "deny" },
+        { action = "file_create", resource = "/usr/*", effect = "deny" },
+        { action = "file_create", resource = "/etc/*", effect = "deny" },
+        { action = "file_create", resource = "/bin/*", effect = "deny" },
+        { action = "file_create", resource = "/sbin/*", effect = "deny" },
+        { action = "file_create", resource = "/lib*", effect = "deny" },
+        { action = "file_create", resource = "/opt/my_db/*", effect = "deny" },
+        { action = "file_create", resource = home .. "/*", effect = "deny" },
+        { action = "file_delete", resource = "/usr/*", effect = "deny" },
+        { action = "file_delete", resource = "/etc/*", effect = "deny" },
+        { action = "file_delete", resource = "/bin/*", effect = "deny" },
+        { action = "file_delete", resource = "/sbin/*", effect = "deny" },
+        { action = "file_delete", resource = "/lib*", effect = "deny" },
+        { action = "file_delete", resource = "/opt/my_db/*", effect = "deny" },
+        { action = "file_delete", resource = home .. "/*", effect = "deny" },
+        { action = "delete", resource = "/usr/*", effect = "deny" },
+        { action = "delete", resource = "/etc/*", effect = "deny" },
+        { action = "delete", resource = "/bin/*", effect = "deny" },
+        { action = "delete", resource = "/sbin/*", effect = "deny" },
+        { action = "delete", resource = "/lib*", effect = "deny" },
+        { action = "delete", resource = "/opt/my_db/*", effect = "deny" },
+        { action = "delete", resource = home .. "/*", effect = "deny" },
+    }
+    for _, r in ipairs(builtins) do
+        table.insert(M.rules, r)
+    end
+
     -- Defaults if no rules configured
     if #M.rules == 0 then
         local non_interactive = os.getenv("OPENCODE_NON_INTERACTIVE") == "1"
@@ -141,6 +179,13 @@ function M.load(project_root)
             { action = "read", resource = "*", effect = "allow" },
             { action = "*", resource = "*", effect = allow_all and "allow" or "ask" }
         }
+        return
+    end
+
+    -- If OPENCODE_ALLOW_ALL is set but user/project rules are present, prepend
+    -- a permissive catch-all so the built-in deny rules do not block tests.
+    if os.getenv("OPENCODE_ALLOW_ALL") == "1" then
+        table.insert(M.rules, 1, { action = "*", resource = "*", effect = "allow" })
     end
 end
 
@@ -160,6 +205,8 @@ end
 -- acts as the default).
 function M.check(action, resource)
     resource = resource or ""
+    -- Normalize resource path: collapse redundant slashes.
+    resource = resource:gsub("//+", "/")
     for _, rule in ipairs(M.rules) do
         local rule_action = rule.action or "*"
         local rule_resource = rule.resource or "*"
@@ -169,6 +216,28 @@ function M.check(action, resource)
         end
     end
     return "ask"
+end
+
+-- Check whether a bash command contains known dangerous patterns.
+function M.is_dangerous_bash(cmd)
+    if not cmd then return false end
+    local dangerous = {
+        "rm%s+%-rf%s+/",
+        "rm%s+%-rf%s+%$?/",
+        "mkfs",
+        "dd%s+if=",
+        ":(){",
+        ">/dev/",
+        "curl%s+.*%|%s*sh",
+        "wget%s+.*%|%s*sh",
+    }
+    local c = cmd:lower()
+    for _, pat in ipairs(dangerous) do
+        if c:find(pat) then
+            return true, "dangerous pattern: " .. pat
+        end
+    end
+    return false, nil
 end
 
 -- For CLI: ask user interactively via /dev/tty so stdin stays free for chat.

@@ -6,6 +6,7 @@
 
 local cjson = require("cjson")
 local prompt = require("prompts.default")
+local tokens = require("tokens")
 
 local M = {}
 
@@ -19,13 +20,18 @@ local function truncate(s, n)
     return s:sub(1, n) .. "\n[...truncated]"
 end
 
+-- Estimate transcript token cost using shared estimator.
+function M.estimate_transcript_tokens(messages)
+    return tokens.estimate_messages(messages)
+end
+
 -- Build a compact transcript from the messages table.
 function M.build_transcript(messages)
     local lines = {}
     for _, m in ipairs(messages or {}) do
         local role = m.role or "unknown"
         if role == "tool" then
-            local ok, parsed = pcall(cjson.decode, m.content or "")
+            local parsed, _ = json.decode(m.content or "")
             if ok and type(parsed) == "table" then
                 local name = parsed.tool or "tool"
                 local status = parsed.ok and "OK" or "ERROR"
@@ -67,7 +73,7 @@ function M.heuristic_summary(session_id, messages, reason)
         elseif m.role == "assistant" and m.content then
             last_assistant = tostring(m.content):sub(1, 400)
         elseif m.role == "tool" then
-            local ok, parsed = pcall(cjson.decode, m.content or "")
+            local parsed, _ = json.decode(m.content or "")
             if ok and type(parsed) == "table" then
                 if parsed.ok == false and parsed.error then
                     table.insert(errors, tostring(parsed.error):sub(1, 200))
@@ -174,8 +180,8 @@ Focus on facts useful for future coding sessions: file paths, design decisions, 
     local block = resp:match("```json\n(.-)\n```")
     if block then json_text = block end
 
-    local parsed_ok, parsed = pcall(cjson.decode, json_text)
-    if not parsed_ok or type(parsed) ~= "table" then
+    local parsed, _ = json.decode(json_text)
+    if not parsed or type(parsed) ~= "table" then
         return nil, "llm response parse failed"
     end
 
