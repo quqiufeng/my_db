@@ -415,3 +415,50 @@ main.lua                      gui_tick.c                lib.rs (gpui)
 | 纯 Rust（egui/imgui） | ~2MB | 快 | 否 | 原生 GPU |
 
 本方案的优势：**Lua 层（prompt、工具、GUI 交互逻辑）全部支持热更新**，不需要重编译 Rust。Rust 层只负责渲染，业务逻辑全部在 Lua 中定义。
+
+---
+
+## 十二、通用模式总结
+
+这套架构可以抽象为一个**通用的 Linux GUI 开发模式**：
+
+> **Rust/gpui 做 GPU 加速渲染 + LuaJIT FFI 做业务逻辑 + C ABI 做跨语言边界**
+
+```
+任何 GUI 程序
+├── Rust/gpui: 窗口、输入、布局、GPU 绘制
+├── LuaJIT FFI: 桥接层，封装 C/Rust API 为 Lua 调用
+└── Lua: 业务逻辑、状态管理、UI 内容生成
+```
+
+### 为什么这适合 Linux
+
+1. **LuaJIT FFI 可以直接封装任意 C 库**
+   - 你不需要 Rust 绑定，也不需要 C 扩展——`ffi.cdef` + `ffi.load` 就能调用现有的 `.so`
+   - 比如 `cjson.so`、`libcurl.so`、`libmydb.so`、OpenGL 库等
+   - 这意味着可以用 Lua 写 GUI 业务逻辑，同时复用 Linux 生态里几乎所有的 C 库
+
+2. **Rust 只负责 GPU 渲染**
+   - gpui-component 提供窗口、按钮、输入框、滚动等基础组件
+   - Rust 层是稳定的——编译一次，Lua 层随便改
+   - 界面布局、交互逻辑、数据获取全部在 Lua 中热更新
+
+3. **适合的场景**
+   - AI agent 聊天窗口（本项目的用途）
+   - 系统监控仪表盘（GPU 加速 + 实时数据）
+   - 开发者工具（Lua 热更新意味着快速迭代）
+   - 嵌入式 GUI（Rust 无运行时 + LuaJIT 轻量）
+
+4. **不适合的场景**
+   - 移动端或 Web 端（gpui 目前主要是 Linux/ macOS）
+   - 需要复杂动画/过渡效果的 UI（gpui-component 基础组件有限）
+   - 团队全员是前端/JS 开发者（需要理解 LuaJIT FFI）
+
+### 关键门槛
+
+这套方案只需要三样东西：
+- **一个 Rust 编译环境**：`cargo build --release` 生成 `.so`
+- **一个 LuaJIT 运行时**：项目自带
+- **一份 C ABI 头文件**（或者像本项目直接在 `ffi.cdef` 中声明）
+
+没有 Node.js、没有 Electron、没有 WebView，一个 ~42MB 的二进制就可以跑一个 GPU 加速的 GUI 程序。
