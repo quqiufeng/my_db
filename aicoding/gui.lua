@@ -68,6 +68,7 @@ local function make_user_callback(lua_handler)
 end
 
 -- C-compatible callback for tool calls.
+-- Returns a malloc'd C string that the Rust side can free with libc::free.
 local function make_tool_callback(lua_handler)
     return ffi.cast("char* (*)(const char*, const char*, void*)", function(session_id, tool_json, userdata)
         local s = ffi.string(session_id)
@@ -79,11 +80,12 @@ local function make_tool_callback(lua_handler)
         else
             out = cjson.encode({ ok = false, error = tostring(result) })
         end
-        -- C side will free this with libc::free if we allocate via malloc,
-        -- but our C code currently does not free. Use a static buffer trick
-        -- or change C to copy. For now, return a Lua-owned C string.
-        local cstr = ffi.new("char[?]", #out + 1)
-        ffi.copy(cstr, out)
+        -- Allocate on C heap so Rust side can take ownership and free.
+        local cstr = ffi.C.malloc(#out + 1)
+        if cstr ~= nil then
+            ffi.copy(cstr, out)
+            ffi.cast("char*", cstr)[#out] = 0  -- null-terminate
+        end
         return cstr
     end)
 end

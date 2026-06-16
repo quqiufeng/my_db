@@ -584,11 +584,9 @@ impl GuiApp {
     }
 
     fn refresh_ui(&self) {
-        if let Ok(guard) = self.executor.lock() {
-            if let Some(executor) = guard.as_ref() {
-                let _ = executor.spawn(async move {});
-            }
-        }
+        // No-op: the 16ms timer loop calls cx.notify() on every tick,
+        // so any changes to messages/todos/tokens will be rendered
+        // within the next frame (max 16ms latency).
     }
 }
 
@@ -1370,21 +1368,23 @@ pub extern "C" fn gui_run(app_ptr: *mut c_void, lua_state: *mut c_void) -> c_int
                     .detach();
 
                 // Poll for external message changes from C callbacks and tick Lua coroutines.
-                cx.spawn(async move |this, cx| {
-                    loop {
-                        cx.background_executor()
-                            .timer(Duration::from_millis(50))
-                            .await;
-                        this.update(cx, |_this, cx| cx.notify()).ok();
-                        unsafe {
-                            let app: &GuiApp = &*app_ptr;
-                            if !app.lua_state.is_null() {
-                                opencode_gui_tick(app.lua_state);
+                    cx.spawn(async move |this, cx| {
+                        loop {
+                            cx.background_executor()
+                                .timer(Duration::from_millis(16))
+                                .await;
+                            // Tick Lua coroutines FIRST (they may send stream deltas).
+                            unsafe {
+                                let app: &GuiApp = &*app_ptr;
+                                if !app.lua_state.is_null() {
+                                    opencode_gui_tick(app.lua_state);
+                                }
                             }
+                            // THEN render (captures the just-updated messages).
+                            this.update(cx, |_this, cx| cx.notify()).ok();
                         }
-                    }
-                })
-                .detach();
+                    })
+                    .detach();
 
                     view
                 });
