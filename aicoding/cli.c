@@ -123,12 +123,24 @@ static int find_model_index(const char* name) {
 static void apply_model_config(int idx) {
     if (idx < 0 || idx >= models_count) return;
     const model_entry_t* m = &models[idx];
-    setenv("LLM_PROTOCOL", m->provider, 1);
+
     if (strcmp(m->provider, "anthropic") == 0) {
+        setenv("LLM_PROTOCOL", "anthropic", 1);
+        /* Use ANTHROPIC_* vars if they exist, otherwise warn. */
         setenv("ANTHROPIC_MODEL", m->model, 1);
     } else if (strcmp(m->provider, "deepseek") == 0) {
-        setenv("DEEPSEEK_MODEL", m->model, 1);
+        /* DeepSeek uses OpenAI-compatible protocol. Copy DEEPSEEK_* into
+         * OPENAI_* so configure_llm picks them up regardless of which
+         * env vars happen to be in .env. */
+        setenv("LLM_PROTOCOL", "openai", 1);
+        const char* ds_url = getenv("DEEPSEEK_BASE_URL");
+        if (ds_url) setenv("OPENAI_BASE_URL", ds_url, 1);
+        const char* ds_key = getenv("DEEPSEEK_API_KEY");
+        if (ds_key) setenv("OPENAI_API_KEY", ds_key, 1);
+        setenv("OPENAI_MODEL", m->model, 1);
     } else {
+        /* Default OpenAI-compatible (Kimi, etc.) */
+        setenv("LLM_PROTOCOL", "openai", 1);
         setenv("OPENAI_MODEL", m->model, 1);
     }
 }
@@ -298,16 +310,16 @@ int main(int argc, char** argv) {
         }
     }
 
-    /* Load env files in priority order:
-     *   1. Command-line specified env file (default ./.env)
-     *   2. ~/.aicoding/.env (global fallback)
+    /* Load env files. Global ~/.aicoding/.env is always loaded first
+     * (lower priority), then project ./.env or --env FILE overwrites
+     * (higher priority). This way a project can override specific vars
+     * while the global file provides defaults for all providers
+     * (e.g. both OPENAI_* and DEEPSEEK_* keys coexist).
      */
-    int project_env_loaded = (load_env_file(env_file) == 0);
-    if (!project_env_loaded) {
-        char global_env[1024];
-        snprintf(global_env, sizeof(global_env), "%s/.aicoding/.env", get_home_dir());
-        load_env_file(global_env);
-    }
+    char global_env[1024];
+    snprintf(global_env, sizeof(global_env), "%s/.aicoding/.env", get_home_dir());
+    load_env_file(global_env);
+    load_env_file(env_file);
 
     /* Load model list and apply selection before configuring LLM. */
     load_models_json();
