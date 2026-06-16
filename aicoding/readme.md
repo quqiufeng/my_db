@@ -199,6 +199,23 @@ LLM_TEMPERATURE=1.0
 
 > `.env` 已被 `.gitignore` 排除，不会提交。
 
+如果不想每个项目都配一次，可以把配置放到全局位置：
+
+```bash
+mkdir -p ~/.aicoding
+cp /opt/my_db/aicoding/.env.example ~/.aicoding/.env
+# 编辑 ~/.aicoding/.env 填入密钥
+```
+
+加载优先级：
+
+1. 命令行 `--env FILE`
+2. 项目目录 `./.env`
+3. 全局 `~/.aicoding/.env`
+4. 环境变量
+
+后面的配置不会覆盖前面的配置。
+
 ### 3. 运行 CLI
 
 ```bash

@@ -86,13 +86,25 @@ static void configure_llm(llm_config_t* cfg) {
     cfg->max_tokens = 4096;
 }
 
+static int is_configured(llm_config_t* cfg) {
+    return cfg->base_url && cfg->api_key && cfg->model;
+}
+
+static void print_config_help(const char* env_file) {
+    fprintf(stderr, "LLM not configured. Set OPENAI_BASE_URL, OPENAI_API_KEY, OPENAI_MODEL\n");
+    fprintf(stderr, "or ANTHROPIC_BASE_URL, ANTHROPIC_API_KEY, ANTHROPIC_MODEL in one of:\n");
+    fprintf(stderr, "  - %s\n", env_file);
+    fprintf(stderr, "  - ~/.aicoding/.env\n");
+    fprintf(stderr, "or via environment variables.\n");
+}
+
 static void print_help(void) {
     printf("aicoding CLI\n");
     printf("Usage: aicoding [options]\n");
     printf("  --session ID       Session ID (default: default)\n");
     printf("  --project NS       Project namespace (default: /code/current)\n");
     printf("  --cache DIR        KV Cache directory (default: ~/aicoding/<project_basename>)\n");
-    printf("  --env FILE         Load env file (default: ./.env)\n");
+    printf("  --env FILE         Load env file (default: ./.env, fallback: ~/.aicoding/.env)\n");
     printf("  --yes, --non-interactive  Auto-allow all permission prompts\n");
     printf("  --gui-test-script FILE  Load Lua script to drive GUI and exit\n");
     printf("  --test-compress    Run compression test and exit\n");
@@ -135,7 +147,16 @@ int main(int argc, char** argv) {
         }
     }
 
-    load_env_file(env_file);
+    /* Load env files in priority order:
+     *   1. Command-line specified env file (default ./.env)
+     *   2. ~/.aicoding/.env (global fallback)
+     */
+    int project_env_loaded = (load_env_file(env_file) == 0);
+    if (!project_env_loaded) {
+        char global_env[1024];
+        snprintf(global_env, sizeof(global_env), "%s/.aicoding/.env", get_home_dir());
+        load_env_file(global_env);
+    }
     if (non_interactive) setenv("OPENCODE_NON_INTERACTIVE", "1", 1);
     if (allow_all) setenv("OPENCODE_ALLOW_ALL", "1", 1);
     if (gui_test_script) setenv("OPENCODE_GUI_TEST_SCRIPT", gui_test_script, 1);
@@ -143,9 +164,8 @@ int main(int argc, char** argv) {
     llm_config_t cfg;
     configure_llm(&cfg);
 
-    if (!cfg.base_url || !cfg.api_key || !cfg.model) {
-        fprintf(stderr, "LLM not configured. Set OPENAI_BASE_URL, OPENAI_API_KEY, OPENAI_MODEL\n");
-        fprintf(stderr, "or ANTHROPIC_BASE_URL, ANTHROPIC_API_KEY, ANTHROPIC_MODEL in %s\n", env_file);
+    if (!is_configured(&cfg)) {
+        print_config_help(env_file);
         return 1;
     }
 
