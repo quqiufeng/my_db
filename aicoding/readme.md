@@ -61,6 +61,13 @@ agent 运行时的所有项目知识、代码索引、会话事实都落盘在�
 | **代码语法高亮** | GUI 代码块使用 syntect 按语言着色 |
 | **Markdown 基础渲染** | GUI 文本消息支持标题、加粗、斜体、行内代码、无序列表 |
 | **Diff 分栏视图** | `diff` 代码块自动解析为左右 side-by-side，红删绿增 |
+| **搜索结果本地重排序** | `kv_search` 返回的结果经 `rerank.lua` 本地重排，可用 `min_score` 过滤噪声 |
+| **自动会话摘要** | 每轮对话结束自动提取摘要和关键事实写入 KV Cache |
+| **项目级知识记忆** | `.opencode/knowledge/` 下的文件自动注入系统提示并同步到 KV Cache，跨会话共享 |
+| **符号上下文深度控制** | `kv_context` 支持 `depth` 控制调用链展开深度，`batch` 批量查询多个符号 |
+| **结构化执行轨迹** | 自动记录 agent_start / llm_request / tool_call / tool_result / error 到 `.opencode/traces/{session}.jsonl` |
+| **轨迹查询工具** | `trace_query` 工具让模型/开发者自省本轮执行过程 |
+| **回归测试套件** | `make regression` 一键运行 C 单元测试 + 全部 GUI 自动化测试 |
 | **自主 Plan Agent** | `/plan <desc>` 自动拆解任务、逐步执行、失败重规划 |
 | **自主 Build Agent** | `/build [goal]` 触发编译-诊断-修复循环，失败自动重试 |
 | **Web Fetch 工具** | 抓取外部文档/API/RFC，供模型实时参考 |
@@ -93,6 +100,10 @@ agent 运行时的所有项目知识、代码索引、会话事实都落盘在�
 │  - prompts/default.lua  系统提示组装      │
 │  - context.lua          上下文窗口压缩    │
 │  - memory.lua           记忆系统封装      │
+│  - rerank.lua           KV 搜索结果重排序 │
+│  - summarize.lua        会话摘要与事实提取 │
+│  - knowledge.lua        项目级知识记忆     │
+│  - trace.lua            结构化执行轨迹     │
 │  - tools/default.lua    工具定义与调度    │
 │  - permissions.lua      权限规则解析      │
 │  - agents/build.lua     自主 Build Agent │
@@ -213,10 +224,14 @@ aicoding/
 | `diff` | 查看 git diff |
 | `build` | 自动检测构建系统并编译；失败时把输出反馈给 LLM 修复 |
 | `web_fetch` | 抓取外部 URL 内容（文档/API/RFC），返回 text/html/markdown |
-| `kv_search` | 搜索 KV Cache；支持 `semantic`/`prefix`/`regex`/`tag`，可对已索引代码库做自然语言语义搜索 |
+| `kv_search` | 搜索 KV Cache；支持 `semantic`/`prefix`/`regex`/`tag`，可对已索引代码库做自然语言语义搜索；结果本地重排，可设 `min_score` 过滤 |
 | `kv_get` | 读取精确 KV 键 |
 | `kv_set` | 写入记忆（事实、历史、中间结论），支持 TTL |
-| `kv_context` | 获取符号上下文（caller/callee） |
+| `kv_context` | 获取符号上下文（caller/callee/call-paths），支持 `depth` 和 `batch` |
+| `knowledge_read` | 读取 `.opencode/knowledge/` 下的项目级知识文件 |
+| `knowledge_write` | 写入项目级知识文件并同步到 KV Cache |
+| `knowledge_search` | 对项目级知识做语义搜索 |
+| `trace_query` | 查询本轮会话的结构化执行轨迹 |
 | `plugin_create` | 创建 Lua 插件，动态添加新工具 |
 | `plugin_load` | 热加载插件，无需重启 |
 | `plugin_list` | 列出可用插件 |
@@ -235,6 +250,8 @@ aicoding/
 - **近期对话保留**：至少保留最近 4 轮完整的 user/assistant/tool 对话组。
 - **旧消息归档**：更老的对话自动移入 KV Cache `/agent/{session}/history/`，永久保存。
 - **按需召回**：被移出窗口的信息不会丢失，模型通过 `kv_search` / `kv_get` / `read` 随时读取。
+- **自动摘要**：每轮对话结束自动提取摘要和关键事实到 KV Cache，供未来会话回忆。
+- **项目知识共享**：`.opencode/knowledge/` 下的文档自动进入系统提示，并可通过 `knowledge_search` 召回。
 
 ### 这不是缓解，是解决
 
@@ -267,6 +284,7 @@ aicoding 的 `messages` 永远 bounded → 旧信息去 KV Cache → 需要时�
 | `LLM_TEMPERATURE` | `1.0` | 采样温度 |
 | `OPENCODE_CONTEXT_TOKENS` | `16384` | 上下文窗口上限 |
 | `OPENCODE_COMPRESS_PROMPT` | 自动 | `1` 强制启用 system prompt 压缩，`0` 禁用 |
+| `OPENCODE_AUTO_SUMMARIZE` | — | 设置为 `0` 禁用每轮结束后的自动 LLM 摘要 |
 | `OPENCODE_GUI` | — | 设置为 `1` 启用 GUI 模式 |
 | `OPENCODE_ALLOW_ALL` | — | 设置为 `1` 自动允许所有权限询问（测试用） |
 | `OPENCODE_GUI_TEST_MSG` | — | GUI 启动后自动发送的测试消息 |
@@ -481,15 +499,27 @@ mem.write("/agent/default/plan/step1", "implement semantic search")
 
 ### 3. 符号上下文查询
 
+支持调用链展开深度和批量符号查询：
+
 ```lua
-local ok, out = mem.context("schedule", "/code/local/linux")
+local ok, out = mem.context("schedule", "/code/local/linux", { depth = 2 })
+print(out)
+
+-- 批量查询多个符号
+local ok, out = mem.context({"schedule", "wake_up_process"}, "/code/local/linux", { batch = true })
 print(out)
 ```
 
 等价工具调用：
 
 ```json
-{ "symbol": "schedule", "repo": "/code/local/linux" }
+{ "symbol": "schedule", "repo": "/code/local/linux", "depth": 2 }
+```
+
+批量查询：
+
+```json
+{ "symbol": "schedule,wake_up_process", "repo": "/code/local/linux", "batch": true }
 ```
 
 ### 4. 命名空间约定
@@ -501,19 +531,47 @@ print(out)
 | `/agent/{session}/history` | 当前会话历史动作 | 读写 |
 | `/agent/{session}/plan` | 当前计划/待办 | 读写 |
 | `/agent/{session}/build` | Build Agent 运行记录 | 读写 |
+| `/project/{basename}/knowledge` | 项目级知识文件 | 读写 |
 
-### 3. Plan Agent 与 Build Agent
+### 5. 项目级知识记忆
 
-Plan 和 Build Agent 会把执行计划、步骤结果、失败重试记录写入 KV Cache：
+把跨会话都需要的设计决策、架构约定、API 用法等写入 `.opencode/knowledge/`（如 `architecture.md`、`decisions.md`）。
 
-```lua
-local mem = require("memory")
-print(mem.read("/agent/default/plan/plan"))      -- 当前计划 JSON
-print(mem.read("/agent/default/plan/status"))    -- running / success / failed
-print(mem.read("/agent/default/build/status"))   -- build agent 状态
+- 启动时自动读取并注入系统 prompt。
+- 同步到 KV Cache `/project/{basename}/knowledge/`，支持语义搜索。
+
+```bash
+# 对话中
+用 knowledge_write 把"本项目的所有工具 handler 都必须返回 {ok, ...}"写入 decisions.md
 ```
 
-### 4. 索引新项目到记忆系统
+等价 `/lua` 调用：
+
+```lua
+local tools = require("tools.default")
+tools.dispatch({
+    name = "knowledge_write",
+    arguments = {
+        name = "decisions.md",
+        content = "## Tool handler return format\nAll tool handlers must return a table with `ok` field."
+    }
+})
+```
+
+### 6. 结构化执行轨迹
+
+每轮对话的 LLM 请求、工具调用、错误等信息自动写入 `.opencode/traces/{session}.jsonl`。可用 `trace_query` 工具或 `/lua` 查询：
+
+```lua
+local tools = require("tools.default")
+local r = tools.dispatch({
+    name = "trace_query",
+    arguments = { event = "tool_call", tool = "edit", limit = 5 }
+})
+print(require("cjson").encode(r))
+```
+
+### 7. 索引新项目到记忆系统
 
 如果要用 agent 探索一个尚未索引的项目，调用 `code_index` 工具即可。底层会调用 `/opt/my_db/analyze_repo.sh`（Node.js/TypeScript 项目则调用 `analyze_nodejs_repo.sh`）完成：代码分块、语义向量生成、调用图/数据流分析、导入 KV Cache。
 
@@ -537,12 +595,20 @@ print(result.output)
 
 完成后即可用 `kv_search search_type=semantic namespace=/code/local/redis` 对新项目做自然语言搜索。
 
-### 5. CLI 调试命令
+### 8. CLI 调试命令
 
 启动 CLI 后可用 `/lua <code>` 直接执行 Lua：
 
 ```bash
 > /lua local mem = require("memory"); print(mem.recall("user_preference"))
+```
+
+Plan 和 Build Agent 也会把执行计划、步骤结果、失败重试记录写入 KV Cache：
+
+```lua
+print(mem.read("/agent/default/plan/plan"))      -- 当前计划 JSON
+print(mem.read("/agent/default/plan/status"))    -- running / success / failed
+print(mem.read("/agent/default/build/status"))   -- build agent 状态
 ```
 
 ---
@@ -611,6 +677,15 @@ print(result.output)
 ## 自动化测试
 
 aicoding 自带可编程 GUI 测试框架，可以自动驱动 GUI 与 LLM 交互，无需人工点击窗口。
+
+### 快速运行全部测试
+
+```bash
+cd /opt/my_db/aicoding
+make regression
+```
+
+这会先运行 C 单元测试，然后按顺序执行所有 GUI 自动化测试（需要 GUI 显示和 LLM API 密钥）。
 
 ### 编译与运行
 
@@ -805,7 +880,14 @@ done
 - [x] `build` 自主 Agent：编译失败 → LLM 诊断 → 修改代码 → 再次编译，循环直到成功
 - [x] `plan` 自主 Agent：任务拆解 → 按依赖执行 → Build Agent 验证 → 失败重规划
 - [x] `web_fetch` 外部文档抓取工具
+- [x] `rerank.lua` 本地搜索结果重排序，降低检索噪声
+- [x] `summarize.lua` 自动会话摘要 + 关键事实提取
+- [x] `knowledge.lua` 项目级 `.opencode/knowledge/` 跨会话知识记忆
+- [x] `kv_context` 深度控制与批量符号查询
+- [x] `trace.lua` 结构化 agent 执行轨迹 + `trace_query` 工具
+- [x] `make regression` 一键回归测试套件
 - [ ] Agent 系统：`explore` 内置 agent
+- [ ] GUI 编辑文件 side-by-side diff 视图（已支持消息内 diff 块）
 - [x] `AGENTS.md` / `instructions` 自动注入
 - [x] 迁移 GUI 到 GPUI + gpui-component
 - [x] 项目重命名为 `aicoding`，默认 KV Cache 路径改为 `~/aicoding/<project_basename>`
