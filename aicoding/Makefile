@@ -6,7 +6,10 @@ LDFLAGS = -L$(LUAJIT)/lib -lluajit-5.1 -L.. -lmydb -lvector_engine -lm -ldl -lpt
 SRCS = session.c lua_engine.c llm_client.c http_async.c gui_tick.c
 OBJS = $(SRCS:.c=.o)
 
-.PHONY: all clean test cli regression
+.PHONY: all clean test cli regression install uninstall
+
+PREFIX ?= /usr/local
+BINDIR ?= $(PREFIX)/bin
 
 all: libaicoding_agent.a aicoding
 
@@ -27,6 +30,14 @@ regression: all
 
 test/test_session: test/test_session.c libaicoding_agent.a
 	$(CC) $(CFLAGS) $< -o $@ -L. -laicoding_agent $(LDFLAGS) $(shell pkg-config --libs libcurl)
+
+install: all
+	install -d $(DESTDIR)$(BINDIR)
+	install -m 755 aicoding $(DESTDIR)$(BINDIR)/aicoding.bin
+	install -m 755 aicoding.sh $(DESTDIR)$(BINDIR)/aicoding
+
+uninstall:
+	rm -f $(DESTDIR)$(BINDIR)/aicoding $(DESTDIR)$(BINDIR)/aicoding.bin
 
 clean:
 	rm -f $(OBJS) libaicoding_agent.a test/test_session aicoding

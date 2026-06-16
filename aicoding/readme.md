@@ -142,7 +142,7 @@ agent 运行时的所有项目知识、代码索引、会话事实都落盘在�
 
 ## 快速开始
 
-### 1. 编译
+### 1. 编译与安装
 
 ```bash
 cd /opt/my_db/aicoding
@@ -153,6 +153,35 @@ make
 
 - `aicoding` — 主程序
 - `libaicoding_agent.a` — C 内核静态库
+
+如果需要全局使用（推荐），执行安装：
+
+```bash
+sudo make install
+```
+
+这会安装两个文件到 `/usr/local/bin`：
+
+- `aicoding.bin` — 真实二进制
+- `aicoding` — wrapper 脚本，自动设置 `LD_LIBRARY_PATH` 以找到 `libmydb.so`、`libvector_engine.so`、`libluajit-5.1.so`
+
+安装后可以在任意目录直接运行：
+
+```bash
+aicoding --project /path/to/your/repo
+```
+
+卸载：
+
+```bash
+sudo make uninstall
+```
+
+也可以一键完成编译+安装：
+
+```bash
+sudo ./build.sh install
+```
 
 ### 2. 配置
 
