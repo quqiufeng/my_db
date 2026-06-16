@@ -57,6 +57,7 @@ agent 运行时的所有项目知识、代码索引、会话事实都落盘在�
 | **工具调用** | 读文件、编辑文件、运行 bash/git、搜索代码记忆、编译验证 |
 | **权限系统** | 兼容 opencode 的 `permissions` 规则，支持 `allow`/`deny`/`ask`，默认保护系统与用户目录 |
 | **统一工具基础模块** | `shell.lua` / `json.lua` / `tokens.lua` 统一处理命令引用、JSON 编解码、token 估算 |
+| **项目类型约定注入** | 自动检测 linux_kernel/cargo/npm/python/go/cmake 等项目类型，注入对应的最佳实践 workflow、检查清单、常见错误 |
 | **安全护栏** | 默认禁止写/删 `/usr`、`/etc`、`/bin`、`/sbin`、`/lib*`、`/opt/my_db`、`~/*`；拦截危险 bash 模式 |
 | **LuaJIT 脚本层** | Prompt、工具定义、调度逻辑、Agent 全部用 Lua 编写，改逻辑不重编译 |
 | **实验性 GUI** | Rust/gpui-component 编译为 `.so`，LuaJIT FFI 驱动，可弹出聊天窗口 |
@@ -109,6 +110,7 @@ agent 运行时的所有项目知识、代码索引、会话事实都落盘在�
 │  - shell.lua            POSIX shell 引用与安全命令执行 │
 │  - json.lua             统一 JSON 编解码与错误处理 │
 │  - tokens.lua           统一 token 估算器 │
+│  - conventions.lua      项目类型自动检测与最佳实践注入 │
 │  - tools/default.lua    工具定义与调度    │
 │  - permissions.lua      权限规则解析与安全护栏 │
 │  - agents/build.lua     自主 Build Agent │
@@ -615,6 +617,36 @@ print(mem.read("/agent/default/plan/plan"))      -- 当前计划 JSON
 print(mem.read("/agent/default/plan/status"))    -- running / success / failed
 print(mem.read("/agent/default/build/status"))   -- build agent 状态
 ```
+
+---
+
+## 项目类型约定自动注入
+
+启动时，`conventions.lua` 会根据项目根目录的文件特征自动识别项目类型，并将对应的最佳实践注入系统 prompt。
+
+已内置的项目类型：
+
+| 类型 | 识别特征 |
+|------|---------|
+| `linux_kernel` | `init/main.c`、`scripts/checkpatch.pl`、`Kconfig` 等 |
+| `cargo` | `Cargo.toml` |
+| `npm` | `package.json` |
+| `python` | `pyproject.toml`、`setup.py`、`requirements.txt` |
+| `go` | `go.mod` |
+| `cmake` | `CMakeLists.txt` |
+| `generic` | 不匹配以上任何类型时的默认约定 |
+
+注入的内容包括：
+
+- **Workflow**：该类项目的标准开发步骤
+- **Checklist**：完成前应验证的事项
+- **Common mistakes**：该类项目最容易犯的错误
+- **Useful commands**：常用的构建/测试/检查命令
+
+用户可以通过以下方式覆盖：
+
+- `.opencode/conventions.md` — 完全替换自动检测到的约定
+- `.opencode/conventions/{type}.md` — 覆盖特定类型的约定
 
 ---
 

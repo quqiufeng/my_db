@@ -7,6 +7,7 @@
 local cjson = require("cjson")
 local json = require("json")
 local compress = require("compress")
+local conventions = require("conventions")
 
 local M = {}
 
@@ -113,6 +114,16 @@ function M.build_system_prompt(session_id, project_ns, project_root)
     push("- Some paths are write-protected by default (system dirs and home root). If a write is denied, ask the user to confirm or run with explicit permissions.")
     push("- Obviously dangerous shell commands are blocked by default.")
     push("- Prefer targeted file edits over broad shell commands when the same result can be achieved with `edit`/`write`.")
+    push("")
+    push("## Project-specific conventions")
+    push("The section below is auto-detected from the project type. It describes the recommended workflow, checklist, and common mistakes for this kind of project. Follow it unless the user gives conflicting instructions.")
+
+    -- Project-type specific conventions (workflow, checklist, common mistakes)
+    local conv_text, conv_type = conventions.load(project_root)
+    if conv_text and conv_text:match("%S") then
+        push("")
+        push(conv_text)
+    end
 
     -- Project instructions from AGENTS.md / instructions.md / claude.md
     local instruction_files = {"AGENTS.md", "instructions.md", "claude.md"}
