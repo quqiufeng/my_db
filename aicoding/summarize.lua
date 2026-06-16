@@ -7,6 +7,7 @@
 local cjson = require("cjson")
 local prompt = require("prompts.default")
 local tokens = require("tokens")
+local log = require("log")
 
 local M = {}
 
