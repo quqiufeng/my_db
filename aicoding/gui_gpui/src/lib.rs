@@ -23,6 +23,9 @@ use syntect::highlighting::{Style, ThemeSet};
 use syntect::parsing::SyntaxSet;
 use syntect::util::LinesWithEndings;
 
+mod components;
+use components::*;
+
 // System font stack that covers Chinese characters on common Linux/BSD systems.
 fn ui_font_family() -> gpui::SharedString {
     gpui::SharedString::from(
@@ -1149,24 +1152,7 @@ impl Render for ChatView {
         } else {
             0.0
         };
-        let progress_bar = div()
-            .w_full()
-            .h(px(8.0))
-            .rounded_md()
-            .bg(border)
-            .child(
-                div()
-                    .w_full()
-                    .h_full()
-                    .rounded_md()
-                    .bg(if token_percent > 90 {
-                        gpui::rgb(0xf48771)
-                    } else if token_percent > 70 {
-                        gpui::rgb(0xffcc66)
-                    } else {
-                        gpui::rgb(0x89d185)
-                    }),
-            );
+        let progress_bar = TokenProgress::new(tokens_used, context_tokens);
         let session_info = info_section(
             "Session",
             vec![
@@ -1234,18 +1220,9 @@ impl Render for ChatView {
                     .child(Input::new(&self.input_state).h_full()),
             );
 
-        let status_bar = h_flex()
-            .justify_between()
-            .p_1()
-            .text_sm()
-            .border_t_1()
-            .border_color(border)
-            .bg(gpui::rgb(0x1e1e1e))
-            .text_color(gpui::rgb(0xcccccc))
-            .child(div().child(format!("{} · {}", model, version)))
-            .child(div().child(format!("{} / {} tokens ({}%)  prompt {} + completion {}", tokens_used, context_tokens, token_percent, prompt_tokens, completion_tokens)))
-            .child(div().child(format!("{}:main", project_name)))
-            .child(div().child("OpenCode ".to_string() + &version));
+        let status_bar = StatusBar::new(model, version)
+            .project(project_name)
+            .tokens(tokens_used, context_tokens, prompt_tokens, completion_tokens);
 
         // Main area: messages above, input/status below
         let main_area = v_flex()
