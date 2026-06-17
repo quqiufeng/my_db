@@ -1244,6 +1244,46 @@ impl Render for ChatView {
 
 impl EventEmitter<InputEvent> for ChatView {}
 
+fn create_app_icon() -> Option<std::sync::Arc<image::RgbaImage>> {
+    let size = 64u32;
+    let mut img = image::RgbaImage::new(size, size);
+    let cx = size as f32 / 2.0;
+    let cy = size as f32 / 2.0;
+    let r = size as f32 / 2.0 - 2.0;
+    for y in 0..size {
+        for x in 0..size {
+            let dx = x as f32 - cx;
+            let dy = y as f32 - cy;
+            let dist = (dx * dx + dy * dy).sqrt();
+            if dist < r - 4.0 {
+                // Inner circle: primary blue color
+                img.put_pixel(x, y, image::Rgba([0x4f, 0xc1, 0xff, 0xff]));
+            } else if dist < r {
+                // Edge: slightly transparent
+                let alpha = ((r - dist) / 4.0).clamp(0.0, 1.0);
+                let a = (alpha * 255.0) as u8;
+                img.put_pixel(x, y, image::Rgba([0x4f, 0xc1, 0xff, a]));
+            } else {
+                // Outside: transparent
+                img.put_pixel(x, y, image::Rgba([0, 0, 0, 0]));
+            }
+        }
+    }
+    // Draw a simple "ai" on the icon - just use a white dot pattern for minimal "A" shape
+    let center = size / 2;
+    // White dot at center
+    for dy in -2i32..=2i32 {
+        for dx in -2i32..=2i32 {
+            let px = (center as i32 + dx) as u32;
+            let py = (center as i32 + dy) as u32;
+            if px < size && py < size {
+                img.put_pixel(px, py, image::Rgba([0xff, 0xff, 0xff, 0xff]));
+            }
+        }
+    }
+    Some(std::sync::Arc::new(img))
+}
+
 #[no_mangle]
 pub extern "C" fn gui_run(app_ptr: *mut c_void, lua_state: *mut c_void) -> c_int {
     if app_ptr.is_null() {
@@ -1299,6 +1339,7 @@ pub extern "C" fn gui_run(app_ptr: *mut c_void, lua_state: *mut c_void) -> c_int
                     title: Some(gpui::SharedString::from(title)),
                     ..Default::default()
                 }),
+                icon: create_app_icon(),
                 ..Default::default()
             },
             move |window, cx| {
