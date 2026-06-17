@@ -1236,58 +1236,43 @@ impl Render for ChatView {
 impl EventEmitter<InputEvent> for ChatView {}
 
 fn create_app_icon() -> Option<std::sync::Arc<image::RgbaImage>> {
+    // Load the pre-designed smiley face PNG icon
+    let icon_path = PathBuf::from("/opt/my_db/aicoding/gui_gpui/icon.png");
+    if let Ok(img) = image::open(&icon_path) {
+        let rgba = img.into_rgba8();
+        return Some(std::sync::Arc::new(rgba));
+    }
+    // Fallback: simple 32x32 yellow circle with smiley pixels
     let size = 32u32;
     let mut img = image::RgbaImage::new(size, size);
     let cx = size as f32 / 2.0;
     let cy = size as f32 / 2.0;
-    let face_r = size as f32 / 2.0 - 2.0;
-    for y in 0..size {
-        for x in 0..size {
-            let dx = x as f32 - cx;
-            let dy = y as f32 - cy;
-            let dist = (dx * dx + dy * dy).sqrt();
-            if dist < face_r {
-                // ☺ Yellow face
-                img.put_pixel(x, y, image::Rgba([0xff, 0xcc, 0x33, 0xff]));
-            } else if dist < face_r + 1.5 {
-                let alpha = ((face_r + 1.5 - dist) / 1.5).clamp(0.0, 1.0);
-                img.put_pixel(x, y, image::Rgba([0xff, 0xcc, 0x33, (alpha * 255.0) as u8]));
-            } else {
-                img.put_pixel(x, y, image::Rgba([0, 0, 0, 0]));
+    let face_r = size as f32 / 2.0 - 1.0;
+    for y in 0..size { for x in 0..size {
+        let dx = x as f32 - cx; let dy = y as f32 - cy;
+        let dist = (dx * dx + dy * dy).sqrt();
+        if dist < face_r {
+            img.put_pixel(x, y, image::Rgba([0xff, 0xcc, 0x33, 0xff]));
+        } else { img.put_pixel(x, y, image::Rgba([0, 0, 0, 0])); }
+    }}
+    let eye_y = (cy - 4.0) as u32;
+    for ex in [cx - 6.0, cx + 6.0] {
+        for dy in -2i32..=2i32 { for dx in -2i32..=2i32 {
+            let px = (ex as i32 + dx) as u32; let py = (eye_y as i32 + dy) as u32;
+            if px < size && py < size {
+                let d = ((px as f32 - ex).powi(2) + (py as f32 - (eye_y as f32)).powi(2)).sqrt();
+                if d <= 2.0 { img.put_pixel(px, py, image::Rgba([0x1a, 0x1a, 0x2e, 0xff])); }
             }
-        }
+        }}
     }
-    // Eyes: two black dots
-    let eye_y = (cy - 8.0) as u32;
-    for ex in [cx - 10.0, cx + 10.0] {
-        for dy in -3i32..=3i32 {
-            for dx in -3i32..=3i32 {
-                let px = (ex as i32 + dx) as u32;
-                let py = (eye_y as i32 + dy) as u32;
-                if px < size && py < size {
-                    let edx = px as f32 - ex;
-                    let edy = py as f32 - (eye_y as f32);
-                    if (edx * edx + edy * edy).sqrt() <= 3.0 {
-                        img.put_pixel(px, py, image::Rgba([0x1a, 0x1a, 0x2e, 0xff]));
-                    }
-                }
-            }
+    for x in 0..size { for y in 0..size {
+        let dx = x as f32 - cx; let dy = y as f32 - (cy + 1.0);
+        let p = -0.03 * dx * dx;
+        let ty = cy + 1.0 + p;
+        if (y as f32 - ty).abs() < 1.5 && dx.abs() < 10.0 && y as f32 > cy {
+            img.put_pixel(x, y, image::Rgba([0x1a, 0x1a, 0x2e, 0xff]));
         }
-    }
-    // Smile: arc at the bottom half of the face
-    let mouth_cy = cy + 6.0;
-    for x in 0..size {
-        for y in 0..size {
-            let dx = x as f32 - cx;
-            let dy = y as f32 - mouth_cy;
-            // Smile parabola: y = a*x^2 + b, roughly at the bottom
-            let parabola = 0.025 * dx * dx;
-            let target_y = mouth_cy + parabola;
-            if (y as f32 - target_y).abs() < 1.5 && dx.abs() < 20.0 && y as f32 > cy {
-                img.put_pixel(x, y, image::Rgba([0x1a, 0x1a, 0x2e, 0xff]));
-            }
-        }
-    }
+    }}
     Some(std::sync::Arc::new(img))
 }
 
