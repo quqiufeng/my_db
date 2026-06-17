@@ -1236,7 +1236,7 @@ impl Render for ChatView {
 impl EventEmitter<InputEvent> for ChatView {}
 
 fn create_app_icon() -> Option<std::sync::Arc<image::RgbaImage>> {
-    let size = 64u32;
+    let size = 32u32;
     let mut img = image::RgbaImage::new(size, size);
     let cx = size as f32 / 2.0;
     let cy = size as f32 / 2.0;
