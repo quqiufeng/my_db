@@ -30,11 +30,14 @@
 │  - gui_tick.c: Rust 双击复制 → 调用 Lua gui_on_copy()       │
 ├────────────────────────────────────────────────────────────┤
 │                  Rust 渲染引擎层                              │
-│  gui_gpui/src/lib.rs                                        │
-│  - gpui-component 窗口、输入框、按钮、布局                    │
-│  - syntect 代码语法高亮                                     │
-│  - Markdown / Diff / Reasoning 块渲染                       │
-│  - 60fps 定时器驱动 Lua tick + 界面刷新                      │
+│  gui_gpui/src/                                              │
+│  ├── lib.rs                  C 导出 + 顶层渲染 + 事件循环     │
+│  ├── components/mod.rs      自定义组件库（可复用）            │
+│  ├── ...                    可扩展更多组件模块                │
+│  └── 依赖:                                                   │
+│      - gpui-component: 窗口、输入框、按钮、表格等基础组件     │
+│      - syntect: 代码语法高亮                                 │
+│      - serde_json: 配置/消息序列化                           │
 └────────────────────────────────────────────────────────────┘
 ```
 
@@ -44,7 +47,8 @@
 
 | 文件 | 层 | 职责 |
 |------|-----|------|
-| `gui_gpui/src/lib.rs` | Rust | 窗口创建、消息列表、输入框、状态栏、右侧面板、代码高亮、Diff 视图 |
+| `gui_gpui/src/lib.rs` | Rust | 顶层 C 导出、ChatView 渲染、事件循环、流式输出 |
+| `gui_gpui/src/components/mod.rs` | Rust | **自定义组件库**：封装可复用的 UI 组件 |
 | `gui.lua` | Lua FFI | `cdef` 声明、`ffi.load`、回调类型转换、`create`/`append_message`/`stream_delta` |
 | `lua_engine.c` | C | `l_gui_set_tokens`/`l_gui_set_input`/`l_gui_submit` 注册到 `opencode.` 表 |
 | `gui_tick.c` | C | `opencode_gui_tick`（定时器驱动协程）、`opencode_gui_notify_copy`（双击复制回调 Lua） |
@@ -236,7 +240,133 @@ _G.gui_mode = true              -- GUI 模式标志（控制 async_http.sleep �
 
 ---
 
-## 六、UI 组件结构
+## 六、自定义组件系统
+
+这是 aicoding ggui 的核心架构升级——用 `#[derive(IntoElement)]` + `RenderOnce` 模式封装可复用的 Rust 组件。新增 UI 功能不再需要改 `lib.rs` 的渲染主函数，只需要创建新组件并组合使用。
+
+### 6.1 组件模式
+
+每个组件遵循三个约定：
+
+```rust
+// 1. 结构体 + IntoElement 派生
+#[derive(IntoElement)]
+pub struct StatusBar {
+    // 状态字段（业务数据）
+    model: SharedString,
+    version: SharedString,
+    // 必须字段（IntoElement 需要）
+    style: StyleRefinement,
+    children: Vec<AnyElement>,
+}
+
+// 2. Builder 方法（链式调用）
+impl StatusBar {
+    pub fn new(model: impl Into<SharedString>, version: impl Into<SharedString>) -> Self { ... }
+    pub fn project(mut self, p: impl Into<SharedString>) -> Self { self.project = p.into(); self }
+    pub fn tokens(mut self, used: usize, total: usize, prompt: usize, completion: usize) -> Self { ... }
+}
+
+// 3. RenderOnce（消费式渲染，cx: &mut App 可访问主题）
+impl RenderOnce for StatusBar {
+    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+        // cx.theme().foreground / .background / .border / .primary / .warning ...
+    }
+}
+```
+
+关键点：
+
+| 概念 | 说明 |
+|------|------|
+| `#[derive(IntoElement)]` | 自动实现 `into_any_element()`，组件可直接 `.child()` 嵌入 |
+| `RenderOnce::render(self, ...)` | 消费组件，`self` 字段可直接 move 使用 |
+| `cx: &mut App` | 通过 `cx.theme()` 获取主题色，不硬编码 |
+| Builder 方法 | 全部返回 `Self`，支持 `.model(x).version(y).project(z)` |
+| `style` + `children` 字段 | IntoElement 要求，不使用时保持默认值即可 |
+
+### 6.2 现有组件清单
+
+| 组件 | 文件位置 | 用途 | 状态 |
+|------|---------|------|------|
+| `StatusBar` | `components/mod.rs` | 底栏：模型名·版本 \| token 统计 \| 项目名 | ✅ 已集成 |
+| `ThinkingBlock` | `components/mod.rs` | 可折叠 reasoning 显示（Thinking... 块） | ✅ 已集成 |
+| `TokenProgress` | `components/mod.rs` | 彩色 token 进度条（绿/黄/红） | ✅ 已集成 |
+| `InfoSection` | `components/mod.rs` | 右侧面板带标题分区 | ✅ 已集成 |
+| `CodeBlock` | `components/mod.rs` | 代码块 + syntax 高亮 + 语言标签 | ✅ 可用 |
+| `ToolOutputBlock` | `components/mod.rs` | 可折叠的工具执行输出 | ✅ 可用 |
+
+### 6.3 使用 gpui-component 内置组件
+
+除了自定义组件，还可以直接使用 gpui-component 提供的 50+ 组件：
+
+```rust
+use gpui_component::{
+    button::Button,
+    Tag, Badge, Icon, IconName,
+    Scrollable, Spinner, Progress,
+    Dialog, Alert, Notification,
+    Tabs, TabBar,
+    Table, DataTable,
+    Select, Popover, Tooltip,
+    Sidebar, Tree,
+    // ... 等等
+};
+```
+
+### 6.4 创建新组件示例
+
+以 `StatusBar` 为例，完整创建流程：
+
+```rust
+// 1. 定义结构体
+#[derive(IntoElement)]
+pub struct StatusBar {
+    model: SharedString,
+    version: SharedString,
+    style: StyleRefinement,
+    children: Vec<AnyElement>,
+}
+
+// 2. 实现 Builder
+impl StatusBar {
+    pub fn new(model: impl Into<SharedString>, version: impl Into<SharedString>) -> Self {
+        Self {
+            model: model.into(),
+            version: version.into(),
+            style: StyleRefinement::default(),
+            children: Vec::new(),
+        }
+    }
+}
+
+// 3. 实现渲染
+impl RenderOnce for StatusBar {
+    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+        h_flex()
+            .justify_between()
+            .p_1()
+            .text_sm()
+            .child(div().child(format!("{} · {}", self.model, self.version)))
+            .child(div().child("more info"))
+    }
+}
+
+// 4. 在 lib.rs 中使用
+StatusBar::new(model, version)
+    .project(project_name)
+    .tokens(used, total, prompt, completion)
+```
+
+### 6.5 与 Lua 的关系
+
+组件是 Rust 侧的渲染封装，与 Lua 无直接关系。Lua 通过 FFI 调用 `gui_append_message` / `gui_stream_delta` 等 C 接口触发数据更新，Rust 组件在收到 `cx.notify()` 后重新渲染。
+
+> **Rust 组件 = 渲染模板，Lua 业务逻辑 = 数据源。** 组件不包含业务逻辑，只负责"怎么画"。
+
+---
+
+## 七、UI 组件结构
 
 ```
 窗口
@@ -245,28 +375,30 @@ _G.gui_mode = true              -- GUI 模式标志（控制 async_http.sleep �
 │   │   ├── User 消息（蓝色标签）
 │   │   ├── Assistant 消息（紫色标签）
 │   │   │   ├── Markdown 渲染（标题/列表/加粗/行内代码）
-│   │   │   └── 代码块（syntect 语法高亮）
-│   │   │       └── diff 检测 → side-by-side 分栏对比
-│   │   ├── Thinking 块（灰色标签，默认折叠）— reasoning_content
-│   │   └── Tool 消息（黄色标签，可折叠）
+│   │   │   ├── CodeBlock 组件 ─── syntect 语法高亮
+│   │   │   │   └── diff 检测 → side-by-side 分栏
+│   │   │   └── ThinkingBlock 组件 ── 可折叠 reasoning
+│   │   └── ToolOutputBlock 组件 ── 可折叠工具结果
 │   ├── 输入栏 (Input Bar)
-│   │   └── gpui-component Input（多行文本、Shift+Enter 换行、Enter 发送）
-│   └── 状态栏 (Status Bar)
+│   │   └── gpui-component Input
+│   └── StatusBar 组件
 │       ├── 模型名 · 版本
-│       ├── token 使用量 / 上限 (xx%) 进度条
+│       ├── TokenProgress 组件 ── 进度条
 │       └── 项目名:main
 └── 右侧面板 (Right Panel)
-    ├── Session — 会话开始时间
-    ├── Context — token 使用详情 + 进度条
-    ├── LSP — LSP 状态（当前禁用）
-    └── Todo — Agent 待办列表（可点击切换完成状态）
+    ├── InfoSection("Session") ── 开始时间
+    ├── InfoSection("Context") ── token 详情 + TokenProgress
+    ├── InfoSection("LSP") ── LSP 状态
+    └── InfoSection("Todo") ── 待办列表（可点击切换）
 ```
+
+右侧面板和底栏已全部组件化。消息列表内的代码块、Thinking、Tool 部分也已使用或可迁移到组件。
 
 ---
 
-## 七、关键设计细节
+## 八、关键设计细节
 
-### 7.1 Callback 生命周期管理
+### 8.1 Callback 生命周期管理
 
 ```lua
 -- gui.lua
@@ -279,7 +411,7 @@ M._apps[handle] = {
 
 Lua 的 `ffi.cast` 产生的函数指针如果被 GC 回收，C 侧调用时会崩溃。`gui.lua` 用 `M._apps` 表持有所有回调引用，确保在 GUI 生命周期内指针有效。
 
-### 7.2 流式输出 UTF-8 安全分块
+### 8.2 流式输出 UTF-8 安全分块
 
 ```lua
 -- main.lua: 流式输出 chunk
@@ -300,7 +432,7 @@ while pos <= #content do
 end
 ```
 
-### 7.3 工具回调内存安全
+### 8.3 工具回调内存安全
 
 ```lua
 -- 返回给 Rust 的字符串必须分配在 C 堆上
@@ -310,7 +442,7 @@ ffi.cast("char*", cstr)[#out] = 0  -- null-terminate
 return cstr  -- Rust 侧通过 CString::from_raw 接管所有权
 ```
 
-### 7.4 GUI 中的 LLM 请求：异步非阻塞
+### 8.4 GUI 中的 LLM 请求：异步非阻塞
 
 GUI 模式不走 C 层的 `llm_complete_raw`（同步阻塞），而是走 `async_http.lua`：
 
@@ -325,7 +457,7 @@ while true do
 end
 ```
 
-### 7.5 线程安全
+### 8.5 线程安全
 
 - 所有跨语言调用都在 **GPUI 主线程** 上执行（LuaJIT 运行在主线程上，FFI 调用同步）
 - `Arc<Mutex<T>>` 保护 Rust 侧共享状态
@@ -333,7 +465,7 @@ end
 
 ---
 
-## 八、性能特性
+## 九、性能特性
 
 | 指标 | 值 |
 |------|-----|
@@ -345,7 +477,7 @@ end
 
 ---
 
-## 九、编译与运行
+## 十、编译与运行
 
 ```bash
 # 编译 Rust GUI
@@ -367,45 +499,42 @@ OPENCODE_GUI=0 aicoding --project /path/to/repo
 
 ---
 
-## 十、架构图（简化调用链路）
+## 十一、架构图（简化调用链路）
 
 ```
   Lua                           C                        Rust
 ─────                         ───                       ────
-main.lua                      gui_tick.c                lib.rs (gpui)
+main.lua                      gui_tick.c                gui_gpui/src/
   │                             │                         │
-  ├─ gui.run(app) ──────────────┼──────────────────────→ gui_run()
+  │─ gui.run(app) ──────────────┼─────────────────→ lib.rs: gui_run()
   │                             │                         │
-  │                             │                    gpui::application().run()
-  │                             │                     ├─ Window → ChatView
-  │                             │                     ├─ 60fps timer ───┐
-  │                             │                     │                 │
-  │  gui_tick() ←─── opencode_gui_tick() ←───────────-┘                 │
-  │    ├─ resume coroutine ──→ stream_delta() ───────→ messages.push()  │
-  │    └─ 返回                                                           │
-  │                                  cx.notify() ←──────────────────────┘
-  │                                    │
-  │                                    └─ ChatView::render()
-  │                                         ├─ messages → 消息列表
-  │                                         ├─ todos → 待办面板
-  │                                         └─ tokens → 状态栏
+  │                             │               gpui::application().run()
+  │                             │               ├─ Window → ChatView
+  │                             │               ├─ 60fps timer ───┐
+  │                             │               │                  │
+  │  gui_tick() ←── opencode_gui_tick() ←────────┘                  │
+  │    ├─ resume co → stream_delta() → messages.push()              │
+  │    └─ 返回                                                        │
+  │                          cx.notify() ←───────────────────────────┘
+  │                            │
+  │                            └─ ChatView::render()
+  │                                 ├─ components::StatusBar
+  │                                 ├─ components::InfoSection
+  │                                 ├─ components::TokenProgress
+  │                                 ├─ components::ThinkingBlock
+  │                                 ├─ components::CodeBlock
+  │                                 └─ components::ToolOutputBlock
   │
-  ├─ gui.on_user_message(handler) ← Rust: 用户回车
+  │─ gui.on_user_message(handler) ← Rust: 用户回车
   │     │
-  │     └─ create coroutine {
-  │           1. async_http.request() ──→ C curl-multi
-  │           2. parse response
-  │           3. stream_delta() + yield()
-  │           4. tool_call → tools.dispatch()
-  │           5. repeat
-  │        }
+  │     └─ create coroutine { LLM → stream → tool → repeat }
   │
-  └─ gui.free(app) ──────────────────→ gui_app_free()
+  └─ gui.free(app) ────────────────→ gui_app_free()
 ```
 
 ---
 
-## 十一、与其他方案的对比
+## 十二、与其他方案的对比
 
 | 方案 | 体积 | 启动速度 | 可热更新 | GPU 加速 |
 |------|------|---------|---------|---------|
@@ -418,7 +547,7 @@ main.lua                      gui_tick.c                lib.rs (gpui)
 
 ---
 
-## 十二、通用模式总结
+## 十三、通用模式总结
 
 这套架构可以抽象为一个**通用的 Linux GUI 开发模式**：
 
