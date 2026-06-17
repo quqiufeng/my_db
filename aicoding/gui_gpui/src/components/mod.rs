@@ -4,6 +4,7 @@ use gpui_component::{
     ActiveTheme,
     h_flex, v_flex,
 };
+use std::sync::OnceLock;
 
 // ── Font stack ──────────────────────────────────────────────
 
@@ -69,7 +70,7 @@ impl RenderOnce for StatusBar {
             .text_sm()
             .border_t_1()
             .border_color(cx.theme().border)
-            .bg(cx.theme().background)
+            .bg(gpui::rgb(0x1e1e1e))
             .text_color(cx.theme().muted_foreground)
             .child(div().child(format!("{} · {}", self.model, self.version)))
             .child(div().child(format!("{} / {} tokens ({}%)  prompt {} + completion {}",
@@ -105,7 +106,7 @@ impl RenderOnce for ThinkingBlock {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = cx.theme();
         v_flex()
-            .bg(theme.background)
+            .bg(gpui::rgb(0x252526))
             .rounded_md()
             .border_1()
             .border_color(theme.border)
@@ -164,5 +165,188 @@ impl RenderOnce for TokenProgress {
                     .rounded_md()
                     .bg(bar_color)
             )
+    }
+}
+
+// ── InfoSection (right panel section) ──────────────────────
+
+#[derive(IntoElement)]
+pub struct InfoSection {
+    title: SharedString,
+    children: Vec<AnyElement>,
+    style: StyleRefinement,
+}
+
+impl InfoSection {
+    pub fn new(title: impl Into<SharedString>) -> Self {
+        Self {
+            title: title.into(),
+            children: Vec::new(),
+            style: StyleRefinement::default(),
+        }
+    }
+    pub fn child(mut self, el: impl IntoElement) -> Self {
+        self.children.push(el.into_any_element());
+        self
+    }
+}
+
+impl RenderOnce for InfoSection {
+    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+        v_flex()
+            .gap_1()
+            .p_2()
+            .child(
+                div()
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(cx.theme().foreground)
+                    .child(self.title.clone())
+            )
+            .children(self.children)
+    }
+}
+
+// ── CodeBlock (syntax highlighted code) ─────────────────────
+
+use syntect::easy::HighlightLines;
+use syntect::highlighting::{Style, ThemeSet};
+use syntect::parsing::SyntaxSet;
+use syntect::util::LinesWithEndings;
+
+fn syntax_set() -> &'static SyntaxSet {
+    static SET: OnceLock<SyntaxSet> = OnceLock::new();
+    SET.get_or_init(SyntaxSet::load_defaults_newlines)
+}
+fn theme_set() -> &'static ThemeSet {
+    static SET: OnceLock<ThemeSet> = OnceLock::new();
+    SET.get_or_init(ThemeSet::load_defaults)
+}
+fn style_to_rgb(style: &Style) -> gpui::Rgba {
+    let c = style.foreground;
+    let r = (c.r as f32 / 255.0 * 255.0) as u32;
+    let g = (c.g as f32 / 255.0 * 255.0) as u32;
+    let b = (c.b as f32 / 255.0 * 255.0) as u32;
+    gpui::rgb((r << 16) | (g << 8) | b)
+}
+
+pub fn highlighted_code(code: &str, lang: &str) -> Vec<AnyElement> {
+    let ps = syntax_set();
+    let ts = theme_set();
+    let syntax = ps.find_syntax_by_extension(lang)
+        .or_else(|| ps.find_syntax_by_name(lang))
+        .unwrap_or_else(|| ps.find_syntax_plain_text());
+    let theme = ts.themes.get("base16-ocean.dark")
+        .or_else(|| ts.themes.values().next())
+        .expect("no themes loaded");
+    let mut h = HighlightLines::new(syntax, theme);
+    let mut lines: Vec<AnyElement> = Vec::new();
+    for line in LinesWithEndings::from(code) {
+        let ranges = h.highlight_line(line, ps).unwrap_or_default();
+        let tokens: Vec<AnyElement> = ranges.into_iter().filter_map(|(style, text)| {
+            let text = text.trim_end_matches('\n').trim_end_matches('\r');
+            if text.is_empty() { return None; }
+            Some(div().child(text.to_string()).text_color(style_to_rgb(&style)).text_base().font_family(mono_font_family()).into_any_element())
+        }).collect();
+        lines.push(h_flex().children(tokens).into_any_element());
+    }
+    lines
+}
+
+#[derive(IntoElement)]
+pub struct CodeBlock {
+    lang: SharedString,
+    code: SharedString,
+    style: StyleRefinement,
+    children: Vec<AnyElement>,
+}
+
+impl CodeBlock {
+    pub fn new(lang: impl Into<SharedString>, code: impl Into<SharedString>) -> Self {
+        Self {
+            lang: lang.into(),
+            code: code.into(),
+            style: StyleRefinement::default(),
+            children: Vec::new(),
+        }
+    }
+}
+
+impl RenderOnce for CodeBlock {
+    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+        let code_bg = gpui::rgb(0x1e1e1e);
+        v_flex()
+            .rounded_md()
+            .overflow_hidden()
+            .border_1()
+            .border_color(cx.theme().border)
+            .child(
+                h_flex()
+                    .px_2()
+                    .py_1()
+                    .bg(gpui::rgb(0x333333))
+                    .text_color(gpui::rgb(0xcccccc))
+                    .child(if self.lang.is_empty() { SharedString::from("code") } else { self.lang.clone() })
+                    .text_sm()
+                    .font_family(ui_font_family())
+            )
+            .child(
+                div()
+                    .p_2()
+                    .bg(code_bg)
+                    .font_family(mono_font_family())
+                    .children(highlighted_code(&self.code, &self.lang))
+            )
+    }
+}
+
+// ── ToolOutputBlock (collapsible tool result) ──────────────
+
+#[derive(IntoElement)]
+pub struct ToolOutputBlock {
+    header: SharedString,
+    body: SharedString,
+    expanded: bool,
+    style: StyleRefinement,
+    children: Vec<AnyElement>,
+}
+
+impl ToolOutputBlock {
+    pub fn new(header: impl Into<SharedString>, body: impl Into<SharedString>) -> Self {
+        Self {
+            header: header.into(),
+            body: body.into(),
+            expanded: false,
+            style: StyleRefinement::default(),
+            children: Vec::new(),
+        }
+    }
+    pub fn expanded(mut self, v: bool) -> Self { self.expanded = v; self }
+}
+
+impl RenderOnce for ToolOutputBlock {
+    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+        let theme = cx.theme();
+        v_flex()
+            .bg(gpui::rgb(0x252526))
+            .rounded_md()
+            .border_1()
+            .border_color(theme.border)
+            .child(
+                h_flex()
+                    .px_2()
+                    .py_1()
+                    .child(div().child(self.header.clone()).text_color(theme.warning).text_base().font_family(ui_font_family()))
+            )
+            .when(self.expanded, |this| {
+                this.child(
+                    div()
+                        .p_2()
+                        .bg(gpui::rgb(0x0f0f0f))
+                        .child(self.body.clone())
+                        .text_color(gpui::rgb(0xcccccc))
+                        .font_family(mono_font_family())
+                        .text_base()
+                )
+            })
     }
 }

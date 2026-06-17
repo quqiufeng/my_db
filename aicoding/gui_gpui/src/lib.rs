@@ -1134,14 +1134,6 @@ impl Render for ChatView {
             }));
 
         // Right info panel (Session / Context / LSP / Todo)
-        fn info_section(title: &str, content: Vec<AnyElement>) -> impl IntoElement {
-            v_flex()
-                .gap_1()
-                .p_2()
-                .child(div().font_weight(FontWeight::BOLD).text_color(gpui::rgb(0xe0e0e0)).child(title.to_string()))
-                .children(content)
-        }
-
         let token_percent = if context_tokens > 0 {
             (tokens_used as f64 / context_tokens as f64 * 100.0) as usize
         } else {
@@ -1153,28 +1145,16 @@ impl Render for ChatView {
             0.0
         };
         let progress_bar = TokenProgress::new(tokens_used, context_tokens);
-        let session_info = info_section(
-            "Session",
-            vec![
-                div().child(format!("Started {}", self.session_start)).text_base().text_color(gpui::rgb(0xcccccc)).font_family(ui_font_family()).into_any_element(),
-            ],
-        );
-        let context_info = info_section(
-            "Context",
-            vec![
-                div().child(format!("{} / {} tokens", tokens_used, context_tokens)).text_base().text_color(gpui::rgb(0xcccccc)).font_family(ui_font_family()).into_any_element(),
-                progress_bar.into_any_element(),
-                div().child(format!("{}% used", token_percent)).text_base().text_color(gpui::rgb(0xcccccc)).font_family(ui_font_family()).into_any_element(),
-                div().child(format!("prompt {} + completion {}", prompt_tokens, completion_tokens)).text_sm().text_color(gpui::rgb(0x999999)).font_family(ui_font_family()).into_any_element(),
-                div().child("$0.00 spent").text_base().text_color(gpui::rgb(0xcccccc)).font_family(ui_font_family()).into_any_element(),
-            ],
-        );
-        let lsp_info = info_section(
-            "LSP",
-            vec![
-                div().child("LSPs are disabled").text_base().text_color(gpui::rgb(0xcccccc)).font_family(ui_font_family()).into_any_element(),
-            ],
-        );
+        let session_info = InfoSection::new("Session")
+            .child(div().child(format!("Started {}", self.session_start)).text_base().text_color(gpui::rgb(0xcccccc)).font_family(ui_font_family()));
+        let context_info = InfoSection::new("Context")
+            .child(div().child(format!("{} / {} tokens", tokens_used, context_tokens)).text_base().text_color(gpui::rgb(0xcccccc)).font_family(ui_font_family()))
+            .child(progress_bar)
+            .child(div().child(format!("{}% used", token_percent)).text_base().text_color(gpui::rgb(0xcccccc)).font_family(ui_font_family()))
+            .child(div().child(format!("prompt {} + completion {}", prompt_tokens, completion_tokens)).text_sm().text_color(gpui::rgb(0x999999)).font_family(ui_font_family()))
+            .child(div().child("$0.00 spent").text_base().text_color(gpui::rgb(0xcccccc)).font_family(ui_font_family()));
+        let lsp_info = InfoSection::new("LSP")
+            .child(div().child("LSPs are disabled").text_base().text_color(gpui::rgb(0xcccccc)).font_family(ui_font_family()));
         let todos = unsafe { &*app }.todos.lock().unwrap().clone();
         let todo_items: Vec<AnyElement> = todos.iter().enumerate().map(|(idx, todo)| {
             let icon = if todo.done { "[✓]" } else { "[ ]" };
@@ -1192,7 +1172,13 @@ impl Render for ChatView {
                 }))
                 .into_any_element()
         }).collect();
-        let todo_info = info_section("Todo", todo_items);
+        let todo_info = {
+            let mut sec = InfoSection::new("Todo");
+            for item in todo_items {
+                sec = sec.child(item);
+            }
+            sec
+        };
 
         let right_panel = v_flex()
             .w_1_4()
