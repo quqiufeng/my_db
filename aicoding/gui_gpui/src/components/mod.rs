@@ -96,6 +96,47 @@ impl RenderOnce for ModelBadge {
     }
 }
 
+// ── AppLogo ────────────────────────────────────────────────
+
+#[derive(IntoElement)]
+pub struct AppLogo {
+    style: StyleRefinement,
+    children: Vec<AnyElement>,
+}
+
+impl AppLogo {
+    pub fn new() -> Self {
+        Self { style: StyleRefinement::default(), children: Vec::new() }
+    }
+}
+
+impl RenderOnce for AppLogo {
+    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+        let theme = cx.theme();
+        h_flex()
+            .gap_2()
+            .items_center()
+            .child(
+                div()
+                    .w(px(30.0)).h(px(30.0))
+                    .rounded_full()
+                    .bg(gpui::rgb(0x2a2a3e))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(div().child("😊").text_base())
+            )
+            .child(
+                div()
+                    .child("aicoding")
+                    .text_color(theme.foreground)
+                    .text_base()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .font_family(ui_font_family())
+            )
+    }
+}
+
 // ── StatusBar ───────────────────────────────────────────────
 
 #[derive(IntoElement)]

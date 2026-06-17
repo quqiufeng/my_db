@@ -1210,11 +1210,20 @@ impl Render for ChatView {
             .project(project_name)
             .tokens(tokens_used, context_tokens, prompt_tokens, completion_tokens);
 
-        // Main area: messages above, input/status below
+        // Main area: logo header, messages, input, status
+        let header = h_flex()
+            .px_3()
+            .py(px(8.0))
+            .border_b_1()
+            .border_color(border)
+            .bg(gpui::rgb(0x1e1e1e))
+            .child(AppLogo::new());
+
         let main_area = v_flex()
             .flex_1()
             .size_full()
             .bg(bg)
+            .child(header)
             .child(message_list)
             .child(input_bar)
             .child(status_bar);
