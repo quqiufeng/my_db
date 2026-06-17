@@ -1210,20 +1210,11 @@ impl Render for ChatView {
             .project(project_name)
             .tokens(tokens_used, context_tokens, prompt_tokens, completion_tokens);
 
-        // Main area: logo header, messages, input, status
-        let header = h_flex()
-            .px_3()
-            .py(px(8.0))
-            .border_b_1()
-            .border_color(border)
-            .bg(gpui::rgb(0x1e1e1e))
-            .child(AppLogo::new());
-
+        // Main area: messages, input, status
         let main_area = v_flex()
             .flex_1()
             .size_full()
             .bg(bg)
-            .child(header)
             .child(message_list)
             .child(input_bar)
             .child(status_bar);
@@ -1249,35 +1240,51 @@ fn create_app_icon() -> Option<std::sync::Arc<image::RgbaImage>> {
     let mut img = image::RgbaImage::new(size, size);
     let cx = size as f32 / 2.0;
     let cy = size as f32 / 2.0;
-    let r = size as f32 / 2.0 - 2.0;
+    let face_r = size as f32 / 2.0 - 2.0;
     for y in 0..size {
         for x in 0..size {
             let dx = x as f32 - cx;
             let dy = y as f32 - cy;
             let dist = (dx * dx + dy * dy).sqrt();
-            if dist < r - 4.0 {
-                // Inner circle: primary blue color
-                img.put_pixel(x, y, image::Rgba([0x4f, 0xc1, 0xff, 0xff]));
-            } else if dist < r {
-                // Edge: slightly transparent
-                let alpha = ((r - dist) / 4.0).clamp(0.0, 1.0);
-                let a = (alpha * 255.0) as u8;
-                img.put_pixel(x, y, image::Rgba([0x4f, 0xc1, 0xff, a]));
+            if dist < face_r {
+                // ☺ Yellow face
+                img.put_pixel(x, y, image::Rgba([0xff, 0xcc, 0x33, 0xff]));
+            } else if dist < face_r + 1.5 {
+                let alpha = ((face_r + 1.5 - dist) / 1.5).clamp(0.0, 1.0);
+                img.put_pixel(x, y, image::Rgba([0xff, 0xcc, 0x33, (alpha * 255.0) as u8]));
             } else {
-                // Outside: transparent
                 img.put_pixel(x, y, image::Rgba([0, 0, 0, 0]));
             }
         }
     }
-    // Draw a simple "ai" on the icon - just use a white dot pattern for minimal "A" shape
-    let center = size / 2;
-    // White dot at center
-    for dy in -2i32..=2i32 {
-        for dx in -2i32..=2i32 {
-            let px = (center as i32 + dx) as u32;
-            let py = (center as i32 + dy) as u32;
-            if px < size && py < size {
-                img.put_pixel(px, py, image::Rgba([0xff, 0xff, 0xff, 0xff]));
+    // Eyes: two black dots
+    let eye_y = (cy - 8.0) as u32;
+    for ex in [cx - 10.0, cx + 10.0] {
+        for dy in -3i32..=3i32 {
+            for dx in -3i32..=3i32 {
+                let px = (ex as i32 + dx) as u32;
+                let py = (eye_y as i32 + dy) as u32;
+                if px < size && py < size {
+                    let edx = px as f32 - ex;
+                    let edy = py as f32 - (eye_y as f32);
+                    if (edx * edx + edy * edy).sqrt() <= 3.0 {
+                        img.put_pixel(px, py, image::Rgba([0x1a, 0x1a, 0x2e, 0xff]));
+                    }
+                }
+            }
+        }
+    }
+    // Smile: arc at the bottom half of the face
+    let mouth_cy = cy + 6.0;
+    for x in 0..size {
+        for y in 0..size {
+            let dx = x as f32 - cx;
+            let dy = y as f32 - mouth_cy;
+            // Smile parabola: y = a*x^2 + b, roughly at the bottom
+            let parabola = 0.025 * dx * dx;
+            let target_y = mouth_cy + parabola;
+            if (y as f32 - target_y).abs() < 1.5 && dx.abs() < 20.0 && y as f32 > cy {
+                img.put_pixel(x, y, image::Rgba([0x1a, 0x1a, 0x2e, 0xff]));
             }
         }
     }
