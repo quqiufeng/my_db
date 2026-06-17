@@ -12,8 +12,14 @@ function M.sleep(ms)
         coroutine.yield()
     else
         -- CLI fallback: simple blocking sleep
-        local cmd = string.format("sleep %f", ms / 1000.0)
-        os.execute(cmd)
+        -- Use LuaSocket if available, otherwise fall back to os.execute
+        local ok, socket = pcall(require, "socket")
+        if ok then
+            socket.sleep(ms / 1000.0)
+        else
+            local cmd = string.format("sleep %f 2>/dev/null", ms / 1000.0)
+            os.execute(cmd)
+        end
     end
 end
 

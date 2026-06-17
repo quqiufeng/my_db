@@ -9,6 +9,7 @@
 --        /code/local/{repo}        代码库语义记忆（只读，由 analyze_repo.sh 导入）
 
 local rerank = require("rerank")
+local shell = require("shell")
 
 local M = {}
 
@@ -134,8 +135,8 @@ function M.context(symbol, repo, opts)
 
     local cmd = string.format(
         "cd /opt/my_db && ./tools/cache_query %s --repo %s --type context --depth %d 2>&1",
-        require("cjson").encode(symbol),
-        require("cjson").encode(repo),
+        shell.quote(symbol),
+        shell.quote(repo),
         depth
     )
     local f = io.popen(cmd)

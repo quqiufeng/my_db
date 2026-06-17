@@ -79,7 +79,7 @@ end
 
 -- Convert messages table to JSON array string for C API.
 local function messages_to_json(messages)
-    return cjson.encode(messages)
+    return json.encode(messages)
 end
 
 -- Extract assistant content, reasoning_content and tool_calls from OpenAI response.
@@ -147,10 +147,6 @@ function build_prompt(session_id, project_ns, user_query)
     return prompt.build_prompt(session_id, project_ns, user_query, tools.get_project_root())
 end
 
--- Convert messages table to JSON array string for C API.
-local function messages_to_json(messages)
-    return cjson.encode(messages)
-end
 
 -- Append an assistant message (with optional reasoning and tool_calls) to messages.
 local function append_assistant(messages, content, reasoning, tool_calls)
@@ -171,7 +167,7 @@ local function append_assistant(messages, content, reasoning, tool_calls)
                 type = "function",
                 ["function"] = {
                     name = tc.name,
-                    arguments = cjson.encode(tc.arguments)
+                    arguments = json.encode(tc.arguments)
                 }
             })
         end
@@ -196,7 +192,7 @@ local function format_tool_result(name, result)
                 if k == "files" then
                     table.insert(lines, k .. ": " .. table.concat(v, ", "))
                 else
-                    table.insert(lines, k .. ": " .. cjson.encode(v))
+                    table.insert(lines, k .. ": " .. json.encode(v))
                 end
             else
                 table.insert(lines, k .. ": " .. tostring(v))
@@ -212,12 +208,12 @@ local function execute_tools(messages, tool_calls)
         log.info("executing tool: %s", tc.name)
         trace.tool_call(tc.name, tc.arguments)
         local result = tools.dispatch(tc)
-        log.debug("tool result: %s", cjson.encode(result):sub(1, 300))
+        log.debug("tool result: %s", json.encode(result):sub(1, 300))
         trace.tool_result(tc.name, result)
         table.insert(messages, {
             role = "tool",
             tool_call_id = tc.id,
-            content = cjson.encode(result)
+            content = json.encode(result)
         })
     end
 end
@@ -239,7 +235,7 @@ function run_plan_agent(session_id, project_ns, task_description)
     if result.ok then
         return result.summary or "Plan completed."
     else
-        return "Plan failed: " .. tostring(result.error or "unknown error") .. "\nCompleted steps:\n" .. cjson.encode(result.steps or {})
+        return "Plan failed: " .. tostring(result.error or "unknown error") .. "\nCompleted steps:\n" .. json.encode(result.steps or {})
     end
 end
 
@@ -302,7 +298,10 @@ function chat_once(session_id, project_ns, user_query)
             request_body.tools = tools.build_tools_for_request()
         end
 
-        local body_json = cjson.encode(request_body)
+        local body_json = json.encode(request_body)
+        if not body_json then
+            return "(encode error)"
+        end
         log.debug("request body (first 500): %s", body_json:sub(1, 500))
         trace.llm_request(body_json:sub(1, 500))
 
@@ -466,7 +465,11 @@ function run_gui(session_id, project_ns)
                     request_body.tools = tools.build_tools_for_request()
                 end
 
-                local body_json = cjson.encode(request_body)
+                local body_json = json.encode(request_body)
+                if not body_json then
+                    gui.append_message(app, sid, "assistant", "(encode error)")
+                    return
+                end
                 trace.llm_request(body_json:sub(1, 500))
 
                 -- Build URL and headers for async HTTP
@@ -564,14 +567,14 @@ function run_gui(session_id, project_ns)
                     -- Allow GUI to show the "running..." state briefly
                     coroutine.yield()
                     local result = tools.dispatch(tc)
-                    log.debug("gui tool result: %s", cjson.encode(result):sub(1, 300))
+                    log.debug("gui tool result: %s", json.encode(result):sub(1, 300))
                     trace.tool_result(tc.name, result)
                     gui.tool_output(app, sid, tc.name, format_tool_result(tc.name, result):sub(1, 16000))
                     gui.set_todo_done(app, "Run tool: " .. tc.name, true)
                     table.insert(messages, {
                         role = "tool",
                         tool_call_id = tc.id,
-                        content = cjson.encode(result)
+                        content = json.encode(result)
                     })
                 end
 

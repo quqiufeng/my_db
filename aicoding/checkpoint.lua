@@ -95,7 +95,7 @@ function M.create(session_id, project_root, files, reason)
     -- Keep only last 20 checkpoints
     while #manifest > 20 do table.remove(manifest) end
 
-    memory.write(manifest_key, cjson.encode(manifest))
+    memory.write(manifest_key, json.encode(manifest))
     log.info("checkpoint created: %s (%d files)", ts, #backed)
 
     return { ok = true, checkpoint_id = ts, files_backed = backed, dir = cp_dir }

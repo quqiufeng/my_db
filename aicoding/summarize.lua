@@ -4,7 +4,7 @@
 -- otherwise falls back to fast local heuristics. Extracted facts and summaries
 -- are stored in KV Cache so future sessions can recall them.
 
-local cjson = require("cjson")
+local json = require("json")
 local prompt = require("prompts.default")
 local tokens = require("tokens")
 local log = require("log")
@@ -168,7 +168,7 @@ Focus on facts useful for future coding sessions: file paths, design decisions, 
         response_format = { type = "json_object" }
     }
 
-    local ok, body_json = pcall(cjson.encode, body)
+    local body_json, _ = json.encode(body)
     if not ok then return nil, "json encode failed" end
 
     local resp = opencode.llm_complete_raw(body_json)

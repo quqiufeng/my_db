@@ -4,7 +4,7 @@
 -- Each line is a JSON object with: ts_ms, session, event, data.
 -- The trace can be queried by event type, tool name, or time range.
 
-local cjson = require("cjson")
+local json = require("json")
 local shell = require("shell")
 
 local M = {}
@@ -46,7 +46,7 @@ function M.log(event, data)
         event = event,
         data = data or {}
     }
-    local line = cjson.encode(entry) .. "\n"
+    local line = json.encode(entry) .. "\n"
     local f = io.open(M.trace_path(), "a")
     if f then
         f:write(line)
@@ -61,8 +61,8 @@ function M.read_all()
     if not f then return {} end
     local lines = {}
     for line in f:lines() do
-        local ok, entry = pcall(cjson.decode, line)
-        if ok and type(entry) == "table" then
+        local entry, _ = json.decode(line)
+        if entry and type(entry) == "table" then
             table.insert(lines, entry)
         end
     end

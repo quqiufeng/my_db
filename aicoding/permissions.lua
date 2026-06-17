@@ -13,7 +13,7 @@
 -- Matching: rules are evaluated in order, LAST match wins (like opencode).
 -- Wildcards use simple * matching. Paths starting with ~ are expanded.
 
-local cjson = require("cjson")
+local json = require("json")
 
 local M = {}
 
@@ -45,7 +45,7 @@ local function parse_jsonc(text)
         end
     end
     local joined = table.concat(lines, "\n")
-    local ok, v = pcall(cjson.decode, joined)
+    local v, _ = json.decode(joined)
     if ok then return v end
     return nil
 end

@@ -2,7 +2,8 @@
 -- Provides a Lua-facing GUI object backed by gpui-component.
 
 local ffi = require("ffi")
-local cjson = require("cjson")
+local json = require("json")
+local log = require("log")
 
 ffi.cdef[[
     void* gui_app_create(const char* config_json);
@@ -46,13 +47,13 @@ M._apps = {}
 
 -- Default user-message handler. Overridden via M.on_user_message().
 M._default_user_handler = function(session_id, text)
-    print("[GUI user message] " .. session_id .. ": " .. text)
+    log.info("[GUI user message] %s: %s", session_id, text)
 end
 
 -- Default tool-call handler. Overridden via M.on_tool_call().
 M._default_tool_handler = function(session_id, tool_call)
-    print("[GUI tool call] " .. session_id .. ": " .. cjson.encode(tool_call))
-    return cjson.encode({ ok = false, error = "no tool handler" })
+    log.warn("[GUI tool call] %s: %s", session_id, json.encode(tool_call))
+    return json.encode({ ok = false, error = "no tool handler" })
 end
 
 -- C-compatible callback for user messages.
@@ -62,7 +63,7 @@ local function make_user_callback(lua_handler)
         local t = ffi.string(text)
         local ok, err = pcall(lua_handler, s, t)
         if not ok then
-            print("[GUI] user message handler error: " .. tostring(err))
+            log.error("[GUI] user message handler error: %s", err)
         end
     end)
 end
@@ -73,12 +74,12 @@ local function make_tool_callback(lua_handler)
     return ffi.cast("char* (*)(const char*, const char*, void*)", function(session_id, tool_json, userdata)
         local s = ffi.string(session_id)
         local t = ffi.string(tool_json)
-        local ok, result = pcall(lua_handler, s, cjson.decode(t))
+        local ok, result = pcall(lua_handler, s, json.decode(t))
         local out
         if ok then
-            out = cjson.encode(result)
+            out = json.encode(result)
         else
-            out = cjson.encode({ ok = false, error = tostring(result) })
+            out = json.encode({ ok = false, error = tostring(result) })
         end
         -- Allocate on C heap so Rust side can take ownership and free.
         local cstr = ffi.C.malloc(#out + 1)
@@ -92,7 +93,7 @@ end
 
 function M.create(config)
     config = config or {}
-    local cfg_json = cjson.encode(config)
+    local cfg_json = json.encode(config)
     local app = lib.gui_app_create(cfg_json)
     if app == nil then
         error("failed to create GUI app")
@@ -166,8 +167,8 @@ function M.get_messages(app)
     if cstr == nil then return {} end
     local s = ffi.string(cstr)
     ffi.C.free(cstr)
-    local ok, arr = pcall(cjson.decode, s)
-    if ok then return arr else return {} end
+    local arr, _ = json.decode(s)
+    if arr then return arr else return {} end
 end
 
 function M.add_todo(app, text)

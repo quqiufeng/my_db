@@ -38,7 +38,7 @@ local function archive_message(session, msg, idx)
     if msg.role == "tool" then
         -- tool 输出太长发 summary 键，原始内容放 memory
         local key = ns .. "/tool_" .. tostring(idx) .. "_" .. tostring(msg.tool_call_id or "unknown")
-        memory.write(key, cjson.encode({
+        memory.write(key, json.encode({
             role = msg.role,
             tool_call_id = msg.tool_call_id,
             name = msg.name,
@@ -52,7 +52,7 @@ local function archive_message(session, msg, idx)
         local summary = c:sub(1, 400)
         if #c > 400 then summary = summary .. "..." end
         local key = ns .. "/assistant_" .. tostring(idx)
-        memory.write(key, cjson.encode({
+        memory.write(key, json.encode({
             role = "assistant",
             summary = summary,
             ts = os.time() * 1000
@@ -109,7 +109,7 @@ function M.compress(session, messages, system_tokens)
         local msg = messages[i]
         local msg_tokens = estimate_tokens(msg.role or "") + estimate_tokens(msg.content or "")
         if msg.tool_calls then
-            msg_tokens = msg_tokens + estimate_tokens(cjson.encode(msg.tool_calls))
+            msg_tokens = msg_tokens + estimate_tokens(json.encode(msg.tool_calls))
         end
 
         if protected[i] then
