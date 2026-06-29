@@ -38,6 +38,7 @@
 #include <errno.h>
 #include <math.h>
 #include <omp.h>  // OpenMP for parallel chapter processing
+#include "ocr_helper.h"
 
 // =============================================================================
 // 跨文件系统目录移动辅助函数（替代 system("mv ...")）
@@ -1610,8 +1611,8 @@ static int parse_chapters_json(const char* json, ChapterInfo** out_chapters, int
 }
 
 // Run ocr_cuda on a PDF, extract text + chapters.
+// Uses shared ocr_helper for binary location and I/O.
 // Returns 0 on success, -1 on failure.
-// Allocated out_text / out_chapters must be freed by caller.
 static int ocr_extract_pages(const char* book_path, const char* exe_path,
                               char** out_text, size_t* out_text_len,
                               ChapterInfo** out_chapters, int* out_chapter_count) {
@@ -1619,98 +1620,31 @@ static int ocr_extract_pages(const char* book_path, const char* exe_path,
     *out_text_len = 0;
     *out_chapters = NULL;
     *out_chapter_count = 0;
-    
-    // Build command: ocr_cuda is in the same directory as import_book
+
+    // Locate ocr_cuda binary via shared helper
     char ocr_bin[1024];
-    strncpy(ocr_bin, exe_path, sizeof(ocr_bin) - 1);
-    ocr_bin[sizeof(ocr_bin) - 1] = '\0';
-    // Replace last component (import_book) with ocr_cuda
-    char* last_slash = strrchr(ocr_bin, '/');
-    if (last_slash) {
-        size_t dir_len = last_slash - ocr_bin + 1;
-        snprintf(ocr_bin + dir_len, sizeof(ocr_bin) - dir_len, "ocr_cuda");
-    } else {
-        // No directory component: assume in current dir or PATH
-        strncpy(ocr_bin, "./ocr_cuda", sizeof(ocr_bin) - 1);
-    }
-    
-    char cmd[4096];
-    snprintf(cmd, sizeof(cmd),
-             "\"%s\" \"%s\" --dpi 200 2>/dev/null",
-             ocr_bin, book_path);
-    
-    FILE* fp = popen(cmd, "r");
-    if (!fp) {
-        fprintf(stderr, "Failed to run: %s\n", cmd);
+    ocr_find_binary(exe_path, ocr_bin, sizeof(ocr_bin));
+
+    // Run OCR: get chapters JSON + raw text
+    char *chapters_json = NULL;
+    if (ocr_run(book_path, ocr_bin, &chapters_json, out_text, out_text_len) != 0) {
+        fprintf(stderr, "OCR extraction failed\n");
+        free(chapters_json);
         return -1;
     }
-    
-    // Read first line: chapter info
-    // Format: ---OCR_CHAPTERS:{"chapters":[...]}---
-    char chapters_line[65536];
-    chapters_line[0] = '\0';
-    if (fgets(chapters_line, sizeof(chapters_line), fp) == NULL) {
-        fprintf(stderr, "Failed to read OCR chapter info\n");
-        pclose(fp);
-        return -1;
-    }
-    
-    // Strip trailing newline/cr
-    size_t clen = strlen(chapters_line);
-    while (clen > 0 && (chapters_line[clen-1] == '\n' || chapters_line[clen-1] == '\r'))
-        chapters_line[--clen] = '\0';
-    
-    // Extract JSON from ---OCR_CHAPTERS:{...}--- marker
-    char* json_start = strstr(chapters_line, "---OCR_CHAPTERS:");
-    if (json_start) {
-        json_start += 16;  // skip past "---OCR_CHAPTERS:"
-        char* json_end = strstr(json_start, "---");
-        if (json_end) *json_end = '\0';
-        
-        if (parse_chapters_json(json_start, out_chapters, out_chapter_count) != 0) {
+
+    // Parse chapters JSON
+    if (chapters_json) {
+        if (parse_chapters_json(chapters_json, out_chapters, out_chapter_count) != 0) {
             fprintf(stderr, "Warning: failed to parse OCR chapters JSON\n");
         }
+        free(chapters_json);
     }
-    
+
     printf("OCR chapters: %d\n", *out_chapter_count);
-    
-    // Read remaining lines: OCR text content
-    size_t buf_cap = 1048576;
-    size_t buf_len = 0;
-    char* text = malloc(buf_cap);
-    if (!text) {
-        pclose(fp);
-        return -1;
-    }
-    text[0] = '\0';
-    
-    char line[16384];
-    while (fgets(line, sizeof(line), fp)) {
-        size_t line_len = strlen(line);
-        if (buf_len + line_len + 1 > buf_cap) {
-            buf_cap *= 2;
-            char* new_text = realloc(text, buf_cap);
-            if (!new_text) {
-                free(text);
-                pclose(fp);
-                return -1;
-            }
-            text = new_text;
-        }
-        memcpy(text + buf_len, line, line_len + 1);
-        buf_len += line_len;
-    }
-    
-    int status = pclose(fp);
-    if (status != 0) {
-        fprintf(stderr, "OCR binary exited with status %d\n", status);
-    }
-    
-    *out_text = text;
-    *out_text_len = buf_len;
-    printf("OCR text length: %zu bytes\n", buf_len);
+    printf("OCR text length: %zu bytes\n", *out_text_len);
     printf("\n");
-    
+
     return 0;
 }
 
