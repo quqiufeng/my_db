@@ -145,8 +145,8 @@ static int move_dir(const char* src, const char* dst) {
 // 分块配置
 #define MAX_PARAGRAPHS      5000    // 单章节最大段落数
 #define MIN_PARA_LEN        50      // 最小段落长度（过滤碎片）
-#define TARGET_CHUNK_SIZE   800     // 目标段落长度（字符）
-#define MAX_CHUNK_SIZE      3000    // 最大段落长度（超过则强制切分）
+#define TARGET_CHUNK_SIZE   8000     // 目标段落长度（字符）
+#define MAX_CHUNK_SIZE      16000    // 最大段落长度（超过则强制切分）
 #define MERGE_THRESHOLD     300     // 短页合并阈值（小于此值尝试合并）
 #define PREVIEW_LEN         200     // KV Cache 中保存的预览长度
 
@@ -1534,6 +1534,7 @@ int main(int argc, char* argv[]) {
         printf("  --skip-vectors   跳过向量生成（更快，但无语义搜索）\n");
         printf("  --only-vectors   仅重新导出已有向量（需已生成过）\n");
         printf("  --generate-vectors 为已导入但无向量的页面生成向量\n");
+        printf("  --ocr            对 PDF 使用 Unlimited-OCR 高精度识别（替代 MuPDF）\n");
         printf("\n");
         printf("Examples:\n");
         printf("  %s /memory ~/book.mobi /books/my_book\n", argv[0]);
@@ -1553,6 +1554,7 @@ int main(int argc, char* argv[]) {
     int flag_skip_vectors = 0;
     int flag_only_vectors = 0;
     int flag_generate_vectors = 0;
+    int flag_ocr = 0;
     
     // 解析 flags
     for (int i = 1; i < argc; i++) {
@@ -1562,6 +1564,8 @@ int main(int argc, char* argv[]) {
             flag_only_vectors = 1;
         } else if (strcmp(argv[i], "--generate-vectors") == 0) {
             flag_generate_vectors = 1;
+        } else if (strcmp(argv[i], "--ocr") == 0) {
+            flag_ocr = 1;
         }
     }
     
@@ -1569,7 +1573,7 @@ int main(int argc, char* argv[]) {
     int pos_count = 0;
     const char* pos_args[4];
     for (int i = 1; i < argc && pos_count < 4; i++) {
-        if (strcmp(argv[i], "--skip-vectors") == 0 || strcmp(argv[i], "--only-vectors") == 0 || strcmp(argv[i], "--generate-vectors") == 0) {
+        if (strcmp(argv[i], "--skip-vectors") == 0 || strcmp(argv[i], "--only-vectors") == 0 || strcmp(argv[i], "--generate-vectors") == 0 || strcmp(argv[i], "--ocr") == 0) {
             continue;
         }
         pos_args[pos_count++] = argv[i];
@@ -2060,66 +2064,236 @@ int main(int argc, char* argv[]) {
         dlclose(lib);
         
     } else if (strcasecmp(ext, ".pdf") == 0) {
-        void* lib = load_pdf_lib();
-        if (!lib) {
-            cache_close(cache);
-            return 1;
-        }
-        
-        void* (*pdf_open)(const char*) = dlsym(lib, "pdf_open");
-        int (*pdf_get_page_count)(void*) = dlsym(lib, "pdf_get_page_count");
-        int (*pdf_extract_text)(void*, char**, size_t*) = dlsym(lib, "pdf_extract_text");
-        int (*pdf_get_chapters)(void*, void**, int*) = dlsym(lib, "pdf_get_chapters");
-        void (*pdf_close)(void*) = dlsym(lib, "pdf_close");
-        
-        if (!pdf_open || !pdf_extract_text || !pdf_close) {
-            fprintf(stderr, "Missing required PDF functions\n");
-            dlclose(lib);
-            cache_close(cache);
-            return 1;
-        }
-        
-        void* handle = pdf_open(book_path);
-        if (!handle) {
-            fprintf(stderr, "Failed to open PDF: %s\n", book_path);
-            dlclose(lib);
-            cache_close(cache);
-            return 1;
-        }
-        
-        int pages = 0;
-        if (pdf_get_page_count) {
-            pages = pdf_get_page_count(handle);
-        }
-        
-        char* text = NULL;
-        size_t text_len = 0;
-        pdf_extract_text(handle, &text, &text_len);
-        
-        ChapterInfo* chapters = NULL;
-        int chapter_count = 0;
-        if (pdf_get_chapters) {
-            pdf_get_chapters(handle, (void**)&chapters, &chapter_count);
-        }
-        
-        printf("Pages: %d\n", pages);
-        printf("Text length: %zu bytes\n", text_len);
-        printf("Chapters: %d\n", chapter_count);
-        printf("\n");
-        
         char title[256];
         strncpy(title, book_name, sizeof(title) - 1);
         title[sizeof(title) - 1] = '\0';
         
-        if (text && text_len > 0) {
-            total_pages = import_book(cache, namespace, md_dir,
-                                      title, "Unknown", text, text_len,
-                                      chapters, chapter_count);
+        if (flag_ocr) {
+            // ---- OCR 模式：使用 Unlimited-OCR 高精度识别 ----
+            printf("OCR mode: using Unlimited-OCR for PDF recognition\n");
+            printf("\n");
+            
+            char cmd[4096];
+            snprintf(cmd, sizeof(cmd),
+                     "/data/venv/bin/python3 tools/ocr_pdf.py \"%s\" --dpi 200 2>&1",
+                     book_path);
+            
+            FILE* fp = popen(cmd, "r");
+            if (!fp) {
+                fprintf(stderr, "Failed to run OCR script\n");
+                cache_close(cache);
+                return 1;
+            }
+            
+            // 读取第一行：章节信息
+            char chapters_line[65536];
+            chapters_line[0] = '\0';
+            if (fgets(chapters_line, sizeof(chapters_line), fp) == NULL) {
+                fprintf(stderr, "Failed to read OCR chapter info\n");
+                pclose(fp);
+                cache_close(cache);
+                return 1;
+            }
+            
+            // 解析章节 JSON：格式 ---OCR_CHAPTERS:{...}---
+            ChapterInfo* chapters = NULL;
+            int chapter_count = 0;
+            char* json_start = strstr(chapters_line, "---OCR_CHAPTERS:");
+            if (json_start) {
+                json_start += 15;  // skip past "---OCR_CHAPTERS:"
+                char* json_end = strstr(json_start, "---");
+                if (json_end) {
+                    *json_end = '\0';
+                    // Parse JSON to extract chapters (simple string-based parsing)
+                    // Format: {"chapters":[{"title":"...","level":1,"page":0},...]}
+                    char* chap_array = strstr(json_start, "\"chapters\"");
+                    if (chap_array) {
+                        chap_array = strchr(chap_array, '[');
+                        if (chap_array) {
+                            char* end_bracket = strchr(chap_array, ']');
+                            if (end_bracket) {
+                                *end_bracket = '\0';
+                                char* p = chap_array + 1;
+                                // Count chapters
+                                int count = 0;
+                                char* tmp = chap_array + 1;
+                                while (*tmp) {
+                                    if (*tmp == '{') count++;
+                                    tmp++;
+                                }
+                                if (count > 0) {
+                                    chapters = calloc(count, sizeof(ChapterInfo));
+                                    int idx = 0;
+                                    while (*p && idx < count) {
+                                        // Find '{'
+                                        while (*p && *p != '{') p++;
+                                        if (!*p) break;
+                                        char* entry_end = strchr(p, '}');
+                                        if (!entry_end) break;
+                                        *entry_end = '\0';
+                                        
+                                        // Extract title
+                                        char* t = strstr(p, "\"title\":\"");
+                                        if (t) {
+                                            t += 9;
+                                            char* t_end = strchr(t, '"');
+                                            if (t_end) {
+                                                *t_end = '\0';
+                                                chapters[idx].title = strdup(t);
+                                                *t_end = '"';
+                                            }
+                                        }
+                                        if (!chapters[idx].title) {
+                                            chapters[idx].title = strdup("");
+                                        }
+                                        
+                                        // Extract level
+                                        char* l = strstr(p, "\"level\":");
+                                        if (l) {
+                                            l += 8;
+                                            chapters[idx].level = atoi(l);
+                                        }
+                                        
+                                        // Extract page
+                                        char* pg = strstr(p, "\"page\":");
+                                        if (pg) {
+                                            pg += 7;
+                                            chapters[idx].offset = (size_t)atoi(pg);
+                                        }
+                                        
+                                        idx++;
+                                        p = entry_end + 1;
+                                    }
+                                    chapter_count = idx;
+                                }
+                            }
+                        }
+                    }
+                    *json_end = '-';  // restore original
+                }
+            }
+            
+            printf("OCR chapters: %d\n", chapter_count);
+            
+            // 读取剩余行：文本内容
+            // 使用动态 buffer 累积文本
+            size_t buf_cap = 1048576;  // 1MB initial
+            size_t buf_len = 0;
+            char* text = malloc(buf_cap);
+            if (!text) {
+                fprintf(stderr, "Failed to allocate OCR text buffer\n");
+                if (chapters) {
+                    for (int i = 0; i < chapter_count; i++) free(chapters[i].title);
+                    free(chapters);
+                }
+                pclose(fp);
+                cache_close(cache);
+                return 1;
+            }
+            text[0] = '\0';
+            
+            char line[16384];
+            while (fgets(line, sizeof(line), fp)) {
+                size_t line_len = strlen(line);
+                if (buf_len + line_len + 1 > buf_cap) {
+                    buf_cap *= 2;
+                    char* new_text = realloc(text, buf_cap);
+                    if (!new_text) {
+                        fprintf(stderr, "Failed to realloc OCR text buffer\n");
+                        free(text);
+                        if (chapters) {
+                            for (int i = 0; i < chapter_count; i++) free(chapters[i].title);
+                            free(chapters);
+                        }
+                        pclose(fp);
+                        cache_close(cache);
+                        return 1;
+                    }
+                    text = new_text;
+                }
+                memcpy(text + buf_len, line, line_len + 1);
+                buf_len += line_len;
+            }
+            
+            int status = pclose(fp);
+            if (status != 0) {
+                fprintf(stderr, "OCR script exited with status %d\n", status);
+            }
+            
+            size_t text_len = buf_len;
+            printf("OCR text length: %zu bytes\n", text_len);
+            printf("\n");
+            
+            if (text && text_len > 0) {
+                total_pages = import_book(cache, namespace, md_dir,
+                                          title, "Unknown", text, text_len,
+                                          chapters, chapter_count);
+            }
+            
+            free(text);
+            if (chapters) {
+                for (int i = 0; i < chapter_count; i++) free(chapters[i].title);
+                free(chapters);
+            }
+            
+        } else {
+            // ---- 原有模式：使用 MuPDF 文本提取 ----
+            void* lib = load_pdf_lib();
+            if (!lib) {
+                cache_close(cache);
+                return 1;
+            }
+            
+            void* (*pdf_open)(const char*) = dlsym(lib, "pdf_open");
+            int (*pdf_get_page_count)(void*) = dlsym(lib, "pdf_get_page_count");
+            int (*pdf_extract_text)(void*, char**, size_t*) = dlsym(lib, "pdf_extract_text");
+            int (*pdf_get_chapters)(void*, void**, int*) = dlsym(lib, "pdf_get_chapters");
+            void (*pdf_close)(void*) = dlsym(lib, "pdf_close");
+            
+            if (!pdf_open || !pdf_extract_text || !pdf_close) {
+                fprintf(stderr, "Missing required PDF functions\n");
+                dlclose(lib);
+                cache_close(cache);
+                return 1;
+            }
+            
+            void* handle = pdf_open(book_path);
+            if (!handle) {
+                fprintf(stderr, "Failed to open PDF: %s\n", book_path);
+                dlclose(lib);
+                cache_close(cache);
+                return 1;
+            }
+            
+            int pages = 0;
+            if (pdf_get_page_count) {
+                pages = pdf_get_page_count(handle);
+            }
+            
+            char* text = NULL;
+            size_t text_len = 0;
+            pdf_extract_text(handle, &text, &text_len);
+            
+            ChapterInfo* chapters = NULL;
+            int chapter_count = 0;
+            if (pdf_get_chapters) {
+                pdf_get_chapters(handle, (void**)&chapters, &chapter_count);
+            }
+            
+            printf("Pages: %d\n", pages);
+            printf("Text length: %zu bytes\n", text_len);
+            printf("Chapters: %d\n", chapter_count);
+            printf("\n");
+            
+            if (text && text_len > 0) {
+                total_pages = import_book(cache, namespace, md_dir,
+                                          title, "Unknown", text, text_len,
+                                          chapters, chapter_count);
+            }
+            
+            pdf_close(handle);
+            dlclose(lib);
         }
-        
-        pdf_close(handle);
-        dlclose(lib);
-        
     } else if (strcasecmp(ext, ".epub") == 0) {
         void* lib = load_epub_lib();
         if (!lib) {
