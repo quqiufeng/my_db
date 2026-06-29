@@ -51,6 +51,10 @@ static constexpr int IMAGE_SIZE = 640;
 static constexpr int NUM_QUERIES = 10;
 static constexpr int64_t IMG_TOKENS_PER_IMAGE = (NUM_QUERIES + 1) * NUM_QUERIES + 1; // 111
 
+// Default paths (can be overridden via --weights argument)
+static std::string WEIGHT_DIR = "/data/models/baidu";
+static constexpr int MAX_NEW_TOKENS = 2048;  // max tokens to generate
+
 // TensorPack format constants
 static constexpr uint32_t TP_MAGIC = 0x5052434f; // "OCRP" little-endian
 static constexpr uint32_t TP_VERSION = 1;
@@ -488,7 +492,7 @@ static void run_ocr(const std::string& pdf_path, int dpi,
         fimg = torch::nn::functional::interpolate(fimg,
             torch::nn::functional::InterpolateFuncOptions()
                 .size(std::vector<int64_t>({IMAGE_SIZE, IMAGE_SIZE}))
-                .mode(torch::kNearest));
+                .mode(torch::kBilinear));
         fimg = (fimg - 0.5) / 0.5; // normalize to [-1, 1]
         page_tensors.push_back(fimg.squeeze(0).to(dtype).cuda());
         fprintf(stderr, "\r  [OCR] Page %d/%d rendered (%.1f MP)", p+1, npages, (double)pw*ph/1e6);
@@ -590,13 +594,10 @@ static void run_ocr(const std::string& pdf_path, int dpi,
             h = o;
             kvs.push_back(nk);
             kvs.push_back(nv);
-            double lm = h.mean().item().toDouble(), ls = h.std().item().toDouble();
-            // Dump first 10 values of position 0 for comparison
-            fprintf(stderr, "  [OCR] Layer %d hidden: mean=%.4f std=%.4f first10=[", i+1, lm, ls);
-            for (int k = 0; k < 10 && k < h.size(2); k++) {
-                fprintf(stderr, "%s%.4f", k>0?",":"", h[0][0][k].item().toDouble());
+            if (i == 0 || i == NUM_LAYERS - 1) {
+                double lm = h.mean().item().toDouble(), ls = h.std().item().toDouble();
+                fprintf(stderr, "  [OCR] Layer %d hidden: mean=%.4f std=%.4f\n", i+1, lm, ls);
             }
-            fprintf(stderr, "]\n");
         }
         hidden = h;
     }
@@ -637,13 +638,12 @@ static void run_ocr(const std::string& pdf_path, int dpi,
                 id0, id1, id2, id3, id4, v0, v1, v2, v3, v4);
     }
     
-    // ─── Decode loop (greedy, max 4096 tokens) ───
+    // ─── Decode loop ───
     fprintf(stderr, "[OCR] Generating...\n");
-    const int MAX_NEW = 1024;
     std::vector<int64_t> output_ids;
     int64_t pos = seq_len;
     
-    for (int step = 0; step < MAX_NEW; step++) {
+    for (int step = 0; step < MAX_NEW_TOKENS; step++) {
         torch::Tensor next_embed;
         { torch::NoGradGuard ng;
             int64_t seq_len = hidden.size(1);
@@ -693,8 +693,43 @@ static void run_ocr(const std::string& pdf_path, int dpi,
     std::string text = vocab.decode(output_ids);
     text.erase(0, text.find_first_not_of(" \t\n\r"));
     
-    // Output chapters (empty - no PDF TOC extraction here, caller handles it)
-    std::cout << "---OCR_CHAPTERS:{\"chapters\":[]}---" << std::endl;
+    // Extract PDF table of contents (outline) using MuPDF
+    std::string chapters_json = "[]";
+    fz_outline* outline = nullptr;
+    fz_try(ctx) { outline = fz_load_outline(ctx, doc); } fz_catch(ctx) {}
+    if (outline) {
+        // Build JSON array of chapters
+        std::string json = "[";
+        bool first = true;
+        std::function<void(fz_outline*, int)> walk = [&](fz_outline* node, int depth) {
+            while (node) {
+                if (node->title && strlen(node->title) > 0) {
+                    if (!first) json += ",";
+                    first = false;
+                    // Escape JSON string
+                    std::string title;
+                    for (const char* p = node->title; *p; p++) {
+                        if (*p == '"' || *p == '\\') { title += '\\'; title += *p; }
+                        else if (*p == '\n') title += "\\n";
+                        else if (*p == '\r') title += "\\r";
+                        else if (*p == '\t') title += "\\t";
+                        else if ((unsigned char)*p < 0x20) { /* skip control chars */ }
+                        else title += *p;
+                    }
+                    int page = node->page.page;
+                    json += "{\"title\":\"" + title + "\",\"level\":" + std::to_string(depth)
+                          + ",\"page\":" + std::to_string(page) + "}";
+                }
+                if (node->down) walk(node->down, depth + 1);
+                node = node->next;
+            }
+        };
+        walk(outline, 1);
+        json += "]";
+        chapters_json = json;
+        fz_drop_outline(ctx, outline);
+    }
+    std::cout << "---OCR_CHAPTERS:{\"chapters\":" << chapters_json << "}---" << std::endl;
     std::cout << text << std::endl;
     
     fz_drop_document(ctx, doc);
@@ -703,17 +738,18 @@ static void run_ocr(const std::string& pdf_path, int dpi,
 
 int main(int argc, char** argv) {
     if (argc < 2) {
-        std::cerr << "Usage: " << argv[0] << " <pdf_path> [--dpi 200]" << std::endl;
+        std::cerr << "Usage: " << argv[0] << " <pdf_path> [--dpi 200] [--weights /path/to/dir]" << std::endl;
         return 1;
     }
     std::string pdf_path = argv[1];
     int dpi = 200;
+    std::string wdir = WEIGHT_DIR;
     for (int i = 2; i < argc; i++) {
         if (std::string(argv[i]) == "--dpi" && i + 1 < argc)
             dpi = std::atoi(argv[++i]);
+        else if (std::string(argv[i]) == "--weights" && i + 1 < argc)
+            wdir = argv[++i];
     }
-    
-    std::string wdir = "/data/models/baidu";
     fprintf(stderr, "[OCR] Loading model from %s...\n", wdir.c_str());
     
     Weights w = load_weights(wdir);

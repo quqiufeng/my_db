@@ -110,3 +110,4 @@ opencode/libopencode_agent.a
 opencode/opencode_cli
 opencode/gui/target/
 opencode/gui/Cargo.lock
+tools/pdf2md

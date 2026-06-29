@@ -324,7 +324,82 @@ elon_musk/
 ./explore_book.sh /books/ddia chapter "08-Distributed_Consensus"
 ```
 
-### 3. cache_query (底层查询工具)
+### 3. pdf2md (PDF → Markdown 转换器)
+
+**路径**：`tools/pdf2md`
+
+**功能**：将 PDF 文档按目录（书签）拆分为逐章 Markdown 文件。默认使用 **百度 Unlimited-OCR** 模型识别文字（包含页面中的图片/插图文字），同时提取页面中的嵌入图片保存为独立文件。
+
+**用法**：
+```bash
+./tools/pdf2md <input.pdf> <output_dir> [options]
+```
+
+**选项**：
+| 参数 | 说明 |
+|------|------|
+| `--dpi NN` | 页面渲染 DPI（默认 200） |
+| `--help` | 显示帮助信息 |
+
+**输出结构**：
+```
+<output_dir>/
+├── chapter_000_FrontMatter.md         # 正文前的内容（按 PDF 书签分割）
+├── chapter_001_Introduction.md
+├── chapter_002_Chapter_Title.md
+├── page_000001.png                    # 完整页面截图（OCR 需要渲染）
+├── page_000002.png
+├── page_000001_img_000.png            # 从页面中提取的嵌入图片/插图
+├── page_000001_img_001.png
+└── ...
+```
+
+**工作原理**：
+```
+pdf2md
+  │
+  ├── 1. MuPDF 打开 PDF，提取目录结构（书签）
+  ├── 2. popen() 调用 tools/ocr_cuda 识别全部页面文字
+  ├── 3. MuPDF 渲染每一页为 PNG（page_NNNNNN.png）
+  ├── 4. MuPDF stext 检测 IMAGE 块，提取嵌入图片
+  │      （page_NNNNNN_img_MMM.png，如截图、照片）
+  └── 5. 按目录分组写入 .md 文件（OCR 识别文本 + 图片引用）
+```
+
+**OCR 引擎**：与 `import_book --ocr` 共享同一个 `tools/ocr_cuda` 二进制（百度 Unlimited-OCR DeepSeek-V2 MoE 架构）。
+
+**示例**：
+```bash
+# 基本转换
+./tools/pdf2md ~/book.pdf ~/output
+
+# 更高分辨率
+./tools/pdf2md ~/book.pdf ~/output --dpi 300
+
+# 实际输出效果
+# → chapter_000_FrontMatter.md     (pages 1-3)
+# → chapter_001_Introduction.md    (pages 4-4)
+# → chapter_002_Chapter_1.md       (pages 5-48)
+# → ...
+# → page_000001.png, page_000002.png ...
+# → page_000005_img_000.png  (第5页的插图)
+```
+
+**编译依赖**：MuPDF 静态库（`/opt/mupdf/build/release/libmupdf.a`）、`tools/ocr_cuda` 二进制。
+
+**编译命令**：
+```bash
+gcc -std=c11 -D_GLIBCXX_USE_CXX11_ABI=0 \
+    -I/opt/mupdf/include \
+    -o tools/pdf2md \
+    tools/pdf2md.c \
+    -L/opt/mupdf/build/release -lmupdf -lmupdf-third \
+    -lm -lpthread
+```
+
+**性能参考**：613 页数字 PDF（DDIA），200 DPI 渲染 + OCR，约 5-10 分钟（取决于 GPU 性能和页面复杂度）。
+
+### 4. cache_query (底层查询工具)
 
 **路径**：`tools/cache_query`
 

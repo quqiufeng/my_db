@@ -22,6 +22,7 @@
  *   ./import_book /memory ~/paper.pdf
  */
 
+#define _GNU_SOURCE
 #include "cache.h"
 #include "onnx_embedder.h"
 #include "metrics.h"
@@ -1517,6 +1518,203 @@ static void* load_epub_lib(void) {
 }
 
 // =============================================================================
+// OCR 提取（通过 ocr_cuda C++ 二进制）
+// =============================================================================
+
+// Simple JSON chapter parser for the format produced by ocr_cuda:
+// {"chapters":[{"title":"...","level":1,"page":0},...]}
+// Returns 0 on success, -1 on parse error.
+static int parse_chapters_json(const char* json, ChapterInfo** out_chapters, int* out_count) {
+    *out_chapters = NULL;
+    *out_count = 0;
+    
+    if (!json) return -1;
+    
+    // Find the chapters array
+    const char* arr = strstr(json, "\"chapters\"");
+    if (!arr) return 0;  // no chapters key, that's OK
+    
+    arr = strchr(arr, '[');
+    if (!arr) return -1;
+    arr++;  // skip '['
+    
+    const char* end = strrchr(arr, ']');
+    if (!end) return -1;
+    
+    // Count entries by counting '{'
+    int count = 0;
+    for (const char* p = arr; p < end; p++) {
+        if (*p == '{') count++;
+    }
+    if (count == 0) return 0;
+    
+    ChapterInfo* chapters = calloc(count, sizeof(ChapterInfo));
+    if (!chapters) return -1;
+    
+    int idx = 0;
+    const char* p = arr;
+    while (p < end && idx < count) {
+        // Skip to next '{'
+        while (p < end && *p != '{') p++;
+        if (p >= end) break;
+        
+        // Find matching '}'
+        int brace = 1;
+        const char* entry_end = p + 1;
+        while (entry_end < end && brace > 0) {
+            if (*entry_end == '{') brace++;
+            else if (*entry_end == '}') brace--;
+            entry_end++;
+        }
+        if (brace != 0) break;  // malformed
+        
+        // title
+        const char* t = strstr(p, "\"title\":\"");
+        if (t && t < entry_end) {
+            t += 9;  // skip past "\"title\":\""
+            const char* t_end = strchr(t, '"');
+            if (t_end && t_end < entry_end) {
+                size_t tlen = t_end - t;
+                chapters[idx].title = malloc(tlen + 1);
+                if (chapters[idx].title) {
+                    memcpy(chapters[idx].title, t, tlen);
+                    chapters[idx].title[tlen] = '\0';
+                }
+            }
+        }
+        if (!chapters[idx].title) {
+            chapters[idx].title = strdup("");
+        }
+        
+        // level
+        const char* l = strstr(p, "\"level\":");
+        if (l && l < entry_end) {
+            l += 8;  // skip past "\"level\":"
+            chapters[idx].level = atoi(l);
+        }
+        
+        // page
+        const char* pg = strstr(p, "\"page\":");
+        if (pg && pg < entry_end) {
+            pg += 7;  // skip past "\"page\":"
+            chapters[idx].offset = (size_t)atoi(pg);
+        }
+        
+        idx++;
+        p = entry_end;
+    }
+    
+    *out_chapters = chapters;
+    *out_count = idx;
+    return 0;
+}
+
+// Run ocr_cuda on a PDF, extract text + chapters.
+// Returns 0 on success, -1 on failure.
+// Allocated out_text / out_chapters must be freed by caller.
+static int ocr_extract_pages(const char* book_path, const char* exe_path,
+                              char** out_text, size_t* out_text_len,
+                              ChapterInfo** out_chapters, int* out_chapter_count) {
+    *out_text = NULL;
+    *out_text_len = 0;
+    *out_chapters = NULL;
+    *out_chapter_count = 0;
+    
+    // Build command: ocr_cuda is in the same directory as import_book
+    char ocr_bin[1024];
+    strncpy(ocr_bin, exe_path, sizeof(ocr_bin) - 1);
+    ocr_bin[sizeof(ocr_bin) - 1] = '\0';
+    // Replace last component (import_book) with ocr_cuda
+    char* last_slash = strrchr(ocr_bin, '/');
+    if (last_slash) {
+        size_t dir_len = last_slash - ocr_bin + 1;
+        snprintf(ocr_bin + dir_len, sizeof(ocr_bin) - dir_len, "ocr_cuda");
+    } else {
+        // No directory component: assume in current dir or PATH
+        strncpy(ocr_bin, "./ocr_cuda", sizeof(ocr_bin) - 1);
+    }
+    
+    char cmd[4096];
+    snprintf(cmd, sizeof(cmd),
+             "\"%s\" \"%s\" --dpi 200 2>/dev/null",
+             ocr_bin, book_path);
+    
+    FILE* fp = popen(cmd, "r");
+    if (!fp) {
+        fprintf(stderr, "Failed to run: %s\n", cmd);
+        return -1;
+    }
+    
+    // Read first line: chapter info
+    // Format: ---OCR_CHAPTERS:{"chapters":[...]}---
+    char chapters_line[65536];
+    chapters_line[0] = '\0';
+    if (fgets(chapters_line, sizeof(chapters_line), fp) == NULL) {
+        fprintf(stderr, "Failed to read OCR chapter info\n");
+        pclose(fp);
+        return -1;
+    }
+    
+    // Strip trailing newline/cr
+    size_t clen = strlen(chapters_line);
+    while (clen > 0 && (chapters_line[clen-1] == '\n' || chapters_line[clen-1] == '\r'))
+        chapters_line[--clen] = '\0';
+    
+    // Extract JSON from ---OCR_CHAPTERS:{...}--- marker
+    char* json_start = strstr(chapters_line, "---OCR_CHAPTERS:");
+    if (json_start) {
+        json_start += 16;  // skip past "---OCR_CHAPTERS:"
+        char* json_end = strstr(json_start, "---");
+        if (json_end) *json_end = '\0';
+        
+        if (parse_chapters_json(json_start, out_chapters, out_chapter_count) != 0) {
+            fprintf(stderr, "Warning: failed to parse OCR chapters JSON\n");
+        }
+    }
+    
+    printf("OCR chapters: %d\n", *out_chapter_count);
+    
+    // Read remaining lines: OCR text content
+    size_t buf_cap = 1048576;
+    size_t buf_len = 0;
+    char* text = malloc(buf_cap);
+    if (!text) {
+        pclose(fp);
+        return -1;
+    }
+    text[0] = '\0';
+    
+    char line[16384];
+    while (fgets(line, sizeof(line), fp)) {
+        size_t line_len = strlen(line);
+        if (buf_len + line_len + 1 > buf_cap) {
+            buf_cap *= 2;
+            char* new_text = realloc(text, buf_cap);
+            if (!new_text) {
+                free(text);
+                pclose(fp);
+                return -1;
+            }
+            text = new_text;
+        }
+        memcpy(text + buf_len, line, line_len + 1);
+        buf_len += line_len;
+    }
+    
+    int status = pclose(fp);
+    if (status != 0) {
+        fprintf(stderr, "OCR binary exited with status %d\n", status);
+    }
+    
+    *out_text = text;
+    *out_text_len = buf_len;
+    printf("OCR text length: %zu bytes\n", buf_len);
+    printf("\n");
+    
+    return 0;
+}
+
+// =============================================================================
 // 主函数
 // =============================================================================
 
@@ -2069,165 +2267,27 @@ int main(int argc, char* argv[]) {
         title[sizeof(title) - 1] = '\0';
         
         if (flag_ocr) {
-            // ---- OCR 模式：使用 Unlimited-OCR 高精度识别 ----
+            // ---- OCR 模式：使用 ocr_cuda C++ 二进制高精度识别 ----
             printf("OCR mode: using Unlimited-OCR for PDF recognition\n");
             printf("\n");
             
-            char cmd[4096];
-            snprintf(cmd, sizeof(cmd),
-                     "/data/venv/bin/python3 tools/ocr_pdf.py \"%s\" --dpi 200 2>&1",
-                     book_path);
-            
-            FILE* fp = popen(cmd, "r");
-            if (!fp) {
-                fprintf(stderr, "Failed to run OCR script\n");
-                cache_close(cache);
-                return 1;
-            }
-            
-            // 读取第一行：章节信息
-            char chapters_line[65536];
-            chapters_line[0] = '\0';
-            if (fgets(chapters_line, sizeof(chapters_line), fp) == NULL) {
-                fprintf(stderr, "Failed to read OCR chapter info\n");
-                pclose(fp);
-                cache_close(cache);
-                return 1;
-            }
-            
-            // 解析章节 JSON：格式 ---OCR_CHAPTERS:{...}---
+            char* text = NULL;
+            size_t text_len = 0;
             ChapterInfo* chapters = NULL;
             int chapter_count = 0;
-            char* json_start = strstr(chapters_line, "---OCR_CHAPTERS:");
-            if (json_start) {
-                json_start += 15;  // skip past "---OCR_CHAPTERS:"
-                char* json_end = strstr(json_start, "---");
-                if (json_end) {
-                    *json_end = '\0';
-                    // Parse JSON to extract chapters (simple string-based parsing)
-                    // Format: {"chapters":[{"title":"...","level":1,"page":0},...]}
-                    char* chap_array = strstr(json_start, "\"chapters\"");
-                    if (chap_array) {
-                        chap_array = strchr(chap_array, '[');
-                        if (chap_array) {
-                            char* end_bracket = strchr(chap_array, ']');
-                            if (end_bracket) {
-                                *end_bracket = '\0';
-                                char* p = chap_array + 1;
-                                // Count chapters
-                                int count = 0;
-                                char* tmp = chap_array + 1;
-                                while (*tmp) {
-                                    if (*tmp == '{') count++;
-                                    tmp++;
-                                }
-                                if (count > 0) {
-                                    chapters = calloc(count, sizeof(ChapterInfo));
-                                    int idx = 0;
-                                    while (*p && idx < count) {
-                                        // Find '{'
-                                        while (*p && *p != '{') p++;
-                                        if (!*p) break;
-                                        char* entry_end = strchr(p, '}');
-                                        if (!entry_end) break;
-                                        *entry_end = '\0';
-                                        
-                                        // Extract title
-                                        char* t = strstr(p, "\"title\":\"");
-                                        if (t) {
-                                            t += 9;
-                                            char* t_end = strchr(t, '"');
-                                            if (t_end) {
-                                                *t_end = '\0';
-                                                chapters[idx].title = strdup(t);
-                                                *t_end = '"';
-                                            }
-                                        }
-                                        if (!chapters[idx].title) {
-                                            chapters[idx].title = strdup("");
-                                        }
-                                        
-                                        // Extract level
-                                        char* l = strstr(p, "\"level\":");
-                                        if (l) {
-                                            l += 8;
-                                            chapters[idx].level = atoi(l);
-                                        }
-                                        
-                                        // Extract page
-                                        char* pg = strstr(p, "\"page\":");
-                                        if (pg) {
-                                            pg += 7;
-                                            chapters[idx].offset = (size_t)atoi(pg);
-                                        }
-                                        
-                                        idx++;
-                                        p = entry_end + 1;
-                                    }
-                                    chapter_count = idx;
-                                }
-                            }
-                        }
-                    }
-                    *json_end = '-';  // restore original
-                }
-            }
             
-            printf("OCR chapters: %d\n", chapter_count);
-            
-            // 读取剩余行：文本内容
-            // 使用动态 buffer 累积文本
-            size_t buf_cap = 1048576;  // 1MB initial
-            size_t buf_len = 0;
-            char* text = malloc(buf_cap);
-            if (!text) {
-                fprintf(stderr, "Failed to allocate OCR text buffer\n");
-                if (chapters) {
-                    for (int i = 0; i < chapter_count; i++) free(chapters[i].title);
-                    free(chapters);
+            if (ocr_extract_pages(book_path, argv[0],
+                                  &text, &text_len,
+                                  &chapters, &chapter_count) == 0) {
+                if (text && text_len > 0) {
+                    total_pages = import_book(cache, namespace, md_dir,
+                                              title, "Unknown", text, text_len,
+                                              chapters, chapter_count);
                 }
-                pclose(fp);
+            } else {
+                fprintf(stderr, "OCR extraction failed\n");
                 cache_close(cache);
                 return 1;
-            }
-            text[0] = '\0';
-            
-            char line[16384];
-            while (fgets(line, sizeof(line), fp)) {
-                size_t line_len = strlen(line);
-                if (buf_len + line_len + 1 > buf_cap) {
-                    buf_cap *= 2;
-                    char* new_text = realloc(text, buf_cap);
-                    if (!new_text) {
-                        fprintf(stderr, "Failed to realloc OCR text buffer\n");
-                        free(text);
-                        if (chapters) {
-                            for (int i = 0; i < chapter_count; i++) free(chapters[i].title);
-                            free(chapters);
-                        }
-                        pclose(fp);
-                        cache_close(cache);
-                        return 1;
-                    }
-                    text = new_text;
-                }
-                memcpy(text + buf_len, line, line_len + 1);
-                buf_len += line_len;
-            }
-            
-            int status = pclose(fp);
-            if (status != 0) {
-                fprintf(stderr, "OCR script exited with status %d\n", status);
-            }
-            
-            size_t text_len = buf_len;
-            printf("OCR text length: %zu bytes\n", text_len);
-            printf("\n");
-            
-            if (text && text_len > 0) {
-                total_pages = import_book(cache, namespace, md_dir,
-                                          title, "Unknown", text, text_len,
-                                          chapters, chapter_count);
             }
             
             free(text);
