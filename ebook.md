@@ -328,7 +328,7 @@ elon_musk/
 
 **路径**：`tools/pdf2md`
 
-**功能**：将 PDF 文档按目录（书签）拆分为逐章 Markdown 文件。默认使用 **百度 Unlimited-OCR** 模型识别文字（包含页面中的图片/插图文字），同时提取页面中的嵌入图片保存为独立文件。
+**功能**：将 PDF 文档按目录（书签）拆分为逐章 Markdown 文件。调用 **百度 Unlimited-OCR** 模型识别文字（C++ 实现，无 Python 依赖），同时提取页面中的嵌入图片保存为独立文件。
 
 **用法**：
 ```bash
@@ -359,7 +359,8 @@ elon_musk/
 pdf2md
   │
   ├── 1. MuPDF 打开 PDF，提取目录结构（书签）
-  ├── 2. popen() 调用 tools/ocr_cuda 识别全部页面文字
+  ├── 2. popen() 调用 tools/ocr_cuda 流式识别页面文字
+  │      （逐页输出，不等全部识别完）
   ├── 3. MuPDF 渲染每一页为 PNG（page_NNNNNN.png）
   ├── 4. MuPDF stext 检测 IMAGE 块，提取嵌入图片
   │      （page_NNNNNN_img_MMM.png，如截图、照片）
@@ -397,7 +398,7 @@ gcc -std=c11 -D_GLIBCXX_USE_CXX11_ABI=0 \
     -lm -lpthread
 ```
 
-**性能参考**：613 页数字 PDF（DDIA），200 DPI 渲染 + OCR，约 5-10 分钟（取决于 GPU 性能和页面复杂度）。
+**性能参考**：613 页数字 PDF（DDIA），150 DPI 渲染 + OCR，约 5-10 分钟（取决于 GPU 性能和页面复杂度）。第 1 页结果在 ~30 秒内即可输出（流式），剩余页陆续产出。
 
 ### 4. cache_query (底层查询工具)
 
@@ -473,16 +474,57 @@ gcc -std=c11 -D_GLIBCXX_USE_CXX11_ABI=0 \
       │ popen() 调用
       ▼
   tools/ocr_cuda (C++ 独立二进制)
-      │
-      ├── 1. MuPDF 渲染 PDF 页面为 RGB 图像
-      ├── 2. TorchScript Vision Pipeline (SAM + CLIP) 提取图像特征
-      ├── 3. Decoder: 12 层 Transformer (SlidingWindowLlamaAttention + MoE)
-      │      ├── 路由: top-6 of 64 experts, softmax 门控 (norm_topk_prob=False)
-      │      ├── 共享: 2 个共享专家 (intermediate=1792)
-      │      ├── 层 0: 稠密 MLP (intermediate=6848)
-      │      └── 层 1-11: MoE + RMSNorm + RoPE
-      ├── 4. lm_head 投影到词表 (129280)
-      └── 5. 贪心解码 + EOS 停止 → JSON 章节 + OCR 文本
+
+  流式处理每页（render → vision → OCR → 输出）：
+      ┌─────────────────────────────────────┐
+      │         for each page 0..N          │
+      │                                     │
+      │  ┌──────────┐  ┌──────────┐         │
+      │  │ MuPDF    │  │  Vision  │         │
+      │  │ Render   │─→│ Pipeline │         │
+      │  │ (RGB)    │  │ (SAM+CLIP)│         │
+      │  └──────────┘  └────┬─────┘         │
+      │                     │               │
+      │  ┌──────────────────▼──────────┐    │
+      │  │  Input: BOS + 111×<image>  │    │
+      │  │  + "document parsing."     │    │
+      │  │  (115 tokens)              │    │
+      │  └──────────────────┬──────────┘    │
+      │                     │               │
+      │  ┌──────────────────▼──────────┐    │
+      │  │   Decoder: 12 层 Transformer│    │
+      │  │   (MoE 64 experts, top-6)   │    │
+      │  │   RMSNorm + RoPE + 35-gram  │    │
+      │  │   防重复解码                 │    │
+      │  └──────────────────┬──────────┘    │
+      │                     │               │
+      │  ┌──────────────────▼──────────┐    │
+      │  │   lm_head → 词表 (129280)   │    │
+      │  │   贪心解码 → EOS 停止       │    │
+      │  └──────────────────┬──────────┘    │
+      │                     │               │
+      │  ┌──────────────────▼──────────┐    │
+      │  │  decode 清理:               │    │
+      │  │  · Ċ → 换行                │    │
+      │  │  · <|...|> 标签剥离         │    │
+      │  │  · 坐标 [x,y,w,h] 清除      │    │
+      │  │  · EOS/特殊字符去除          │    │
+      │  └──────────────────┬──────────┘    │
+      │                     │               │
+      │  stdout: <PAGE>\n识别文字\n        │
+      └─────────────────────┼───────────────┘
+                            │
+                    累计所有页输出
+
+  stdout 格式:
+  ---OCR_CHAPTERS:{"chapters":[{...},...]}---  ＜-- 先输出（立即）
+  <PAGE>                                          ＜-- 逐页流式输出
+  header O'REILLY®
+  title Designing Data-Intensive Applications
+  text Data is at the center of...
+  <PAGE>
+  text Chapter 1. Reliable...
+  ...
 ```
 
 #### 相关代码文件
@@ -602,23 +644,32 @@ pclose(fp);
 
 # 内部会调用:
 # /opt/my_db/tools/ocr_cuda "/path/to/document.pdf"
-# 输出格式:
-# ---OCR_CHAPTERS:{"chapters":[]}---
-# <PAGE><|det|>text [x1,y1,x2,y2]<|/det|>识别文本...
+# 输出格式 (流式):
+# ---OCR_CHAPTERS:{"chapters":[...]}---   ← 立即输出
+# <PAGE>                                    ← 逐页流式
+# header O'REILLY®
+# title Designing Data-Intensive Applications
+# text Data is at the center of...
+# <PAGE>
+# ...
 ```
 
 #### 技术要点
 
-**MoE 路由修复**：在 C++ 移植过程中，修正了以下关键差异：
+**C++ 移植关键修复**：
 
 | 问题 | 现象 | 修复 |
 |------|------|------|
 | MoE 权重归一化 | 输出概率值错误 (~19 vs 正确 ~42) | `norm_topk_prob=False`，top-k 权重直接使用 raw softmax 值，不做归一化 |
 | 缺少 final RMSNorm | 层输出直接送 lm_head，logits 全错 | 加载 `model.norm.weight`，12 层 decoder 后追加一次 RMSNorm |
 | RoPE 计算 NaN | inv_freq 公式错误导致全 NaN | `1.0 / pow(theta, arange/dim)` 而非 `(arange/dim).pow(-1)*theta` |
-| 解码因果掩码 | 单 token decode 时位置 0 以外的全被 mask | Q=1 时跳过 causal mask（新 token 应 attend 到所有 KV cache） |
+| 注意力因果掩码 | 大序列 O(T²) 显存爆炸 | 改为 O(Q×T) broadcasting 逐块 prefill |
+| 滑动窗口溢出 | 多页序列超出模型 128 窗口限制 | 改为逐页推理（每页 115 tokens < 128） |
+| 输出重复循环 | 贪心解码陷入重复 n-gram | 添加 35-gram 防重复 + repetition penalty 1.2 |
+| 输出含大量 markup | `<\|det\|>type [x,y,w,h]<\|/det\|>` 等 | decode 时清理：标签剥离、坐标清除、`Ċ`→换行 |
+| 权重加载冗余 | CPU 加载 → 转 bf16 → 拷 GPU | load_tensorpack 直接写入 GPU 显存 |
 
-**性能**：RTX 3080 20GB 下，每页 OCR 约 0.5-1 秒（含 vision pipeline + 12 层 decoder + 1024 token 生成）。
+**性能**：RTX 3080 20GB 下，每页 OCR 约 0.5-1 秒（含 MuPDF 渲染 + vision pipeline + 12 层 decoder + 贪心解码）。第 1 页结果在 ~30 秒内输出，后续逐页流式产出，无需等待全部处理完毕。
 
 ---
 ## 可做的应用方向
