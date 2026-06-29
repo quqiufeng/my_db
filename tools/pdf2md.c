@@ -52,25 +52,50 @@ typedef struct {
 typedef struct {
     char *text;       /* OCR text for this page */
     char *img_refs;   /* accumulated ![](ref) markers for embedded figures */
-    int npage;        /* 0-based page number */
+    int  npage;       /* 0-based page number */
 } PageContent;
 
 /* ─── Forward declarations ─── */
 static Chapter *extract_outline(fz_context *ctx, fz_document *doc, int *count);
-static void free_chapters(Chapter *ch, int count);
-static void save_page_png(fz_context *ctx, fz_document *doc, int page_num,
-                           const char *out_dir, int dpi);
-static int extract_embedded_images(fz_context *ctx, fz_document *doc,
-                                    int page_num, const char *out_dir,
-                                    int *img_counter,
-                                    PageContent *pages);
-static int write_chapter_md(const char *out_dir, int idx, const Chapter *ch,
-                             int start_page, int end_page,
-                             PageContent *pages, int total_pages);
+static void     free_chapters(Chapter *ch, int count);
+static void     save_page_png(fz_context *ctx, fz_document *doc, int page_num,
+                              const char *out_dir, int dpi);
+static int      extract_embedded_images(fz_context *ctx, fz_document *doc,
+                                        int page_num, const char *out_dir,
+                                        int *img_counter,
+                                        PageContent *pages);
+static int      write_chapter_md(const char *out_dir, int idx,
+                                 const Chapter *ch,
+                                 int start_page, int end_page,
+                                 PageContent *pages, int total_pages);
 
 /* ===================================================================
- * PDF outline (TOC) extraction
+ * PDF outline (TOC) extraction — single-pass dynamic array.
+ *
+ * Recursively walks the fz_outline tree to arbitrary depth and
+ * accumulates entries using a growing array.
  * =================================================================== */
+static void walk_outline(fz_outline *node, int level,
+                         Chapter **ch_arr, int *count, int *capacity) {
+    while (node) {
+        if (node->title && node->title[0] != '\0') {
+            if (*count >= *capacity) {
+                *capacity = (*capacity == 0) ? 32 : (*capacity * 2);
+                Chapter *tmp = realloc(*ch_arr, *capacity * sizeof(Chapter));
+                if (!tmp) return;
+                *ch_arr = tmp;
+            }
+            (*ch_arr)[*count].title = strdup(node->title);
+            (*ch_arr)[*count].level = level;
+            (*ch_arr)[*count].page  = node->page.page;
+            (*count)++;
+        }
+        if (node->down)
+            walk_outline(node->down, level + 1, ch_arr, count, capacity);
+        node = node->next;
+    }
+}
+
 static Chapter *extract_outline(fz_context *ctx, fz_document *doc, int *count) {
     *count = 0;
 
@@ -79,53 +104,16 @@ static Chapter *extract_outline(fz_context *ctx, fz_document *doc, int *count) {
     fz_catch(ctx) { return NULL; }
     if (!root) return NULL;
 
-    /* First pass: count entries with titles */
-    int n = 0;
-    {
-        fz_outline *node = root;
-        while (node) {
-            if (node->title && strlen(node->title) > 0) n++;
-            if (node->down) {
-                fz_outline *child = node->down;
-                while (child) {
-                    if (child->title && strlen(child->title) > 0) n++;
-                    child = child->next;
-                }
-            }
-            node = node->next;
-        }
-    }
-    if (n == 0) { fz_drop_outline(ctx, root); return NULL; }
-
-    Chapter *ch = calloc(n, sizeof(Chapter));
-    if (!ch) { fz_drop_outline(ctx, root); return NULL; }
-
-    int idx = 0;
-    fz_outline *node = root;
-    while (node && idx < n) {
-        if (node->title && strlen(node->title) > 0) {
-            ch[idx].title = strdup(node->title);
-            ch[idx].level = 1;
-            ch[idx].page = node->page.page;
-            idx++;
-        }
-        if (node->down) {
-            fz_outline *child = node->down;
-            while (child && idx < n) {
-                if (child->title && strlen(child->title) > 0) {
-                    ch[idx].title = strdup(child->title);
-                    ch[idx].level = 2;
-                    ch[idx].page = child->page.page;
-                    idx++;
-                }
-                child = child->next;
-            }
-        }
-        node = node->next;
-    }
+    int capacity = 0;
+    Chapter *ch = NULL;
+    walk_outline(root, 1, &ch, count, &capacity);
 
     fz_drop_outline(ctx, root);
-    *count = idx;
+
+    if (*count == 0) {
+        free(ch);
+        return NULL;
+    }
     return ch;
 }
 
@@ -188,7 +176,8 @@ static int extract_embedded_images(fz_context *ctx, fz_document *doc,
                 found++;
 
                 char img_path[1024];
-                snprintf(img_path, sizeof(img_path), "%s/page_%06d_img_%03d.png",
+                snprintf(img_path, sizeof(img_path),
+                         "%s/page_%06d_img_%03d.png",
                          out_dir, page_num + 1, img_idx);
 
                 fz_pixmap *img_pix = fz_get_pixmap_from_image(ctx,
@@ -200,19 +189,18 @@ static int extract_embedded_images(fz_context *ctx, fz_document *doc,
 
                 /* Append image reference to page content */
                 char marker[256];
-                snprintf(marker, sizeof(marker),
-                         "\n\n![Figure](page_%06d_img_%03d.png)",
-                         page_num + 1, img_idx);
-                if (pages && pages[page_num].img_refs) {
+                int marklen = snprintf(marker, sizeof(marker),
+                            "\n\n![Figure](page_%06d_img_%03d.png)",
+                            page_num + 1, img_idx);
+                if (pages && page_num >= 0 && pages[page_num].img_refs) {
                     size_t old = strlen(pages[page_num].img_refs);
-                    size_t add = strlen(marker);
                     char *tmp = realloc(pages[page_num].img_refs,
-                                        old + add + 1);
+                                        old + (size_t)marklen + 1);
                     if (tmp) {
-                        memcpy(tmp + old, marker, add + 1);
+                        memcpy(tmp + old, marker, (size_t)marklen + 1);
                         pages[page_num].img_refs = tmp;
                     }
-                } else if (pages) {
+                } else if (pages && page_num >= 0) {
                     pages[page_num].img_refs = strdup(marker);
                 }
             }
@@ -232,27 +220,29 @@ static int extract_embedded_images(fz_context *ctx, fz_document *doc,
 /* ===================================================================
  * Write chapter markdown file
  * =================================================================== */
-static int write_chapter_md(const char *out_dir, int idx, const Chapter *ch,
+static int write_chapter_md(const char *out_dir, int idx,
+                             const Chapter *ch,
                              int start_page, int end_page,
                              PageContent *pages, int total_pages) {
-    char filename[512];
+    /* Build a safe filename: chapter_XXX_sanitized_title.md */
     const char *title = ch ? ch->title : "FrontMatter";
-    snprintf(filename, sizeof(filename), "%s/chapter_%03d_", out_dir, idx);
 
     char safe_title[256];
     int si = 0;
     for (int i = 0; title[i] && si < 250; i++) {
-        char c = title[i];
-        if (isalnum((unsigned char)c) || c == '-' || c == '_' || c == '.')
-            safe_title[si++] = c;
+        unsigned char c = (unsigned char)title[i];
+        if (isalnum(c) || c == '-' || c == '_' || c == '.')
+            safe_title[si++] = (char)c;
         else if (c == ' ' || c == '\t')
             safe_title[si++] = '_';
-        else if ((unsigned char)c >= 0x80)
-            safe_title[si++] = c;
+        else if (c >= 0x80)
+            safe_title[si++] = (char)c;
     }
     safe_title[si] = '\0';
-    strncat(filename, safe_title, sizeof(filename) - strlen(filename) - 1);
-    strncat(filename, ".md", sizeof(filename) - strlen(filename) - 1);
+
+    char filename[512];
+    snprintf(filename, sizeof(filename), "%s/chapter_%03d_%s.md",
+             out_dir, idx, *safe_title ? safe_title : "");
 
     FILE *fp = fopen(filename, "w");
     if (!fp) {
@@ -261,7 +251,7 @@ static int write_chapter_md(const char *out_dir, int idx, const Chapter *ch,
     }
 
     /* Chapter heading */
-    if (ch && ch->title && strlen(ch->title) > 0) {
+    if (ch && ch->title && ch->title[0] != '\0') {
         if (ch->level <= 1)
             fprintf(fp, "# %s\n\n", ch->title);
         else
@@ -269,13 +259,13 @@ static int write_chapter_md(const char *out_dir, int idx, const Chapter *ch,
     }
 
     /* Page content (text + embedded figure refs) */
-    for (int p = start_page; p <= end_page && p < total_pages; p++) {
-        if (pages && pages[p].text && strlen(pages[p].text) > 0) {
+    int p_end = (end_page < total_pages) ? end_page : total_pages - 1;
+    for (int p = start_page; p <= p_end; p++) {
+        if (p < 0 || p >= total_pages) continue;
+        if (pages[p].text && pages[p].text[0] != '\0')
             fprintf(fp, "%s\n\n", pages[p].text);
-        }
-        if (pages && pages[p].img_refs && strlen(pages[p].img_refs) > 0) {
+        if (pages[p].img_refs && pages[p].img_refs[0] != '\0')
             fprintf(fp, "%s\n\n", pages[p].img_refs);
-        }
     }
 
     fclose(fp);
@@ -303,7 +293,7 @@ int main(int argc, char **argv) {
     if (argc < 3) { usage(argv[0]); return 1; }
 
     const char *pdf_path = argv[1];
-    const char *out_dir = argv[2];
+    const char *out_dir  = argv[2];
     int dpi = 200;
 
     for (int i = 3; i < argc; i++) {
@@ -336,15 +326,15 @@ int main(int argc, char **argv) {
     }
 
     int npages = fz_count_pages(ctx, doc);
-    printf("[pdf2md] PDF: %d pages\n", npages);
+    printf("[pdf2md] PDF has %d pages\n", npages);
 
     /* ─── Extract outline ─── */
     int nch = 0;
     Chapter *chapters = extract_outline(ctx, doc, &nch);
-    printf("[pdf2md] Outline: %d entries\n", nch);
+    printf("[pdf2md] Outline entries: %d\n", nch);
 
     /* ─── Run OCR for text ─── */
-    printf("[pdf2md] Recognizing text with Unlimited-OCR...\n");
+    printf("[pdf2md] Running OCR (Unlimited-OCR)...\n");
 
     char ocr_bin[1024];
     ocr_find_binary(argv[0], ocr_bin, sizeof(ocr_bin));
@@ -363,20 +353,32 @@ int main(int argc, char **argv) {
     int nocr = 0;
     ocr_split_pages(ocr_raw, ocr_raw_len, &ocr_texts, &nocr);
     free(ocr_raw);
-    printf("[pdf2md] OCR text: %d pages\n", nocr);
+    printf("[pdf2md] OCR returned %d pages\n", nocr);
 
-    /* Transfer OCR text into pages array */
-    PageContent *pages = calloc(npages, sizeof(PageContent));
-    if (!pages) { fprintf(stderr, "[pdf2md] OOM\n"); return 1; }
-    for (int p = 0; p < npages && p < nocr; p++) {
-        pages[p].text = ocr_texts[p];
+    /* ─── Build pages array ───
+     * Allocate based on max(npages, nocr) so we don't lose data
+     * if OCR returns more pages than the PDF reports.
+     */
+    int total_pages = (nocr > npages) ? nocr : npages;
+    PageContent *pages = calloc((size_t)total_pages, sizeof(PageContent));
+    if (!pages) {
+        fprintf(stderr, "[pdf2md] Out of memory\n");
+        ocr_free_pages(ocr_texts, nocr);
+        free_chapters(chapters, nch);
+        fz_drop_document(ctx, doc);
+        fz_drop_context(ctx);
+        return 1;
+    }
+
+    for (int p = 0; p < nocr; p++) {
+        pages[p].text  = ocr_texts[p];
         pages[p].npage = p;
-        ocr_texts[p] = NULL;
+        ocr_texts[p]   = NULL;  /* ownership transferred */
     }
     ocr_free_pages(ocr_texts, nocr);
 
-    /* ─── Render full pages ─── */
-    printf("[pdf2md] Rendering page images (%d DPI)...\n", dpi);
+    /* ─── Render full pages (only PDF pages exist for rendering) ─── */
+    printf("[pdf2md] Rendering %d page images (%d DPI)...\n", npages, dpi);
     for (int p = 0; p < npages; p++) {
         save_page_png(ctx, doc, p, out_dir, dpi);
         if ((p + 1) % 20 == 0 || p + 1 == npages)
@@ -399,7 +401,7 @@ int main(int argc, char **argv) {
     printf("[pdf2md] Writing chapters...\n");
 
     if (nch == 0) {
-        write_chapter_md(out_dir, 0, NULL, 0, npages - 1, pages, npages);
+        write_chapter_md(out_dir, 0, NULL, 0, npages - 1, pages, total_pages);
     } else {
         int ch_idx = 0;
         for (int i = 0; i < nch; i++) {
@@ -409,35 +411,37 @@ int main(int argc, char **argv) {
             if (end < start) end = start;
             if (start >= npages) continue;
 
+            /* Front matter before first chapter */
             if (i == 0 && start > 0) {
-                write_chapter_md(out_dir, ch_idx++, NULL, 0, start - 1,
-                                  pages, npages);
+                write_chapter_md(out_dir, ch_idx++, NULL,
+                                 0, start - 1, pages, total_pages);
             }
-            write_chapter_md(out_dir, ch_idx++, &chapters[i], start, end,
-                              pages, npages);
 
+            write_chapter_md(out_dir, ch_idx++, &chapters[i],
+                             start, end, pages, total_pages);
+
+            /* Gap pages between chapters */
             if (i + 1 < nch) {
                 int next_start = chapters[i + 1].page;
                 if (next_start > 0 && end + 1 < next_start) {
                     char gap_title[64];
-                    snprintf(gap_title, sizeof(gap_title), "Pages %d-%d",
-                             end + 2, next_start);
+                    snprintf(gap_title, sizeof(gap_title),
+                             "Pages %d-%d", end + 2, next_start);
                     Chapter gap_ch = { gap_title, 1, end + 1 };
-                    write_chapter_md(out_dir, ch_idx++, &gap_ch, end + 1,
-                                      next_start - 1, pages, npages);
+                    write_chapter_md(out_dir, ch_idx++, &gap_ch,
+                                     end + 1, next_start - 1,
+                                     pages, total_pages);
                 }
             }
         }
     }
 
     /* ─── Cleanup ─── */
-    if (pages) {
-        for (int i = 0; i < npages; i++) {
-            free(pages[i].text);
-            free(pages[i].img_refs);
-        }
-        free(pages);
+    for (int i = 0; i < total_pages; i++) {
+        free(pages[i].text);
+        free(pages[i].img_refs);
     }
+    free(pages);
     free_chapters(chapters, nch);
     fz_drop_document(ctx, doc);
     fz_drop_context(ctx);
