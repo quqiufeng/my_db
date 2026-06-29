@@ -122,29 +122,37 @@ static std::unordered_map<std::string, torch::Tensor> load_tensorpack(const std:
         fprintf(stderr, "[FATAL] Failed to read tensor count\n"); exit(1);
     }
     
+    // Helper: checked fread
+    auto must_read = [](void* buf, size_t size, size_t count, FILE* f) {
+        if (fread(buf, size, count, f) != count) {
+            perror("[FATAL] fread failed");
+            exit(1);
+        }
+    };
+    
     std::unordered_map<std::string, torch::Tensor> result;
     result.reserve(num_tensors);
     
     for (uint32_t i = 0; i < num_tensors; i++) {
         // Read name
         uint32_t name_len;
-        fread(&name_len, 4, 1, f);
+        must_read(&name_len, 4, 1, f);
         std::string name(name_len, '\0');
-        fread(&name[0], 1, name_len, f);
+        must_read(&name[0], 1, name_len, f);
         
         // Read shape
         uint32_t ndim;
-        fread(&ndim, 4, 1, f);
+        must_read(&ndim, 4, 1, f);
         std::vector<int64_t> shape(ndim);
         for (uint32_t d = 0; d < ndim; d++) {
             int64_t dim_val;
-            fread(&dim_val, 8, 1, f);
+            must_read(&dim_val, 8, 1, f);
             shape[d] = dim_val;
         }
         
         // Read dtype
         uint32_t dtype_code;
-        fread(&dtype_code, 4, 1, f);
+        must_read(&dtype_code, 4, 1, f);
         
         // Map dtype
         torch::ScalarType st;
@@ -165,7 +173,7 @@ static std::unordered_map<std::string, torch::Tensor> load_tensorpack(const std:
         
         // Read data size
         uint64_t data_size;
-        fread(&data_size, 8, 1, f);
+        must_read(&data_size, 8, 1, f);
         
         // Check consistency
         int64_t expected = 1;
@@ -182,7 +190,7 @@ static std::unordered_map<std::string, torch::Tensor> load_tensorpack(const std:
         for (auto s : shape) numel *= s;
         
         auto tensor = torch::empty(shape, torch::TensorOptions().dtype(st));
-        fread(tensor.data_ptr(), 1, data_size, f);
+        must_read(tensor.data_ptr(), 1, data_size, f);
         
         result[name] = tensor;
         
@@ -705,7 +713,7 @@ int main(int argc, char** argv) {
             dpi = std::atoi(argv[++i]);
     }
     
-    std::string wdir = "/tmp/ocr_tensors";
+    std::string wdir = "/data/models/baidu";
     fprintf(stderr, "[OCR] Loading model from %s...\n", wdir.c_str());
     
     Weights w = load_weights(wdir);

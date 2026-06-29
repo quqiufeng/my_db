@@ -20,6 +20,7 @@ examples/example_c
 tools/cache_server
 tools/cache_http_server
 tools/import_book
+tools/ocr_cuda
 
 # Python
 __pycache__/

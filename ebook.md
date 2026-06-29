@@ -384,8 +384,168 @@ elon_musk/
 - 保留中文内容（`is_noise()` 修复了 signed char 溢出 bug）
 - 安全文件名：替换非法字符，处理 Unicode 引号
 
----
+### 5. PDF 高精度 OCR 识别方案
 
+对于扫描版 PDF（图片格式页面），传统的文本提取方式（MuPDF `fz_stext_page`）无法提取到文字。本项目集成了 **百度 Unlimited-OCR**（DeepSeek-V2 MoE 架构，64 专家，12 层），提供纯 C++ 的高精度 OCR 识别能力。
+
+#### 架构概览
+
+```
+用户请求 --ocr 标志
+      │
+      ▼
+  import_book (C)
+      │ popen() 调用
+      ▼
+  tools/ocr_cuda (C++ 独立二进制)
+      │
+      ├── 1. MuPDF 渲染 PDF 页面为 RGB 图像
+      ├── 2. TorchScript Vision Pipeline (SAM + CLIP) 提取图像特征
+      ├── 3. Decoder: 12 层 Transformer (SlidingWindowLlamaAttention + MoE)
+      │      ├── 路由: top-6 of 64 experts, softmax 门控 (norm_topk_prob=False)
+      │      ├── 共享: 2 个共享专家 (intermediate=1792)
+      │      ├── 层 0: 稠密 MLP (intermediate=6848)
+      │      └── 层 1-11: MoE + RMSNorm + RoPE
+      ├── 4. lm_head 投影到词表 (129280)
+      └── 5. 贪心解码 + EOS 停止 → JSON 章节 + OCR 文本
+```
+
+#### 相关代码文件
+
+| 文件 | 说明 |
+|------|------|
+| `tools/ocr_cuda.cpp` | 纯 C++ OCR 二进制源码 (735 行) |
+| `tools/ocr_cuda` | 编译后的二进制 (44 MB) |
+| `tools/ocr_pdf.py` | Python OCR 预处理器（早期原型，保留作参考） |
+| `tools/import_book.c` | 修改：新增 `--ocr` 标志和 `popen()` 调用路径 |
+
+#### 权重文件存储
+
+模型权重不随代码仓库分发，位于以下路径：
+
+| 内容 | 路径 | 大小 |
+|------|------|------|
+| 原始模型 (safetensors, bf16) | `/data/models/baidu/Unlimited-OCR` | **6.3 GB** |
+| TensorPack 权重 (C++ 加载用, bf16) | `/data/models/baidu/weights.tpack` | **~6 GB** (2234 个 tensor) |
+| TorchScript Vision Pipeline | `/data/models/baidu/vision_pipeline.pt` | **767 MB** (SAM + CLIP 导出) |
+| 词表文件 | `/data/models/baidu/vocab.bin` | 1.79 MB |
+| 模型配置 | `/data/models/baidu/model_config.json` | < 1 MB |
+
+**权重导出流程**：
+
+将 HuggingFace safetensors 原始模型转换为 C++ 可加载的 TensorPack 二进制格式，涉及三个脚本：
+
+| 步骤 | 脚本 | 输出 | 说明 |
+|------|------|------|------|
+| 1. 导出统一权重 | `/tmp/export_weights.py` | `/data/models/baidu/weights.pt` | 从 safetensors 加载模型，导出所有权重为单个 .pt 文件。**将 float32 转换为 bf16** 以节省 50% 空间。同时拷贝 vision pipeline、vocab、config。 |
+| 2. 转 TensorPack | `/tmp/export_tensorpack.py` | `/data/models/baidu/weights.tpack` | 将 .pt 文件转为自定义二进制格式（C++ libtorch 无法直接加载 torch.save 的 pickle）。 |
+| 3. 补充 final norm | `/tmp/add_norm.py` | 追加 `model.norm.weight` | 原始 export 遗漏了 decoder 最后的 RMSNorm 权重，手动从 safetensors 提取并追加到 TensorPack。 |
+
+**执行命令**：
+
+```bash
+# 使用 venv Python（含 transformers, torch, safetensors, einops 等依赖）
+cd /data/models/baidu
+/data/venv/bin/python /tmp/export_weights.py    # → weights.pt + vision_pipeline.pt + vocab.bin + config
+/data/venv/bin/python /tmp/export_tensorpack.py # → weights.tpack (读取 weights.pt 后转成)
+/data/venv/bin/python /tmp/add_norm.py          # → 补上 model.norm.weight
+rm -f weights.pt                                 # 中间产物可删除
+```
+
+> **注意**：`export_weights.py` 需在 `/data/models/baidu` 目录下运行，因为脚本依赖 `from unlimited_ocr.modeling_unlimitedocr import UnlimitedOCRForCausalLM`，相对导入要求工作目录为模型所在位置。
+
+> **体积优化说明**：原始导出将所有 bf16 权重转为 float32（`tensor.float()`），导致 TensorPack 高达 11 GB。2026-06-29 修复：在 `export_weights.py` 中增加 `.to(torch.bfloat16)` 转换，使 TensorPack 回到 ~6 GB，与原始模型一致。C++ 加载时自动转换为 bf16 并送入 GPU，无精度损失。
+
+**TensorPack 二进制格式**：
+
+```
+[magic: "OCRP" 4B]
+[version: 4B LE]
+[num_tensors: 4B LE]
+[for each tensor:
+    [name_len: 4B LE] [name: name_len B]
+    [ndim: 4B LE] [shape: ndim×8B LE]
+    [dtype: 4B LE] (0=f32, 1=f64, 2=i32, 3=i64, 4=bf16, 5=u8, 6=i8, 7=f16)
+    [data_size: 8B LE] [data: data_size B]
+]
+```
+
+#### 编译方法
+
+```bash
+# 依赖
+#   - CUDA 12.6 + GPU (RTX 3080 20GB+)
+#   - LibTorch (来自 /data/venv, Python 3.12.3, torch 2.4.0+cu121)
+#   - MuPDF 静态库 (/opt/mupdf/build/release/libmupdf.a)
+#   - 系统 GCC (需 -D_GLIBCXX_USE_CXX11_ABI=0 匹配 libtorch ABI)
+
+g++ -std=c++17 -D_GLIBCXX_USE_CXX11_ABI=0 \
+    -I/data/venv/lib/python3.12/site-packages/torch/include \
+    -I/data/venv/lib/python3.12/site-packages/torch/include/torch/csrc/api/include \
+    -I/opt/mupdf/include \
+    -o tools/ocr_cuda \
+    tools/ocr_cuda.cpp \
+    -L/opt/mupdf/build/release -lmupdf -lmupdf-third \
+    -L/data/venv/lib/python3.12/site-packages/torch/lib \
+    -ltorch -ltorch_cpu -lc10 -ltorch_cuda -lc10_cuda \
+    -Wl,-rpath,/data/venv/lib/python3.12/site-packages/torch/lib \
+    -lpthread -O2
+```
+
+#### import_book 集成方式
+
+`import_book.c` 中通过 `popen()` 调用 `tools/ocr_cuda` 二进制：
+
+```c
+// 在 import_book.c 中 --ocr 分支
+// 构造 OCR 命令
+char cmd[4096];
+snprintf(cmd, sizeof(cmd),
+    "%s/tools/ocr_cuda \"%s\" 2>/dev/null",
+    project_dir, book_path);
+
+// 执行并解析 JSON 章节输出
+FILE* fp = popen(cmd, "r");
+if (!fp) { /* 错误处理 */ }
+
+// 读取 stdout，解析 ---OCR_CHAPTERS:{...}--- 前缀
+char line[4096];
+while (fgets(line, sizeof(line), fp)) {
+    if (strncmp(line, "---OCR_CHAPTERS:", 16) == 0) {
+        // 解析 JSON 章节信息
+    } else {
+        // OCR 识别文本内容，追加到输出
+    }
+}
+pclose(fp);
+```
+
+**使用方式**：
+```bash
+# 对 PDF 使用 OCR 模式导入
+./tools/import_book /book/cache document.pdf --ocr
+
+# 内部会调用:
+# /opt/my_db/tools/ocr_cuda "/path/to/document.pdf"
+# 输出格式:
+# ---OCR_CHAPTERS:{"chapters":[]}---
+# <PAGE><|det|>text [x1,y1,x2,y2]<|/det|>识别文本...
+```
+
+#### 技术要点
+
+**MoE 路由修复**：在 C++ 移植过程中，修正了以下关键差异：
+
+| 问题 | 现象 | 修复 |
+|------|------|------|
+| MoE 权重归一化 | 输出概率值错误 (~19 vs 正确 ~42) | `norm_topk_prob=False`，top-k 权重直接使用 raw softmax 值，不做归一化 |
+| 缺少 final RMSNorm | 层输出直接送 lm_head，logits 全错 | 加载 `model.norm.weight`，12 层 decoder 后追加一次 RMSNorm |
+| RoPE 计算 NaN | inv_freq 公式错误导致全 NaN | `1.0 / pow(theta, arange/dim)` 而非 `(arange/dim).pow(-1)*theta` |
+| 解码因果掩码 | 单 token decode 时位置 0 以外的全被 mask | Q=1 时跳过 causal mask（新 token 应 attend 到所有 KV cache） |
+
+**性能**：RTX 3080 20GB 下，每页 OCR 约 0.5-1 秒（含 vision pipeline + 12 层 decoder + 1024 token 生成）。
+
+---
 ## 可做的应用方向
 
 基于现有的电子书语义搜索基础设施，可以构建以下应用：
