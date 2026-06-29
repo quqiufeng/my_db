@@ -70,10 +70,13 @@ int ocr_run(const char *pdf_path, const char *ocr_bin,
     if (out_text) *out_text = NULL;
     if (out_text_len) *out_text_len = 0;
 
+    /* Capture stderr to a temp file for diagnostics */
+    char err_path[1024];
+    snprintf(err_path, sizeof(err_path), "/tmp/ocr_stderr_%d.log", getpid());
     char cmd[4096];
     int cmd_len = snprintf(cmd, sizeof(cmd),
-                           "\"%s\" \"%s\" --dpi 200 2>/dev/null",
-                           ocr_bin, pdf_path);
+                           "\"%s\" \"%s\" --dpi 200 2>\"%s\"",
+                           ocr_bin, pdf_path, err_path);
     if (cmd_len >= (int)sizeof(cmd)) {
         fprintf(stderr, "[ocr_helper] Command too long\n");
         return -1;
@@ -82,6 +85,7 @@ int ocr_run(const char *pdf_path, const char *ocr_bin,
     FILE *fp = popen(cmd, "r");
     if (!fp) {
         fprintf(stderr, "[ocr_helper] Failed to run: %s\n", ocr_bin);
+        unlink(err_path);
         return -1;
     }
 
@@ -91,6 +95,18 @@ int ocr_run(const char *pdf_path, const char *ocr_bin,
     ssize_t chapters_len = getline(&chapters_line, &chapters_cap, fp);
     if (chapters_len <= 0) {
         fprintf(stderr, "[ocr_helper] No output from ocr_cuda\n");
+        /* Dump stderr from the child process */
+        {
+            char err_line[4096];
+            FILE *efp = fopen(err_path, "r");
+            if (efp) {
+                fprintf(stderr, "[ocr_helper] Stderr from ocr_cuda:\n");
+                while (fgets(err_line, sizeof(err_line), efp))
+                    fprintf(stderr, "  %s", err_line);
+                fclose(efp);
+            }
+            unlink(err_path);
+        }
         free(chapters_line);
         pclose(fp);
         return -1;
@@ -119,7 +135,7 @@ int ocr_run(const char *pdf_path, const char *ocr_bin,
     size_t cap = 1048576;
     size_t len = 0;
     char *text = malloc(cap);
-    if (!text) { pclose(fp); return -1; }
+    if (!text) { unlink(err_path); pclose(fp); return -1; }
     text[0] = '\0';
 
     char line[16384];
@@ -136,6 +152,8 @@ int ocr_run(const char *pdf_path, const char *ocr_bin,
     }
 
     int status = pclose(fp);
+    unlink(err_path);  /* clean up stderr capture file */
+
     if (status != 0 && len == 0) {
         fprintf(stderr, "[ocr_helper] OCR exit %d, no output\n", status);
         free(text);

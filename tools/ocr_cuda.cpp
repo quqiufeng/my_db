@@ -25,6 +25,8 @@
 #include <vector>
 #include <cmath>
 #include <unordered_map>
+#include <unordered_set>
+#include <deque>
 #include <cstring>
 #include <cstdlib>
 #include <cstdint>
@@ -189,14 +191,13 @@ static std::unordered_map<std::string, torch::Tensor> load_tensorpack(const std:
             exit(1);
         }
         
-        // Read data
+        // Read data into CPU buffer then move to GPU immediately
         int64_t numel = 1;
         for (auto s : shape) numel *= s;
         
-        auto tensor = torch::empty(shape, torch::TensorOptions().dtype(st));
-        must_read(tensor.data_ptr(), 1, data_size, f);
-        
-        result[name] = tensor;
+        auto cpu_tensor = torch::empty(shape, torch::TensorOptions().dtype(st));
+        must_read(cpu_tensor.data_ptr(), 1, data_size, f);
+        result[name] = cpu_tensor.to(torch::kCUDA, /*non_blocking=*/true);
         
         if ((i + 1) % 100 == 0 || i + 1 == num_tensors) {
             fprintf(stderr, "\r  [OCR] Loading tensors %u/%u", i + 1, num_tensors);
@@ -318,14 +319,19 @@ attn_forward(const torch::Tensor& h, const LayerW& w,
     auto attn = torch::matmul(q, nk.transpose(-2, -1)) * scale;
     
     if (Q > 1 && T > Q) {
-        // Prefill: causal mask, last Q rows of T-length lower triangular
-        auto full_mask = torch::tril(torch::ones({T, T}, torch::kFloat32).to(h.device()));
-        auto mask = full_mask.slice(0, T-Q, T);
-        attn = attn + (1.0 - mask).to(h.dtype()) * -1e10;
+        // Subsequent prefill chunk: causal mask [Q, T] via broadcasting.
+        // Token j in chunk (global pos+j) attends to positions 0..pos+j.
+        auto pos_range = torch::arange(T, torch::kFloat32).to(h.device());       // [T]
+        auto chunk_pos = torch::arange(pos, pos + Q, torch::kFloat32).to(h.device()); // [Q]
+        auto mask = (chunk_pos.unsqueeze(1) >= pos_range.unsqueeze(0)).to(h.dtype()); // [Q, T]
+        attn = attn + (1.0 - mask) * -1e10;
     } else if (Q > 1) {
-        // Q == T (first prefill): lower triangular
-        auto mask = torch::tril(torch::ones({Q, T}, torch::kFloat32).to(h.device()));
-        attn = attn + (1.0 - mask).to(h.dtype()) * -1e10;
+        // First (or only) chunk: Q == T, simple lower triangular [Q, Q]
+        // Use broadcasting for consistency and O(Q²) memory (max 512×512 = 1 MB)
+        auto pos_range = torch::arange(T, torch::kFloat32).to(h.device());
+        auto chunk_pos = torch::arange(T, torch::kFloat32).to(h.device());
+        auto mask = (chunk_pos.unsqueeze(1) >= pos_range.unsqueeze(0)).to(h.dtype());
+        attn = attn + (1.0 - mask) * -1e10;
     }
     // When Q == 1 (single-token decode), no causal mask needed:
     // the new token attends to all positions in the KV cache
@@ -427,26 +433,6 @@ static void run_ocr(const std::string& pdf_path, int dpi,
                      Weights& w, Vocab& vocab,
                      torch::jit::Module& vpipe,
                      const torch::Tensor& cos_sin) {
-    auto dtype = torch::kBFloat16;
-    
-    // Move weights to GPU
-    fprintf(stderr, "[OCR] Moving weights to GPU...\n");
-    auto to_gpu = [&](torch::Tensor& t) { if (!t.is_cuda()) t = t.cuda().to(dtype); };
-    to_gpu(w.embed_w); to_gpu(w.head_w); to_gpu(w.final_norm_w);
-    for (auto& l : w.layers) {
-        to_gpu(l.input_norm); to_gpu(l.post_norm);
-        to_gpu(l.qw); to_gpu(l.kw); to_gpu(l.vw); to_gpu(l.ow);
-        if (l.is_moe) {
-            to_gpu(l.gate_w);
-            for (auto& t : l.expert_gate) to_gpu(t);
-            for (auto& t : l.expert_up) to_gpu(t);
-            for (auto& t : l.expert_down) to_gpu(t);
-            to_gpu(l.sh_gate); to_gpu(l.sh_up); to_gpu(l.sh_down);
-        } else {
-            to_gpu(l.mlp_gate); to_gpu(l.mlp_up); to_gpu(l.mlp_down);
-        }
-    }
-    
     // Open PDF
     fz_context* ctx = fz_new_context(nullptr, nullptr, FZ_STORE_UNLIMITED);
     if (!ctx) { fprintf(stderr, "[FATAL] Cannot create MuPDF context\n"); exit(1); }
@@ -457,248 +443,11 @@ static void run_ocr(const std::string& pdf_path, int dpi,
     int npages = fz_count_pages(ctx, doc);
     fprintf(stderr, "[OCR] PDF: %d pages\n", npages);
     
-    // Render pages
-    float zoom = (float)dpi / 72.0f;
-    fz_matrix transform = fz_scale(zoom, zoom);
-    
-    std::vector<torch::Tensor> page_tensors;
-    for (int p = 0; p < npages; p++) {
-        // Render page to pixmap
-        fz_pixmap* pix = nullptr;
-        fz_try(ctx) {
-            pix = fz_new_pixmap_from_page_number(ctx, doc, p, transform, fz_device_rgb(ctx), 0);
-        }
-        fz_catch(ctx) { continue; }
-        if (!pix) continue;
-        
-        int pw = fz_pixmap_width(ctx, pix);
-        int ph = fz_pixmap_height(ctx, pix);
-        int stride = fz_pixmap_stride(ctx, pix);
-        unsigned char* samp = fz_pixmap_samples(ctx, pix);
-        int ch = pix->n;  // number of color channels; older API: fz_pixmap_n
-        
-        // Convert to tensor [3, H, W] uint8
-        auto img = torch::empty({ph, pw, 3}, torch::kUInt8);
-        auto acc = img.accessor<uint8_t, 3>();
-        for (int y = 0; y < ph; y++)
-            for (int x = 0; x < pw; x++)
-                for (int c = 0; c < 3; c++)
-                    acc[y][x][c] = samp[y * stride + x * ch + c];
-        
-        fz_drop_pixmap(ctx, pix);
-        
-        // Preprocess: resize + normalize
-        auto fimg = img.to(torch::kFloat32).div(255.0).permute({2, 0, 1}).unsqueeze(0);
-        fimg = torch::nn::functional::interpolate(fimg,
-            torch::nn::functional::InterpolateFuncOptions()
-                .size(std::vector<int64_t>({IMAGE_SIZE, IMAGE_SIZE}))
-                .mode(torch::kBilinear));
-        fimg = (fimg - 0.5) / 0.5; // normalize to [-1, 1]
-        page_tensors.push_back(fimg.squeeze(0).to(dtype).cuda());
-        fprintf(stderr, "\r  [OCR] Page %d/%d rendered (%.1f MP)", p+1, npages, (double)pw*ph/1e6);
-    }
-    fprintf(stderr, "\n");
-    
-    if (page_tensors.empty()) {
-        fprintf(stderr, "[ERROR] No pages rendered\n");
-        fz_drop_document(ctx, doc);
-        fz_drop_context(ctx);
-        return;
-    }
-    
-    // Process images one at a time through vision pipeline
-    // (traced with batch=1, so we need to loop)
-    fprintf(stderr, "[OCR] Running vision pipeline on %d images...\n", (int)page_tensors.size());
-    std::vector<torch::Tensor> all_features;
-    for (size_t i = 0; i < page_tensors.size(); i++) {
-        auto single_img = page_tensors[i].unsqueeze(0); // [1, 3, 640, 640]
-        torch::Tensor feats;
-        { torch::NoGradGuard ng;
-            feats = vpipe.forward({single_img}).toTensor();
-        }
-        all_features.push_back(feats);
-        fprintf(stderr, "\r  [OCR] Vision %zu/%zu", i+1, page_tensors.size());
-    }
-    fprintf(stderr, "\n");
-    auto img_features = torch::cat(all_features, 0);
-    fprintf(stderr, "[OCR] Vision features shape: %s\n", shape_str(img_features).c_str());
-    {
-        double v_mean = img_features.mean().item().toDouble();
-        double v_std = img_features.std().item().toDouble();
-        fprintf(stderr, "[OCR] Vision features mean=%.4f std=%.4f\n", v_mean, v_std);
-    }
-    
-    // Build input tokens
-    std::vector<int64_t> ids;
-    std::vector<uint8_t> mask; // using uint8 for bool vector (C++ compatibility)
-    ids.push_back(0); mask.push_back(0); // bos
-    for (int i = 0; i < npages; i++) {
-        for (int j = 0; j < IMG_TOKENS_PER_IMAGE; j++) {
-            ids.push_back(IMAGE_TOKEN_ID); mask.push_back(1);
-        }
-    }
-    // "Multi page parsing." tokens
-    std::vector<int64_t> after = {37460, 4366, 76466, 16};
-    ids.insert(ids.end(), after.begin(), after.end());
-    mask.insert(mask.end(), after.size(), 0);
-    
-    auto ids_t = torch::tensor(ids, torch::TensorOptions().dtype(torch::kLong).device(torch::kCUDA)).unsqueeze(0);
-    auto mask_t = torch::tensor(mask, torch::TensorOptions().dtype(torch::kBool).device(torch::kCUDA)).unsqueeze(0);
-    
-    // Embed tokens
-    torch::Tensor embed;
-    { torch::NoGradGuard ng;
-        embed = torch::nn::functional::embedding(ids_t, w.embed_w);
-    }
-    
-    // Insert image features into the embedding at image token positions
-    auto seq_mask = mask_t.squeeze(0); // [S] bool
-    int n_img = seq_mask.sum().item<int>();
-    fprintf(stderr, "[OCR] Image tokens in seq: %d, img_features rows: %d\n",
-            n_img, (int)img_features.size(0));
-    embed[0].masked_scatter_(seq_mask.unsqueeze(-1), img_features);
-    fprintf(stderr, "[OCR] Embed shape: %s\n", shape_str(embed).c_str());
-    {
-        double e_mean = embed[0].mean().item().toDouble();
-        double e_std = embed[0].std().item().toDouble();
-        double e0_mean = embed[0][0].mean().item().toDouble();
-        double e1_mean = embed[0][1].mean().item().toDouble();
-        double e2_mean = embed[0][2].mean().item().toDouble();
-        double e3_mean = embed[0][3].mean().item().toDouble();
-        double e4_mean = embed[0][4].mean().item().toDouble();
-        fprintf(stderr, "[OCR] Embed mean=%.4f std=%.4f (first 5 tokens: %.4f %.4f %.4f %.4f %.4f)\n",
-                e_mean, e_std, e0_mean, e1_mean, e2_mean, e3_mean, e4_mean);
-    }
-    // Check specific positions: BOS, first image token, last image token, after tokens
-    {
-        int64_t slen = embed.size(1);
-        bool mask1 = seq_mask[1].item().toBool();
-        bool mask5 = seq_mask[slen-5].item().toBool();
-        double bos_mean = embed[0][0].mean().item().toDouble();
-        double img1_mean = mask1 ? embed[0][1].mean().item().toDouble() : -1.0;
-        double img5_mean = mask5 ? embed[0][slen-5].mean().item().toDouble() : -1.0;
-        fprintf(stderr, "[OCR] BOS embed mean=%.4f, first img embed mean=%.4f, last img embed mean=%.4f\n",
-                bos_mean, img1_mean, img5_mean);
-    }
-    
-    // ─── Prefill ───
-    fprintf(stderr, "[OCR] Prefill...\n");
-    int64_t seq_len = embed.size(1);
-    std::vector<torch::Tensor> kvs; // keys and values per layer (interleaved)
-    torch::Tensor hidden;
-    { torch::NoGradGuard ng;
-        auto h = embed;
-        for (int i = 0; i < NUM_LAYERS; i++) {
-            auto [o, nk, nv] = layer_forward(h, w.layers[i], cos_sin,
-                                              torch::Tensor(), torch::Tensor(), 0, true);
-            h = o;
-            kvs.push_back(nk);
-            kvs.push_back(nv);
-            if (i == 0 || i == NUM_LAYERS - 1) {
-                double lm = h.mean().item().toDouble(), ls = h.std().item().toDouble();
-                fprintf(stderr, "  [OCR] Layer %d hidden: mean=%.4f std=%.4f\n", i+1, lm, ls);
-            }
-        }
-        hidden = h;
-    }
-    // Apply final RMSNorm
-    { torch::NoGradGuard ng;
-        hidden = rms_norm(hidden, w.final_norm_w, RMS_EPS);
-    }
-    {
-        double h_mean = hidden.mean().item().toDouble();
-        double h_std = hidden.std().item().toDouble();
-        fprintf(stderr, "[OCR] After prefill hidden shape: %s mean=%.4f std=%.4f\n",
-                shape_str(hidden).c_str(), h_mean, h_std);
-        // Dump first 10 values of last position for comparison
-        int last_pos = hidden.size(1) - 1;
-        fprintf(stderr, "  [OCR] Prefill final h[0][%d] first10=[", last_pos);
-        for (int k = 0; k < 10 && k < hidden.size(2); k++) {
-            fprintf(stderr, "%s%.4f", k>0?",":"", hidden[0][last_pos][k].item().toDouble());
-        }
-        fprintf(stderr, "]\n");
-    }
-    // Check logits at last position
-    {
-        auto last_h = hidden.slice(1, seq_len-1, seq_len);
-        auto logits = torch::nn::functional::linear(last_h, w.head_w).to(torch::kFloat32);
-        auto vals = std::get<0>(torch::topk(logits.squeeze(), 5));
-        auto idxs = std::get<1>(torch::topk(logits.squeeze(), 5));
-        long id0 = idxs[0].item().toLong();
-        long id1 = idxs[1].item().toLong();
-        long id2 = idxs[2].item().toLong();
-        long id3 = idxs[3].item().toLong();
-        long id4 = idxs[4].item().toLong();
-        double v0 = vals[0].item().toDouble();
-        double v1 = vals[1].item().toDouble();
-        double v2 = vals[2].item().toDouble();
-        double v3 = vals[3].item().toDouble();
-        double v4 = vals[4].item().toDouble();
-        fprintf(stderr, "[OCR] Prefill final logits top5: ids=[%ld,%ld,%ld,%ld,%ld] vals=[%.2f,%.2f,%.2f,%.2f,%.2f]\n",
-                id0, id1, id2, id3, id4, v0, v1, v2, v3, v4);
-    }
-    
-    // ─── Decode loop ───
-    fprintf(stderr, "[OCR] Generating...\n");
-    std::vector<int64_t> output_ids;
-    int64_t pos = seq_len;
-    
-    for (int step = 0; step < MAX_NEW_TOKENS; step++) {
-        torch::Tensor next_embed;
-        { torch::NoGradGuard ng;
-            int64_t seq_len = hidden.size(1);
-            auto last_h = hidden.slice(1, seq_len - 1, seq_len); // [1, 1, 1280] bfloat16
-            auto logits = torch::nn::functional::linear(last_h, w.head_w).to(torch::kFloat32);
-            auto next_id = logits.squeeze().argmax().item<int64_t>();
-            output_ids.push_back(next_id);
-            
-            if (next_id == EOS_ID) break;
-            if (step < 30) {
-                // Decode the token to see the text
-                std::string tok_str = vocab.decode({next_id});
-                if (tok_str.length() > 20) tok_str = tok_str.substr(0, 20) + "...";
-                // Get top 3 logit values for debugging
-                auto top3 = torch::topk(logits.squeeze(), 3);
-                auto tv = std::get<0>(top3);
-                auto ti = std::get<1>(top3);
-                double tv0 = tv[0].item().toDouble(), tv1 = tv[1].item().toDouble(), tv2 = tv[2].item().toDouble();
-                long ti0 = ti[0].item().toLong(), ti1 = ti[1].item().toLong(), ti2 = ti[2].item().toLong();
-                fprintf(stderr, "  tok[%d]=%-6ld (%-20s) top3: %ld(%.1f) %ld(%.1f) %ld(%.1f)\n",
-                        step, next_id, tok_str.c_str(), ti0, tv0, ti1, tv1, ti2, tv2);
-            }
-            
-            // Embed next token
-            auto nid_t = torch::tensor({next_id}, torch::TensorOptions().dtype(torch::kLong).device(torch::kCUDA)).unsqueeze(0);
-            next_embed = torch::nn::functional::embedding(nid_t, w.embed_w);
-            
-            // Decode step
-            auto h = next_embed;
-            for (int i = 0; i < NUM_LAYERS; i++) {
-                auto [o, nk, nv] = layer_forward(h, w.layers[i], cos_sin,
-                                                  kvs[2*i], kvs[2*i+1], pos, false);
-                h = o;
-                kvs[2*i] = nk;
-                kvs[2*i+1] = nv;
-            }
-            // Apply final RMSNorm
-            h = rms_norm(h, w.final_norm_w, RMS_EPS);
-            hidden = h;
-            pos++;
-        }
-        if (step % 100 == 0) fprintf(stderr, "\r  [OCR] Generated %d tokens", step+1);
-    }
-    fprintf(stderr, "\n[OCR] Generated %zu tokens\n", output_ids.size());
-    
-    // Decode output
-    std::string text = vocab.decode(output_ids);
-    text.erase(0, text.find_first_not_of(" \t\n\r"));
-    
-    // Extract PDF table of contents (outline) using MuPDF
+    // Extract outline immediately and output chapters JSON before any page text
     std::string chapters_json = "[]";
     fz_outline* outline = nullptr;
     fz_try(ctx) { outline = fz_load_outline(ctx, doc); } fz_catch(ctx) {}
     if (outline) {
-        // Build JSON array of chapters
         std::string json = "[";
         bool first = true;
         std::function<void(fz_outline*, int)> walk = [&](fz_outline* node, int depth) {
@@ -706,7 +455,6 @@ static void run_ocr(const std::string& pdf_path, int dpi,
                 if (node->title && strlen(node->title) > 0) {
                     if (!first) json += ",";
                     first = false;
-                    // Escape JSON string
                     std::string title;
                     for (const char* p = node->title; *p; p++) {
                         if (*p == '"' || *p == '\\') { title += '\\'; title += *p; }
@@ -716,9 +464,9 @@ static void run_ocr(const std::string& pdf_path, int dpi,
                         else if ((unsigned char)*p < 0x20) { /* skip control chars */ }
                         else title += *p;
                     }
-                    int page = node->page.page;
+                    int pnum = node->page.page;
                     json += "{\"title\":\"" + title + "\",\"level\":" + std::to_string(depth)
-                          + ",\"page\":" + std::to_string(page) + "}";
+                          + ",\"page\":" + std::to_string(pnum) + "}";
                 }
                 if (node->down) walk(node->down, depth + 1);
                 node = node->next;
@@ -730,7 +478,148 @@ static void run_ocr(const std::string& pdf_path, int dpi,
         fz_drop_outline(ctx, outline);
     }
     std::cout << "---OCR_CHAPTERS:{\"chapters\":" << chapters_json << "}---" << std::endl;
-    std::cout << text << std::endl;
+    
+    // Build page template (shared across pages): BOS + 111×<image> + "document parsing."
+    float zoom = (float)dpi / 72.0f;
+    fz_matrix transform = fz_scale(zoom, zoom);
+    const std::vector<int64_t> PROMPT_IDS = {34030, 76466, 16};
+    const int64_t SEQ_LEN = 1 + IMG_TOKENS_PER_IMAGE + (int64_t)PROMPT_IDS.size(); // 115
+    std::vector<int64_t> tmpl_ids;
+    tmpl_ids.push_back(0); // BOS
+    for (int j = 0; j < IMG_TOKENS_PER_IMAGE; j++) tmpl_ids.push_back(IMAGE_TOKEN_ID);
+    tmpl_ids.insert(tmpl_ids.end(), PROMPT_IDS.begin(), PROMPT_IDS.end());
+    
+    auto tmpl_ids_t = torch::tensor(tmpl_ids, torch::TensorOptions().dtype(torch::kLong).device(torch::kCUDA)).unsqueeze(0);
+    // Build boolean mask: True for image token positions (to be replaced by vision features)
+    std::vector<uint8_t> mask(tmpl_ids.size(), 0);
+    for (size_t j = 1; j < 1 + IMG_TOKENS_PER_IMAGE; j++) mask[j] = 1;
+    auto mask_t = torch::tensor(mask, torch::TensorOptions().dtype(torch::kBool).device(torch::kCUDA)).unsqueeze(0);
+    
+    torch::Tensor base_embed;
+    { torch::NoGradGuard ng;
+        base_embed = torch::nn::functional::embedding(tmpl_ids_t, w.embed_w); // [1, 115, 1280]
+    }
+    
+    // ─── Stream: render → vision → OCR → output, one page at a time ───
+    fprintf(stderr, "[OCR] Streaming %d pages...\n", npages);
+    
+    for (int p = 0; p < npages; p++) {
+        // ── Render page ──
+        fz_pixmap* pix = nullptr;
+        fz_try(ctx) { pix = fz_new_pixmap_from_page_number(ctx, doc, p, transform, fz_device_rgb(ctx), 0); }
+        fz_catch(ctx) { std::cout << "<PAGE>" << std::endl << std::endl; continue; }
+        if (!pix) { std::cout << "<PAGE>" << std::endl << std::endl; continue; }
+        
+        int pw = fz_pixmap_width(ctx, pix);
+        int ph = fz_pixmap_height(ctx, pix);
+        int stride = fz_pixmap_stride(ctx, pix);
+        unsigned char* samp = fz_pixmap_samples(ctx, pix);
+        int ch = pix->n;
+        
+        auto img = torch::empty({ph, pw, 3}, torch::kUInt8);
+        auto acc = img.accessor<uint8_t, 3>();
+        for (int y = 0; y < ph; y++)
+            for (int x = 0; x < pw; x++)
+                for (int c = 0; c < 3; c++)
+                    acc[y][x][c] = samp[y * stride + x * ch + c];
+        fz_drop_pixmap(ctx, pix);
+        
+        auto fimg = img.to(torch::kFloat32).div(255.0).permute({2, 0, 1}).unsqueeze(0);
+        fimg = torch::nn::functional::interpolate(fimg,
+            torch::nn::functional::InterpolateFuncOptions()
+                .size(std::vector<int64_t>({IMAGE_SIZE, IMAGE_SIZE}))
+                .mode(torch::kBilinear));
+        fimg = (fimg - 0.5) / 0.5;
+        auto page_img = fimg.squeeze(0).to(torch::kBFloat16).cuda();
+        
+        // ── Vision pipeline ──
+        torch::Tensor feats;
+        { torch::NoGradGuard ng;
+            feats = vpipe.forward({page_img.unsqueeze(0)}).toTensor(); // [1, 111, 1280]
+        }
+        
+        // ── Build input & prefill ──
+        auto embed = base_embed.clone();
+        { torch::NoGradGuard ng;
+            embed[0].masked_scatter_(mask_t.squeeze(0).unsqueeze(-1), feats.squeeze(0));
+        }
+        
+        std::vector<torch::Tensor> kvs;
+        torch::Tensor hidden;
+        { torch::NoGradGuard ng;
+            auto h = embed;
+            for (int i = 0; i < NUM_LAYERS; i++) {
+                auto [o, nk, nv] = layer_forward(h, w.layers[i], cos_sin,
+                                                  torch::Tensor(), torch::Tensor(), 0, true);
+                h = o; kvs.push_back(nk); kvs.push_back(nv);
+            }
+            hidden = rms_norm(h, w.final_norm_w, RMS_EPS);
+        }
+        
+        // ── Decode ──
+        std::vector<int64_t> output_ids;
+        int64_t pos = SEQ_LEN;
+        const int NGRAM_SIZE = 35, WIN_SIZE = 128;
+        std::deque<int64_t> recent_window;
+        std::unordered_set<int64_t> seen_ids;
+        
+        for (int step = 0; step < MAX_NEW_TOKENS; step++) {
+            int64_t slen = hidden.size(1);
+            auto last_h = hidden.slice(1, slen - 1, slen);
+            auto logits = torch::nn::functional::linear(last_h, w.head_w).to(torch::kFloat32);
+            
+            // No-repeat 35-gram suppression (matches DeepseekOCRNoRepeatNGramLogitProcessor)
+            if ((int)recent_window.size() >= NGRAM_SIZE - 1) {
+                auto la = logits.squeeze();
+                int ctx = (int)recent_window.size() - (NGRAM_SIZE - 1);
+                for (int i = 0; i < (int)recent_window.size() - (NGRAM_SIZE - 1); i++) {
+                    bool match = true;
+                    for (int j = 0; j < NGRAM_SIZE - 1; j++) {
+                        if (recent_window[i+j] != recent_window[ctx+j]) { match = false; break; }
+                    }
+                    if (match) { int64_t fb = recent_window[i + NGRAM_SIZE - 1];
+                        if (fb >= 0 && fb < VOCAB_SIZE) la[fb] = -1e10f; }
+                }
+            }
+            // Repetition penalty for previously generated tokens
+            for (int64_t vid : seen_ids) {
+                if (vid >= 0 && vid < VOCAB_SIZE)
+                    logits.squeeze()[vid] = logits.squeeze()[vid].item<float>() / 1.2f;
+            }
+            
+            auto next_id = logits.squeeze().argmax().item<int64_t>();
+            output_ids.push_back(next_id);
+            if (next_id == EOS_ID) break;
+            
+            recent_window.push_back(next_id);
+            if ((int)recent_window.size() > WIN_SIZE) recent_window.pop_front();
+            seen_ids.insert(next_id);
+            
+            torch::Tensor next_embed;
+            { torch::NoGradGuard ng;
+                auto nid_t = torch::tensor({next_id}, torch::TensorOptions().dtype(torch::kLong).device(torch::kCUDA)).unsqueeze(0);
+                next_embed = torch::nn::functional::embedding(nid_t, w.embed_w);
+            }
+            auto h = next_embed;
+            for (int i = 0; i < NUM_LAYERS; i++) {
+                auto [o, nk, nv] = layer_forward(h, w.layers[i], cos_sin,
+                                                  kvs[2*i], kvs[2*i+1], pos, false);
+                h = o; kvs[2*i] = nk; kvs[2*i+1] = nv;
+            }
+            hidden = rms_norm(h, w.final_norm_w, RMS_EPS);
+            pos++;
+        }
+        
+        // ── Output this page immediately ──
+        std::string text = vocab.decode(output_ids);
+        text.erase(0, text.find_first_not_of(" \t\n\r"));
+        if (!text.empty() && text.back() == '\0') text.pop_back();
+        std::cout << "<PAGE>" << std::endl;
+        std::cout << text << std::endl;
+        
+        fprintf(stderr, "\r  [OCR] Page %d/%d: %zu tokens", p + 1, npages, output_ids.size());
+    }
+    fprintf(stderr, "\n[OCR] Done: %d pages\n", npages);
     
     fz_drop_document(ctx, doc);
     fz_drop_context(ctx);
@@ -759,8 +648,10 @@ int main(int argc, char** argv) {
     auto vpipe = torch::jit::load(wdir + "/vision_pipeline.pt", torch::kCUDA);
     vpipe.eval();
     
-    fprintf(stderr, "[OCR] Precomputing RoPE cos/sin...\n");
-    auto cos_sin = precompute_cos_sin(4096, HEAD_DIM).to(torch::kBFloat16).cuda();
+    fprintf(stderr, "[OCR] Precomputing RoPE cos/sin (max_len=131072)...\n");
+    /* 131072 covers ~1000 pages at ~130 image tokens/page. The old 4096
+     * limit overflowed on any multi-page document. */
+    auto cos_sin = precompute_cos_sin(131072, HEAD_DIM).to(torch::kBFloat16).cuda();
     
     fprintf(stderr, "[OCR] Starting OCR on %s...\n", pdf_path.c_str());
     run_ocr(pdf_path, dpi, w, vocab, vpipe, cos_sin);
