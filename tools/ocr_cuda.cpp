@@ -102,9 +102,36 @@ struct Vocab {
         for (auto id : ids) {
             if (id >= 0 && id < (int64_t)VOCAB_SIZE && !table[id].empty()) out += table[id];
         }
-        // Replace BPE space marker Ġ (UTF-8: 0xC4 0xA0)
-        size_t p;
-        while ((p = out.find("\xc4\xa0")) != std::string::npos) out.replace(p, 2, " ");
+        // Replace BPE space marker Ġ (UTF-8: 0xC4 0xA0) with regular space
+        { size_t p; while ((p = out.find("\xc4\xa0")) != std::string::npos) out.replace(p, 2, " "); }
+        // Replace newline marker Ċ (UTF-8: 0xC4 0x8A) with actual newline
+        { size_t p; while ((p = out.find("\xc4\x8a")) != std::string::npos) out.replace(p, 2, "\n"); }
+        // Strip <|...|> and <｜...｜> tags (both ASCII and fullwidth variants)
+        auto strip_tag = [&](const std::string& open, const std::string& close) {
+            size_t p; while ((p = out.find(open)) != std::string::npos) {
+                size_t q = out.find(close, p);
+                if (q != std::string::npos) out.erase(p, q - p + close.size()); else break;
+            }
+        };
+        strip_tag("<|", "|>");
+        strip_tag("<\xef\xbd\x9c", "\xef\xbd\x9c>"); // <｜...｜> (fullwidth vertical bar U+FF5C)
+        // Strip detection metadata prefix "type [x1, y1, x2, y2]" — remove from '[' to ']'
+        { size_t i = 0;
+          while (i < out.size()) {
+              size_t nl = out.find('\n', i);
+              size_t br = out.find('[', i);
+              // Only process if '[' found before end of line
+              if (br != std::string::npos && (nl == std::string::npos || br < nl)) {
+                  size_t br2 = out.find(']', br);
+                  if (br2 != std::string::npos && (nl == std::string::npos || br2 < nl)) {
+                      out.erase(br, br2 - br + 1);
+                      // i stays at same position (content shifted)
+                      continue;
+                  }
+              }
+              i = (nl == std::string::npos) ? out.size() : nl + 1;
+          }
+        }
         return out;
     }
 };
