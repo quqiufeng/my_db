@@ -114,45 +114,112 @@ make
 
 生成 `aicoding` 二进制和 `libaicoding_agent.a` 静态库。
 
-### 2. 配置
+### 2. 配置 LLM 密钥
 
-复制 `.env.example` 为 `.env`，填写 LLM 密钥：
+aicoding 在启动时按以下优先级加载配置（后加载的覆盖前面的）：
+
+1. `/etc/aicoding/.env` — 系统级配置
+2. `~/.aicoding/.env` — 用户全局配置（推荐）
+3. `./.env` 或 `--env FILE` — 项目级配置
+4. 环境变量
+
+推荐使用用户全局配置：
 
 ```bash
-OPENAI_API_KEY=sk-...
-OPENAI_BASE_URL=https://api.openai.com/v1
-OPENAI_MODEL=gpt-4o
+mkdir -p ~/.aicoding
+cat > ~/.aicoding/.env << 'EOF'
+# 使用 Kimi（推荐，自带 kimi-latest 模型）
+OPENAI_API_KEY=sk-kimi-...
+OPENAI_BASE_URL=https://api.kimi.com/coding/v1
+LLM_USER_AGENT=KimiCLI/1.0.0
+
+# 或使用 DeepSeek
+# DEEPSEEK_API_KEY=sk-deepseek-...
+# DEEPSEEK_BASE_URL=https://api.deepseek.com
+
+# 或使用 OpenAI
+# OPENAI_API_KEY=sk-...
+# OPENAI_BASE_URL=https://api.openai.com/v1
+
+# 通用设置
+LLM_PROTOCOL=openai
+LLM_TEMPERATURE=1.0
+EOF
 ```
 
-支持所有 OpenAI/Anthropic 兼容 API（Kimi、DeepSeek、Claude 等），见 `.env.example`。
+支持的所有提供商见 `.env.example`。
 
 ### 3. 接入 Zed
 
-在 Zed 的 `settings.json` 中添加：
+#### 3.1 配置 Zed
+
+编辑 `~/.config/zed/settings.json`（Zed 中可用 `cmd-,` / `ctrl-,` 打开设置），添加 `agent_servers`：
 
 ```json
 {
   "agent_servers": {
     "aicoding": {
       "command": "/opt/my_db/aicoding/aicoding.sh",
-      "args": ["--acp", "--project", "/your/project"],
-      "env": {
-        "OPENAI_API_KEY": "sk-...",
-        "OPENAI_MODEL": "gpt-4o"
-      }
+      "args": ["--acp", "--project", "."]
     }
   }
 }
 ```
 
-然后在 Zed 中打开 Agent Panel（`cmd-alt-o` / `ctrl-alt-o` 或命令面板 → `agent: new thread`），选择 aicoding，开始对话。
+`--project .` 表示以当前项目目录为工作目录。如需固定目录可改为绝对路径。
 
-### 4. 快速验证
+API key 通过 `~/.aicoding/.env` 配置，不需要写在 settings.json 中。
+
+#### 3.2 使用 aicoding
+
+1. 打开 Zed
+2. 按 `Ctrl+Shift+P`（或 `Cmd+Shift+P`）打开命令面板
+3. 输入 `agent: new thread` 并回车
+4. 在 Agent Panel 顶部的下拉菜单中选择 **aicoding**
+5. 在输入框中输入你的问题，回车发送
+
+aicoding 是**按需启动**的——你第一次发消息时 Zed 会自动启动 aicoding 进程，关闭面板时 Zed 自动终止它。
+
+#### 3.3 常用命令
+
+在 Agent Panel 中可以直接输入：
+
+| 输入 | 效果 |
+|------|------|
+| `帮我看一下这个项目的架构` | aicoding 会读取文件、搜索代码、分析结构 |
+| `/plan 给 main.go 添加一个 HTTP 路由` | 运行 Plan Agent，自动拆解任务并逐步执行 |
+| `/build 修复所有编译警告` | 运行 Build Agent，编译-诊断-修复循环 |
+| `用 kv_search 搜索 memory pool 相关的函数` | 在已索引的代码库中做语义搜索 |
+
+### 4. 快速验证（终端测试）
 
 ```bash
-# ACP 模式手动测试
 echo '{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":1}}' \
-  | ./aicoding.sh --acp --project /tmp
+  | /opt/my_db/aicoding/aicoding.sh --acp --project /tmp
+```
+
+正常输出应包含 `"protocolVersion":1` 和 `"agentInfo"`。
+
+### 5. 多模型切换
+
+aicoding 内置 4 个模型（`/opt/my_db/aicoding/models.json`），可在 `~/.aicoding/models.json` 中添加自定义模型：
+
+```json
+[
+  { "name": "my-model", "provider": "openai", "model": "gpt-4o" }
+]
+```
+
+启动时通过 `--model` 指定：
+
+```bash
+./aicoding.sh --acp --project . --model deepseek-v4-flash
+```
+
+或在 Zed 的 settings.json 中追加 args：
+
+```json
+"args": ["--acp", "--project", ".", "--model", "deepseek-v4-flash"]
 ```
 
 ---
