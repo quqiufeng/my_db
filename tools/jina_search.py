@@ -70,7 +70,7 @@ top_indices = np.argsort(sims)[::-1][:top_k]
 
 # Load cache for rich output
 import ctypes
-lib = ctypes.CDLL('/home/dministrator/my_db/libmydb.so')
+lib = ctypes.CDLL('/opt/my_db/libmydb.so')
 cache = lib.cache_open(cache_dir.encode(), 1024*1024*1024)
 cache_iter = lib.cache_iter_create(cache)
 

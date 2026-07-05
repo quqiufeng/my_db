@@ -36,46 +36,7 @@ function set_project_root(path)
     tools.set_project_root(path)
 end
 
--- Pending coroutines resumed by the GUI tick callback.
-local pending_coroutines = {}
-
-function add_pending_coroutine(co)
-    table.insert(pending_coroutines, co)
-end
-
--- Called by the Rust GUI timer ~10Hz to resume sleeping Lua coroutines.
-function gui_on_copy(text)
-    if opencode.set_clipboard then
-        local ok, err = opencode.set_clipboard(text)
-        if ok then
-            log.info("copied to clipboard (" .. tostring(#text) .. " bytes)")
-        else
-            log.warn("clipboard copy failed: " .. tostring(err))
-        end
-    else
-        log.warn("set_clipboard not available")
-    end
-end
-
-function gui_tick()
-    local i = 1
-    while i <= #pending_coroutines do
-        local co = pending_coroutines[i]
-        if coroutine.status(co) == "suspended" then
-            local ok, err = coroutine.resume(co)
-            if not ok then
-                log.error("coroutine error: %s", err)
-                table.remove(pending_coroutines, i)
-            else
-                i = i + 1
-            end
-        elseif coroutine.status(co) == "dead" then
-            table.remove(pending_coroutines, i)
-        else
-            i = i + 1
-        end
-    end
-end
+-- (GUI coroutine scheduler removed — UI handled by Zed Agent Panel via ACP)
 
 -- Convert messages table to JSON array string for C API.
 local function messages_to_json(messages)
@@ -173,33 +134,6 @@ local function append_assistant(messages, content, reasoning, tool_calls)
         end
     end
     table.insert(messages, msg)
-end
-
--- Format a tool result table into a human-readable string for GUI display.
-local function format_tool_result(name, result)
-    if type(result) ~= "table" then
-        return tostring(result)
-    end
-    local lines = {}
-    if result.ok then
-        table.insert(lines, "OK")
-    else
-        table.insert(lines, "ERROR: " .. tostring(result.error or "unknown"))
-    end
-    for k, v in pairs(result) do
-        if k ~= "ok" and k ~= "error" then
-            if type(v) == "table" then
-                if k == "files" then
-                    table.insert(lines, k .. ": " .. table.concat(v, ", "))
-                else
-                    table.insert(lines, k .. ": " .. json.encode(v))
-                end
-            else
-                table.insert(lines, k .. ": " .. tostring(v))
-            end
-        end
-    end
-    return table.concat(lines, "\n")
 end
 
 -- Execute tool_calls and append tool result messages.
@@ -377,264 +311,214 @@ function save_facts(session_id, facts_json)
 end
 
 function run_gui(session_id, project_ns)
-    _G.gui_mode = true
-    local gui = require("gui")
-    local model_name = (opencode.get_model and opencode.get_model()) or "kimi-latest"
-    local app = gui.create({
-        title = "ai coding",
-        project_root = tools.get_project_root(),
-        model = model_name,
-        version = "0.2.0",
-    })
+    -- GUI mode removed: UI is now handled by Zed's Agent Panel via ACP.
+    -- Use `aicoding --acp` for Zed integration, or REPL mode (no --acp) for CLI.
+    return "GUI mode removed. Use --acp for Zed integration."
+end
 
-    -- Demo: append a welcome message after window opens
-    gui.append_message(app, session_id, "assistant", "opencode GUI ready. Type a message and press Send.")
+-- ACP chat loop: like chat_once but streams ACP JSON-RPC notifications to stdout
+-- Called from C when --acp flag is used (Zed integration)
+function acp_chat(session_id, project_ns, user_query)
+    local protocol = opencode.llm_protocol()
+    local system = prompt.build_system_prompt(session_id, project_ns, tools.get_project_root())
 
-    gui.on_user_message(app, function(sid, text)
-        gui.append_message(app, sid, "user", text)
-        gui.clear_todos(app)
-        trace.init(sid, tools.get_project_root())
-        trace.agent_start(text)
-
-        -- Agent command: /plan runs the autonomous plan-and-execute agent.
-        if text:match("^/plan%s+(.+)") or text == "/plan" then
-            local task = text:match("^/plan%s+(.+)") or "complete the current task"
-            gui.add_todo(app, "Plan agent: " .. task)
-            local co = coroutine.create(function()
-                local summary = run_plan_agent(sid, project_ns, task)
-                gui.append_message(app, sid, "assistant", summary)
-                gui.add_todo(app, "Plan done")
-                gui.set_todo_done(app, "Plan done", true)
-            end)
-            table.insert(pending_coroutines, co)
-            coroutine.resume(co)
-            return
-        end
-
-        -- Agent command: /build runs the autonomous build-fix agent.
-        if text:match("^/build%s*(.*)") then
-            local goal = text:match("^/build%s*(.*)")
-            if goal == "" then goal = "make the project compile" end
-            gui.add_todo(app, "Build agent: " .. goal)
-            local co = coroutine.create(function()
-                local summary = run_build_agent(sid, project_ns, goal)
-                gui.append_message(app, sid, "assistant", summary)
-                gui.add_todo(app, "Build done")
-                gui.set_todo_done(app, "Build done", true)
-            end)
-            table.insert(pending_coroutines, co)
-            coroutine.resume(co)
-            return
-        end
-
-        gui.add_todo(app, "Plan approach for: " .. text)
-
-        local co = coroutine.create(function()
-            local protocol = opencode.llm_protocol()
-            local system = prompt.build_system_prompt(sid, project_ns, tools.get_project_root())
-            local messages = { { role = "user", content = text } }
+    local messages = { { role = "user", content = user_query } }
     local max_iterations = 8
+    local function acp(method, params) opencode.acp_send(method, cjson.encode(params)) end
 
-            for i = 1, max_iterations do
-                log.info("gui llm iteration %d", i)
-                gui.add_todo(app, "LLM iteration " .. tostring(i))
+    for i = 1, max_iterations do
+        local request_messages, archived = context.build_messages(session_id, system, messages)
 
-                -- Apply sliding-window + LRU compression before sending
-                local request_messages, archived = context.build_messages(sid, system, messages)
-                if archived and #archived > 0 then
-                    log.info("gui archived %d old messages to KV Cache", #archived)
-                    trace.context_archive(#archived)
-                end
+        local request_body = {}
+        request_body.model = opencode.get_model and opencode.get_model() or "kimi-latest"
+        request_body.messages = {}
+        request_body.temperature = 1.0
+        request_body.tools = tools.build_tools_for_request()
 
-                local request_body = {
-                    model = opencode.get_model and opencode.get_model() or "kimi-latest",
-                    messages = {},
-                    temperature = 1.0
+        if protocol ~= "anthropic" then
+            for _, m in ipairs(request_messages) do request_body.messages[#request_body.messages+1] = m end
+            request_body.tools = tools.build_tools_for_request()
+        else
+            for _, m in ipairs(request_messages) do
+                if m.role ~= "system" then request_body.messages[#request_body.messages+1] = m end
+            end
+            request_body.system = system
+            request_body.tools = tools.build_tools_for_request()
+        end
+
+        local body_json = cjson.encode(request_body)
+        if not body_json then return "(encode error)" end
+
+        local response = opencode.llm_complete_raw(body_json)
+        if not response then return "(no response)" end
+
+        local content, reasoning, err, tool_calls
+        if protocol == "anthropic" then
+            content, reasoning, err, tool_calls = parse_anthropic_response(response)
+        else
+            content, reasoning, err, tool_calls = parse_openai_response(response)
+        end
+        if err then return content or "(parse error)" end
+
+        -- Stream text content via ACP
+        if content and content ~= "" then
+            acp("session/update", {
+                sessionId = session_id,
+                update = { sessionUpdate = "content", content = { type = "text", text = content } }
+            })
+        end
+
+        if not tool_calls or #tool_calls == 0 then
+            -- Store summary
+            pcall(generate_summary, session_id, "end_turn")
+            return ""
+        end
+
+        append_assistant(messages, content, reasoning, tool_calls)
+        for _, tc in ipairs(tool_calls) do
+            -- Report tool call via ACP
+            acp("session/update", {
+                sessionId = session_id,
+                update = {
+                    sessionUpdate = "tool_call",
+                    toolCallId = tc.id,
+                    title = tc.name,
+                    kind = tc.name == "bash" and "execute" or tc.name == "read" and "read" or tc.name == "edit" and "edit" or "other",
+                    status = "in_progress",
+                    rawInput = tc.arguments
                 }
-                if protocol ~= "anthropic" then
-                    request_body.messages = request_messages
-                    request_body.tools = tools.build_tools_for_request()
-                else
-                    request_body.system = system
-                    request_body.messages = {}
-                    for _, m in ipairs(request_messages) do
-                        if m.role ~= "system" then
-                            table.insert(request_body.messages, m)
-                        end
-                    end
-                    request_body.tools = tools.build_tools_for_request()
-                end
+            })
 
-                local body_json = json.encode(request_body)
-                if not body_json then
-                    gui.append_message(app, sid, "assistant", "(encode error)")
-                    return
-                end
-                trace.llm_request(body_json:sub(1, 500))
+            local result = tools.dispatch(tc)
+            local result_json = cjson.encode(result)
 
-                -- Build URL and headers for async HTTP
-                local base_url = os.getenv("OPENAI_BASE_URL") or "https://api.openai.com/v1"
-                local url = base_url .. "/chat/completions"
-                local api_key = os.getenv("OPENAI_API_KEY") or ""
-                local headers = "Content-Type: application/json\r\nAuthorization: Bearer " .. api_key .. "\r\n"
-                local user_agent = os.getenv("LLM_USER_AGENT")
-                if user_agent then
-                    headers = headers .. "User-Agent: " .. user_agent .. "\r\n"
-                end
-                local extra = os.getenv("LLM_EXTRA_HEADER")
-                if extra then
-                    local key, value = extra:match("^([^:]+):%s*(.+)$")
-                    if key and value then
-                        headers = headers .. key .. ": " .. value .. "\r\n"
-                    else
-                        headers = headers .. extra .. "\r\n"
-                    end
-                end
+            -- Report tool result via ACP
+            acp("session/update", {
+                sessionId = session_id,
+                update = {
+                    sessionUpdate = "tool_call_update",
+                    toolCallId = tc.id,
+                    status = "completed",
+                    rawOutput = result
+                }
+            })
 
-                local response, err = async_http.request(url, "POST", headers, body_json)
-                if not response then
-                    gui.append_message(app, sid, "assistant", "(no response: " .. tostring(err) .. ")")
-                    trace.error("gui llm request failed", { error = err })
-                    return
-                end
-                log.debug("llm response preview: %s", response:sub(1, 500))
-                trace.llm_response(response:sub(1, 500))
-
-                -- Report real token usage to GUI if available.
-                local usage = response:match('"usage":(%b{})')
-                if usage then
-                    local prompt_tokens = usage:match('"prompt_tokens":(%d+)') or 0
-                    local completion_tokens = usage:match('"completion_tokens":(%d+)') or 0
-                    local total = usage:match('"total_tokens":(%d+)') or 0
-                    if gui.set_tokens then
-                        pcall(gui.set_tokens, app, tonumber(total), tonumber(prompt_tokens), tonumber(completion_tokens))
-                    end
-                end
-
-                local content, reasoning, parse_err, tool_calls
-                if protocol == "anthropic" then
-                    content, reasoning, parse_err, tool_calls = parse_anthropic_response(response)
-                else
-                    content, reasoning, parse_err, tool_calls = parse_openai_response(response)
-                end
-                if parse_err then
-                    gui.append_message(app, sid, "assistant", "(parse error: " .. tostring(parse_err) .. ")")
-                    trace.error("gui response parse error", { error = parse_err })
-                    return
-                end
-
-                -- Stream assistant content word-by-word into the GUI.
-                -- Use UTF-8 safe chunking: never split a multi-byte character.
-                if content and content ~= "" then
-                    gui.append_message(app, sid, "assistant", "")
-                    local chunk_size = 20  -- bytes per chunk, adjusted to safe boundary
-                    local pos = 1
-                    while pos <= #content do
-                        local next_pos = math.min(pos + chunk_size, #content + 1)
-                        -- If next_pos lands in the middle of a UTF-8 character,
-                        -- back up to its start. Continuation bytes are 0x80-0xBF.
-                        while next_pos > pos do
-                            local byte = content:byte(next_pos)
-                            if byte == nil or byte < 128 or byte >= 192 then
-                                break  -- start of a new UTF-8 sequence or ASCII
-                            end
-                            next_pos = next_pos - 1
-                        end
-                        local chunk = content:sub(pos, next_pos - 1)
-                        gui.stream_delta(app, sid, chunk)
-                        pos = next_pos
-                        coroutine.yield()
-                    end
-                end
-
-                -- Display reasoning in a collapsible block (default collapsed).
-                if reasoning and reasoning ~= "" then
-                    gui.append_message(app, sid, "reasoning", reasoning)
-                end
-
-                if not tool_calls or #tool_calls == 0 then
-                    gui.add_todo(app, "Done")
-                    gui.set_todo_done(app, "Done", true)
-                    return
-                end
-
-                append_assistant(messages, content, reasoning, tool_calls)
-                for _, tc in ipairs(tool_calls) do
-                    log.info("gui executing tool: %s", tc.name)
-                    trace.tool_call(tc.name, tc.arguments)
-                    gui.add_todo(app, "Run tool: " .. tc.name)
-                    gui.tool_output(app, sid, tc.name, "running...")
-                    -- Allow GUI to show the "running..." state briefly
-                    coroutine.yield()
-                    local result = tools.dispatch(tc)
-                    log.debug("gui tool result: %s", json.encode(result):sub(1, 300))
-                    trace.tool_result(tc.name, result)
-                    gui.tool_output(app, sid, tc.name, format_tool_result(tc.name, result):sub(1, 16000))
-                    gui.set_todo_done(app, "Run tool: " .. tc.name, true)
-                    table.insert(messages, {
-                        role = "tool",
-                        tool_call_id = tc.id,
-                        content = json.encode(result)
-                    })
-                end
-
-                gui.set_todo_done(app, "LLM iteration " .. tostring(i), true)
-            end
-            gui.append_message(app, sid, "assistant", "(too many tool iterations)")
-        end)
-
-        table.insert(pending_coroutines, co)
-        coroutine.resume(co)
-    end)
-
-    -- Automated GUI test script (optional)
-    local test_script = os.getenv("OPENCODE_GUI_TEST_SCRIPT")
-    if test_script then
-        log.info("scheduling gui test script: %s", test_script)
-        local test_co = coroutine.create(function()
-            -- Wait briefly for GUI setup
-            for _ = 1, 10 do coroutine.yield() end
-            local test_env = {
-                _G = _G,
-                app = app,
-                gui = gui,
-                session_id = session_id,
-                project_ns = project_ns,
-                opencode = opencode,
-                require = require,
-                print = print,
-                io = io,
-                os = os,
-                table = table,
-                tostring = tostring,
-                tonumber = tonumber,
-                pcall = pcall,
-                assert = assert,
-                error = error,
-                math = math,
-                string = string,
-                coroutine = coroutine,
-            }
-            local chunk, err = loadfile(test_script)
-            if chunk then
-                setfenv(chunk, test_env)
-                local ok, res = pcall(chunk)
-                if not ok then
-                    log.error("gui test script error: %s", res)
-                    print("TEST FAILED: " .. tostring(res))
-                end
-            else
-                log.error("failed to load gui test script: %s", err)
-                print("TEST FAILED: cannot load script: " .. tostring(err))
-            end
-        end)
-        table.insert(pending_coroutines, test_co)
+            table.insert(messages, {
+                role = "tool",
+                tool_call_id = tc.id,
+                content = result_json
+            })
+        end
     end
 
-    local code = gui.run(app)
-    _G.gui_mode = false
-    gui.free(app)
-    return "gui exit code " .. tostring(code)
+    pcall(generate_summary, session_id, "max_iterations")
+    return "(too many tool iterations)"
+end
+
+function acp_run_plan(session_id, project_ns, task_description)
+    local result = run_plan_agent(session_id, project_ns, task_description)
+    return result or "(plan failed)"
+end
+
+function acp_run_build(session_id, project_ns, goal)
+    local result = run_build_agent(session_id, project_ns, goal or "make the project compile")
+    return result or "(build failed)"
+end
+
+-- ACP session tracking
+local acp_sessions = {}
+
+-- ACP JSON-RPC dispatcher: parses request with cjson, returns response string
+-- Called from C cli.c --acp mode for each stdin line.
+function acp_dispatch(request_json)
+    local ok, req = pcall(cjson.decode, request_json)
+    if not ok or type(req) ~= "table" then return nil end
+
+    local id = req.id
+    local method = req.method or ""
+    local params = req.params or {}
+
+    local function respond(result)
+        return cjson.encode({ jsonrpc = "2.0", id = id, result = result })
+    end
+    local function respond_error(code, msg)
+        return cjson.encode({ jsonrpc = "2.0", id = id, error = { code = code, message = msg } })
+    end
+
+    if method == "initialize" then
+        return respond({
+            protocolVersion = 1,
+            agentInfo = { name = "aicoding", title = "aicoding Agent", version = "0.2.0" },
+            agentCapabilities = {
+                loadSession = false,
+                promptCapabilities = { image = false, audio = false, embeddedContext = false },
+                mcpCapabilities = { http = false, sse = false },
+                sessionCapabilities = { list = true, close = true },
+                auth = {}
+            },
+            authMethods = {}
+        })
+
+    elseif method == "session/new" then
+        local new_sid = "sess_" .. tostring(math.floor(os.time() * 1000)) .. "_" .. tostring(math.random(0, 99999))
+        local cwd = params.cwd or project_root
+        acp_sessions[new_sid] = {
+            cwd = cwd,
+            created_at = os.time(),
+            updated_at = os.time(),
+            mode = "build"
+        }
+        return respond({ sessionId = new_sid, configOptions = cjson.null, modes = cjson.null })
+
+    elseif method == "session/prompt" then
+        local prompt_sid = params.sessionId or ""
+        local user_text = ""
+        if type(params.prompt) == "table" and #params.prompt > 0 then
+            local first = params.prompt[1]
+            user_text = first.text or (first.content and first.content.text) or ""
+        end
+        -- Track session activity
+        if acp_sessions[prompt_sid] then
+            acp_sessions[prompt_sid].updated_at = os.time()
+        end
+        local sess_project = (acp_sessions[prompt_sid] and acp_sessions[prompt_sid].cwd) or project_root
+        local ok, err = pcall(acp_chat, prompt_sid, sess_project, user_text)
+        if not ok then log.warn("acp_chat error: " .. tostring(err)) end
+        return respond({ stopReason = "end_turn" })
+
+    elseif method == "session/set_mode" then
+        local prompt_sid = params.sessionId or ""
+        local mode_id = params.modeId or "build"
+        if acp_sessions[prompt_sid] then
+            acp_sessions[prompt_sid].mode = mode_id
+        end
+        return respond({ status = "ok" })
+
+    elseif method == "session/close" then
+        local prompt_sid = params.sessionId or ""
+        acp_sessions[prompt_sid] = nil
+        return respond({})
+
+    elseif method == "session/list" then
+        local list = {}
+        for sid, s in pairs(acp_sessions) do
+            table.insert(list, {
+                sessionId = sid,
+                cwd = s.cwd,
+                createdAt = s.created_at,
+                updatedAt = s.updated_at,
+                mode = s.mode
+            })
+        end
+        table.sort(list, function(a, b) return a.createdAt > b.createdAt end)
+        return respond({ sessions = list })
+
+    elseif method == "session/cancel" then
+        return nil  -- notification, no response
+
+    else
+        return respond_error(-32601, "Method not found: " .. method)
+    end
 end
 
 log.info("opencode Lua runtime loaded")

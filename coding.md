@@ -49,6 +49,7 @@
 | Zig | https://github.com/ziglang/zig | /code/zig | /code/zig | 待探索 | — |
 | PHP | /opt/php/src | /code/php | /code/php | ✅ 2026-06-09 | 已完成 |
 | opencode | /opt/opencode | /code/opencode | /code/opencode | ✅ 2026-06-15 | 已完成（Node.js/TypeScript 验证） |
+| ComfyUI | /opt/static_comfyui/ComfyUI | /code/comfyui | /code/comfyui | ✅ 2026-07-05 | 已完成 |
 
 
 > 使用 `./analyze_repo.sh <source>` 分析新项目后，数据会自动保存到 `/code/{project}/`。

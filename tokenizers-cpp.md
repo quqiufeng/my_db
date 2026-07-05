@@ -43,7 +43,7 @@ tokenizers-cpp 需要从源码构建（Rust + C++）。
 #!/bin/bash
 set -e
 
-PROJECT_DIR="/home/dministrator/my_db"
+PROJECT_DIR="/opt/my_db"
 TOKENIZERS_DIR="$PROJECT_DIR/third_party/tokenizers-cpp"
 
 echo "=== 构建 tokenizers-cpp ==="
@@ -126,7 +126,7 @@ cp include/tokenizers_c.h /path/to/project/include/tokenizers-cpp/
 
 ```bash
 # 进入项目目录
-cd /home/dministrator/my_db
+cd /opt/my_db
 
 # 1. 确保 tokenizers-cpp 已构建（如果尚未构建）
 if [ ! -f "lib/tokenizers-cpp/libtokenizers_c.a" ]; then
@@ -191,7 +191,7 @@ ldd libonnxruntime_providers_cuda.so | grep "not found" || echo "✓ CUDA provid
 #!/bin/bash
 set -e
 
-PROJECT_DIR="/home/dministrator/my_db"
+PROJECT_DIR="/opt/my_db"
 CUDNN_SRC="/opt/cudnn-linux-x86_64-9.22.0.52_cuda12/lib"
 TRT_SRC="/opt/TensorRT-10/lib"
 
@@ -495,7 +495,7 @@ tokenizers-cpp 支持 HuggingFace 生态系统中的所有主流 tokenizer：
 #!/bin/bash
 set -e
 
-PROJECT_DIR="/home/dministrator/my_db"
+PROJECT_DIR="/opt/my_db"
 CUDNN_SRC="/opt/cudnn-linux-x86_64-9.22.0.52_cuda12/lib"
 TRT_SRC="/opt/TensorRT-10/lib"
 TOKENIZERS_DIR="$PROJECT_DIR/third_party/tokenizers-cpp"

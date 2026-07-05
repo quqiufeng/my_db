@@ -5,6 +5,7 @@
 #include <unistd.h>
 #include <sys/stat.h>
 #include <pwd.h>
+#include <time.h>
 #include "cache.h"
 #include "session.h"
 #include "lua_engine.h"
@@ -266,13 +267,13 @@ static void print_config_help(const char* env_file) {
 static void print_help(void) {
     printf("aicoding CLI\n");
     printf("Usage: aicoding [options]\n");
+    printf("  --acp              ACP server mode (Zed integration, reads JSON-RPC from stdin)\n");
     printf("  --session ID       Session ID (default: default)\n");
     printf("  --project NS       Project directory (default: current dir)\n");
     printf("  --cache DIR        KV Cache directory (default: ~/aicoding/<project_basename>)\n");
     printf("  --env FILE         Load env file (default: ./.env, fallback: ~/.aicoding/.env)\n");
     printf("  --model NAME       Use model from models.json (skips interactive picker)\n");
     printf("  --yes, --non-interactive  Auto-allow all permission prompts\n");
-    printf("  --gui-test-script FILE  Load Lua script to drive GUI and exit\n");
     printf("  --test-compress    Run compression test and exit\n");
     printf("\nREPL commands:\n");
     printf("  /task <desc>       Set current task description\n");
@@ -291,19 +292,17 @@ int main(int argc, char** argv) {
     int non_interactive = 0;
     int allow_all = 0;
     int test_compress = 0;
-    const char* gui_test_script = NULL;
+
+    int acp_mode = 0;
 
     for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "--session") == 0 && i + 1 < argc) session_id = argv[++i];
+        if (strcmp(argv[i], "--acp") == 0) acp_mode = 1;
+        else if (strcmp(argv[i], "--session") == 0 && i + 1 < argc) session_id = argv[++i];
         else if (strcmp(argv[i], "--project") == 0 && i + 1 < argc) project_ns = argv[++i];
         else if (strcmp(argv[i], "--cache") == 0 && i + 1 < argc) cache_dir = argv[++i];
         else if (strcmp(argv[i], "--env") == 0 && i + 1 < argc) env_file = argv[++i];
         else if (strcmp(argv[i], "--model") == 0 && i + 1 < argc) model_name = argv[++i];
         else if (strcmp(argv[i], "--yes") == 0) allow_all = 1;
-        else if (strcmp(argv[i], "--gui-test-script") == 0 && i + 1 < argc) {
-            gui_test_script = argv[++i];
-            non_interactive = 1;
-        }
         else if (strcmp(argv[i], "--test-compress") == 0) {
             test_compress = 1;
             non_interactive = 1;
@@ -344,7 +343,6 @@ int main(int argc, char** argv) {
 
     if (non_interactive) setenv("OPENCODE_NON_INTERACTIVE", "1", 1);
     if (allow_all) setenv("OPENCODE_ALLOW_ALL", "1", 1);
-    if (gui_test_script) setenv("OPENCODE_GUI_TEST_SCRIPT", gui_test_script, 1);
 
     llm_config_t cfg;
     configure_llm(&cfg);
@@ -414,93 +412,103 @@ int main(int argc, char** argv) {
         project_ns);
     lua_engine_dostring(L, proj_cmd);
 
+    // ===== ACP mode: JSON-RPC over stdio for Zed =====
+    if (acp_mode) {
+        fprintf(stderr, "[acp] ACP server mode. Session: %s, Project: %s, Model: %s\n",
+                session_id, project_ns, cfg.model);
+        fprintf(stderr, "[acp] Reading JSON-RPC from stdin...\n");
+
+        char line[65536];
+        while (fgets(line, sizeof(line), stdin)) {
+            char* nl = strchr(line, '\n');
+            if (nl) *nl = '\0';
+            if (line[0] == '\0') continue;
+
+            // All JSON parsing happens in Lua via cjson
+            const char* args[] = { line };
+            char* resp = lua_engine_call_s(L, "acp_dispatch", args, 1);
+            if (resp) {
+                printf("%s\n", resp);
+                fflush(stdout);
+                free(resp);
+            }
+            // If resp is NULL, it's a notification (session/cancel), no response
+        }
+        goto cleanup;
+    }
+
     printf("aicoding CLI ready. Session: %s, Project: %s, Model: %s\n",
            session_id, project_ns, cfg.model);
 
-    /* Default to GUI for interactive runs. Disable via OPENCODE_GUI=0. */
-    int use_gui = 1;
-    const char* gui_env = getenv("OPENCODE_GUI");
-    if (gui_env && strcmp(gui_env, "0") == 0) use_gui = 0;
-    if (use_gui) {
-        printf("Starting GUI...\n");
-        const char* gui_args[] = { session_id, project_ns };
-        char* result = lua_engine_call_s(L, "run_gui", gui_args, 2);
-        if (result) {
-            printf("GUI exited: %s\n", result);
-            free(result);
-        } else {
-            printf("GUI exited without result\n");
+    /* REPL mode (default for interactive runs without --acp) */
+    printf("Type your message below. Use /quit to exit, /task <desc> to set task, /plan <desc> to run plan agent, /build [goal] to run build-fix agent.\n\n");
+
+    char input[4096];
+    while (1) {
+        printf("> ");
+        fflush(stdout);
+        if (!fgets(input, sizeof(input), stdin)) break;
+
+        char* line = trim(input);
+        if (strcmp(line, "/quit") == 0 || strcmp(line, "/exit") == 0) break;
+
+        int turn_id = session_next_turn_id(s);
+        session_start_turn(s, turn_id, "user", line);
+
+        if (strncmp(line, "/task ", 6) == 0) {
+            session_set_task(s, trim(line + 6));
+            printf("Task updated.\n");
+            continue;
         }
-    } else {
-        printf("Type your message below. Use /quit to exit, /task <desc> to set task, /plan <desc> to run plan agent, /build [goal] to run build-fix agent.\n\n");
-
-        char input[4096];
-        while (1) {
-            printf("> ");
-            fflush(stdout);
-            if (!fgets(input, sizeof(input), stdin)) break;
-
-            char* line = trim(input);
-            if (strcmp(line, "/quit") == 0 || strcmp(line, "/exit") == 0) break;
-
-            int turn_id = session_next_turn_id(s);
-            session_start_turn(s, turn_id, "user", line);
-
-            if (strncmp(line, "/task ", 6) == 0) {
-                session_set_task(s, trim(line + 6));
-                printf("Task updated.\n");
-                continue;
-            }
-            if (strncmp(line, "/plan ", 6) == 0) {
-                const char* task = trim(line + 6);
-                const char* args[] = { session_id, project_ns, task };
-                char* response = lua_engine_call_s(L, "run_plan_agent", args, 3);
-                if (response) {
-                    printf("%s\n\n", response);
-                    session_start_turn(s, turn_id, "assistant", response);
-                    free(response);
-                } else {
-                    printf("(plan agent failed)\n\n");
-                }
-                continue;
-            }
-            if (strncmp(line, "/build", 6) == 0) {
-                const char* goal = line + 6;
-                while (*goal == ' ') goal++;
-                if (*goal == '\0') goal = "make the project compile";
-                const char* args[] = { session_id, project_ns, goal };
-                char* response = lua_engine_call_s(L, "run_build_agent", args, 3);
-                if (response) {
-                    printf("%s\n\n", response);
-                    session_start_turn(s, turn_id, "assistant", response);
-                    free(response);
-                } else {
-                    printf("(build agent failed)\n\n");
-                }
-                continue;
-            }
-            if (strncmp(line, "/lua ", 5) == 0) {
-                const char* code = line + 5;
-                if (lua_engine_dostring(L, code) != 0) {
-                    printf("Lua error: %s\n", lua_tostring(lua_engine_state(L), -1));
-                    lua_pop(lua_engine_state(L), 1);
-                }
-                continue;
-            }
-            if (*line == '\0') continue;
-
-            const char* args[] = { session_id, project_ns, line };
-            char* response = lua_engine_call_s(L, "chat_once", args, 3);
-
+        if (strncmp(line, "/plan ", 6) == 0) {
+            const char* task = trim(line + 6);
+            const char* args[] = { session_id, project_ns, task };
+            char* response = lua_engine_call_s(L, "run_plan_agent", args, 3);
             if (response) {
                 printf("%s\n\n", response);
                 session_start_turn(s, turn_id, "assistant", response);
-                const char* summary_args[] = { session_id, "summary" };
-                lua_engine_call_s(L, "generate_summary", summary_args, 2);
                 free(response);
             } else {
-                printf("(no response)\n\n");
+                printf("(plan agent failed)\n\n");
             }
+            continue;
+        }
+        if (strncmp(line, "/build", 6) == 0) {
+            const char* goal = line + 6;
+            while (*goal == ' ') goal++;
+            if (*goal == '\0') goal = "make the project compile";
+            const char* args[] = { session_id, project_ns, goal };
+            char* response = lua_engine_call_s(L, "run_build_agent", args, 3);
+            if (response) {
+                printf("%s\n\n", response);
+                session_start_turn(s, turn_id, "assistant", response);
+                free(response);
+            } else {
+                printf("(build agent failed)\n\n");
+            }
+            continue;
+        }
+        if (strncmp(line, "/lua ", 5) == 0) {
+            const char* code = line + 5;
+            if (lua_engine_dostring(L, code) != 0) {
+                printf("Lua error: %s\n", lua_tostring(lua_engine_state(L), -1));
+                lua_pop(lua_engine_state(L), 1);
+            }
+            continue;
+        }
+        if (*line == '\0') continue;
+
+        const char* args[] = { session_id, project_ns, line };
+        char* response = lua_engine_call_s(L, "chat_once", args, 3);
+
+        if (response) {
+            printf("%s\n\n", response);
+            session_start_turn(s, turn_id, "assistant", response);
+            const char* summary_args[] = { session_id, "summary" };
+            lua_engine_call_s(L, "generate_summary", summary_args, 2);
+            free(response);
+        } else {
+            printf("(no response)\n\n");
         }
     }
 

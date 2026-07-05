@@ -125,7 +125,7 @@
 LD_LIBRARY_PATH=$(pwd):/opt/TensorRT-10/lib:$LD_LIBRARY_PATH \
   ./tools/import_book \
   /book/cache \
-  "/home/dministrator/硅谷钢铁侠.azw3" \
+  "~/硅谷钢铁侠.azw3" \
   /books/elon_musk \
   /opt/books
 ```

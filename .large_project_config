@@ -6,7 +6,7 @@
 
 REPO_PATH="/opt/linux"
 PROJECT_NAME="linux"
-BASE_CACHE="/home/dministrator/my_db/linux_subsystems"
+BASE_CACHE="/opt/my_db/linux_subsystems"
 
 # 子系统列表
 SUB_arch_alpha="/opt/linux/arch//alpha/"
@@ -99,4 +99,4 @@ SUBSYSTEMS=(arch_alpha arch_arc arch_arm arch_arm64 arch_csky arch_loongarch arc
 MAX_CHUNKS_PER_SUB=100000
 
 # 全局符号表文件
-GLOBAL_SYMBOLS="/home/dministrator/my_db/linux_subsystems/global_symbols.jsonl"
+GLOBAL_SYMBOLS="/opt/my_db/linux_subsystems/global_symbols.jsonl"

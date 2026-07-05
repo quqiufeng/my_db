@@ -13,12 +13,6 @@
 #include <unistd.h>
 #include <dlfcn.h>
 
-/* GUI functions are provided by libaicoding_gui.so loaded with RTLD_GLOBAL.
- * Resolve them dynamically so the C core can be linked without the GUI lib. */
-static void* gui_sym(const char* name) {
-    void* p = dlsym(RTLD_DEFAULT, name);
-    return p;
-}
 struct lua_engine {
     lua_State*     L;
     cache_t*       cache;
@@ -397,43 +391,6 @@ static int l_get_lua_state(lua_State* L) {
     return 1;
 }
 
-static int l_gui_set_tokens(lua_State* L) {
-    void* app = lua_touserdata(L, 1);
-    int total = luaL_checkinteger(L, 2);
-    int prompt = luaL_checkinteger(L, 3);
-    int completion = luaL_checkinteger(L, 4);
-    typedef void (*fn_t)(void*, int, int, int);
-    fn_t fn = (fn_t)gui_sym("gui_set_tokens");
-    if (app && fn) {
-        fn(app, total, prompt, completion);
-    }
-    lua_pushboolean(L, 1);
-    return 1;
-}
-
-static int l_gui_set_input(lua_State* L) {
-    void* app = lua_touserdata(L, 1);
-    const char* text = luaL_checkstring(L, 2);
-    typedef void (*fn_t)(void*, const char*);
-    fn_t fn = (fn_t)gui_sym("gui_set_input_value");
-    if (app && fn) {
-        fn(app, text);
-    }
-    lua_pushboolean(L, 1);
-    return 1;
-}
-
-static int l_gui_submit(lua_State* L) {
-    void* app = lua_touserdata(L, 1);
-    typedef void (*fn_t)(void*);
-    fn_t fn = (fn_t)gui_sym("gui_submit_input");
-    if (app && fn) {
-        fn(app);
-    }
-    lua_pushboolean(L, 1);
-    return 1;
-}
-
 static int l_llm_complete_raw(lua_State* L) {
     llm_client_t* llm = get_llm(L);
     if (!llm) {
@@ -463,6 +420,15 @@ static int l_get_model(lua_State* L) {
     return 1;
 }
 
+// ACP send: write a JSON-RPC notification to stdout (for --acp mode)
+static int l_acp_send(lua_State* L) {
+    const char* method = luaL_checkstring(L, 1);
+    const char* params_json = luaL_checkstring(L, 2);
+    fprintf(stdout, "{\"jsonrpc\":\"2.0\",\"method\":\"%s\",\"params\":%s}\n", method, params_json);
+    fflush(stdout);
+    return 0;
+}
+
 static const luaL_Reg opencode_lib[] = {
     {"cache_get",          l_cache_get},
     {"cache_set",          l_cache_set},
@@ -485,9 +451,6 @@ static const luaL_Reg opencode_lib[] = {
     {"http_response",       l_http_response},
     {"http_free",           l_http_free},
     {"get_lua_state",       l_get_lua_state},
-    {"gui_set_tokens",      l_gui_set_tokens},
-    {"gui_set_input",       l_gui_set_input},
-    {"gui_submit",          l_gui_submit},
     {NULL, NULL}
 };
 

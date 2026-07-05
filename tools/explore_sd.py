@@ -11,7 +11,7 @@ import sys
 import json
 from pathlib import Path
 
-sys.path.insert(0, '/home/dministrator/my_db')
+sys.path.insert(0, '/opt/my_db')
 from mydb.cache import open_cache
 
 SD_DIR = '/opt/stable-diffusion.cpp'

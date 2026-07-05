@@ -29,9 +29,9 @@ sys.setdlopenflags(_RTLD_NOW | _RTLD_GLOBAL)
 
 try:
     # Load in dependency order: cuDNN first, then TensorRT core
-    _ctypes.CDLL("/home/dministrator/my_db/libcudnn.so.9")
-    _ctypes.CDLL("/home/dministrator/my_db/libnvinfer.so.10")
-    _ctypes.CDLL("/home/dministrator/my_db/libnvonnxparser.so.10")
+    _ctypes.CDLL("/opt/my_db/libcudnn.so.9")
+    _ctypes.CDLL("/opt/my_db/libnvinfer.so.10")
+    _ctypes.CDLL("/opt/my_db/libnvonnxparser.so.10")
 except Exception:
     pass
 finally:

@@ -140,14 +140,13 @@ set -euo pipefail
 # 环境变量配置（TensorRT + cuDNN + CUDA，兼容本地和远程）
 # ============================================
 GPU_LIBS=""
-[ -d "/home/dministrator/my_db" ] && GPU_LIBS="${GPU_LIBS}:/home/dministrator/my_db"
+[ -d "/opt/my_db" ] && GPU_LIBS="${GPU_LIBS}:/opt/my_db"
 [ -d "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" ] && GPU_LIBS="${GPU_LIBS}:$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 [ -d "/opt/TensorRT-10/lib" ] && GPU_LIBS="${GPU_LIBS}:/opt/TensorRT-10/lib"
 [ -d "/opt/cudnn-linux-x86_64-8.9.7.29_cuda12/lib" ] && GPU_LIBS="${GPU_LIBS}:/opt/cudnn-linux-x86_64-8.9.7.29_cuda12/lib"
 [ -d "/opt/cuda/lib64" ] && GPU_LIBS="${GPU_LIBS}:/opt/cuda/lib64"
-[ -d "/home/dministrator/anaconda3/envs/dl/lib" ] && GPU_LIBS="${GPU_LIBS}:/home/dministrator/anaconda3/envs/dl/lib"
-[ -d "/home/dministrator/anaconda3/envs/dl/lib/python3.10/site-packages/tensorrt_libs" ] && GPU_LIBS="${GPU_LIBS}:/home/dministrator/anaconda3/envs/dl/lib/python3.10/site-packages/tensorrt_libs"
-[ -d "/home/dministrator/anaconda3/envs/dl/lib/python3.10/site-packages/nvidia/cudnn/lib" ] && GPU_LIBS="${GPU_LIBS}:/home/dministrator/anaconda3/envs/dl/lib/python3.10/site-packages/nvidia/cudnn/lib"
+[ -d "/opt/TensorRT-10/lib" ] && GPU_LIBS="${GPU_LIBS}:/opt/TensorRT-10/lib"
+[ -d "/data/venv/lib/python3.12/site-packages/nvidia/cudnn/lib" ] && GPU_LIBS="${GPU_LIBS}:/data/venv/lib/python3.12/site-packages/nvidia/cudnn/lib"
 GPU_LIBS="${GPU_LIBS#:}"
 export LD_LIBRARY_PATH="${GPU_LIBS}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
 

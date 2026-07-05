@@ -8,18 +8,12 @@ local M = {}
 -- In GUI mode the caller should resume the coroutine from the main loop/timer.
 function M.sleep(ms)
     ms = ms or 10
-    if _G.gui_mode then
-        coroutine.yield()
+    local ok, socket = pcall(require, "socket")
+    if ok then
+        socket.sleep(ms / 1000.0)
     else
-        -- CLI fallback: simple blocking sleep
-        -- Use LuaSocket if available, otherwise fall back to os.execute
-        local ok, socket = pcall(require, "socket")
-        if ok then
-            socket.sleep(ms / 1000.0)
-        else
-            local cmd = string.format("sleep %f 2>/dev/null", ms / 1000.0)
-            os.execute(cmd)
-        end
+        local cmd = string.format("sleep %f 2>/dev/null", ms / 1000.0)
+        os.execute(cmd)
     end
 end
 

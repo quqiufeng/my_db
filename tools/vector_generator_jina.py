@@ -12,7 +12,7 @@ import numpy as np
 from tokenizers import Tokenizer
 import onnxruntime as ort
 
-sys.path.insert(0, '/home/dministrator/my_db')
+sys.path.insert(0, '/opt/my_db')
 
 DIM = 768
 MAX_SEQ_LEN = 512
@@ -64,7 +64,7 @@ def generate_vectors(cache_dir, namespace=None):
     
     # Collect items from cache
     import ctypes
-    lib = ctypes.CDLL('/home/dministrator/my_db/libmydb.so')
+    lib = ctypes.CDLL('/opt/my_db/libmydb.so')
     cache = lib.cache_open(cache_dir.encode(), 1024*1024*1024)
     iter_ptr = lib.cache_iter_create(cache)
     

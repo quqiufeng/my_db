@@ -48,14 +48,14 @@ if [ -d "/opt/cuda/lib64" ]; then
 fi
 
 # 本地 anaconda 环境（向后兼容）
-if [ -d "/home/dministrator/anaconda3/envs/dl/lib" ]; then
-    GPU_LIBS="${GPU_LIBS}:/home/dministrator/anaconda3/envs/dl/lib"
+if [ -d "/data/venv/lib" ]; then
+    GPU_LIBS="${GPU_LIBS}:/data/venv/lib"
 fi
-if [ -d "/home/dministrator/anaconda3/envs/dl/lib/python3.10/site-packages/tensorrt_libs" ]; then
-    GPU_LIBS="${GPU_LIBS}:/home/dministrator/anaconda3/envs/dl/lib/python3.10/site-packages/tensorrt_libs"
+if [ -d "/opt/TensorRT-10/lib" ]; then
+    GPU_LIBS="${GPU_LIBS}:/opt/TensorRT-10/lib"
 fi
-if [ -d "/home/dministrator/anaconda3/envs/dl/lib/python3.10/site-packages/nvidia/cudnn/lib" ]; then
-    GPU_LIBS="${GPU_LIBS}:/home/dministrator/anaconda3/envs/dl/lib/python3.10/site-packages/nvidia/cudnn/lib"
+if [ -d "/data/venv/lib/python3.12/site-packages/nvidia/cudnn/lib" ]; then
+    GPU_LIBS="${GPU_LIBS}:/data/venv/lib/python3.12/site-packages/nvidia/cudnn/lib"
 fi
 
 # 去除开头的冒号
