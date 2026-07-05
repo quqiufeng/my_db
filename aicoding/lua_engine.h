@@ -31,6 +31,9 @@ int lua_engine_dostring(lua_engine_t* e, const char* code);
 char* lua_engine_call_s(lua_engine_t* e, const char* func,
                         const char** args, size_t nargs);
 
+/* Set/replace the LLM client after engine creation (needed when model is selected via Lua). */
+void lua_engine_set_llm(lua_engine_t* e, llm_client_t* llm);
+
 #ifdef __cplusplus
 }
 #endif

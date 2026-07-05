@@ -188,87 +188,113 @@ function run_build_agent(session_id, project_ns, goal)
     end
 end
 
-function chat_once(session_id, project_ns, user_query)
-    local protocol = opencode.llm_protocol()
-    local system = prompt.build_system_prompt(session_id, project_ns, tools.get_project_root())
+-- Shared: call LLM with context compression, parse response
+-- Returns (content, tool_calls|nil, err|nil). Does NOT modify messages.
+local function chat_iteration(session_id, system, messages, protocol)
+    local request_messages = context.build_messages(session_id, system, messages)
 
-    -- Start conversation with user message
-    local messages = {
-        { role = "user", content = user_query }
-    }
+    local body = { model = opencode.get_model and opencode.get_model() or "kimi-latest",
+                   messages = {}, temperature = 1.0 }
+    if protocol ~= "anthropic" then
+        body.messages = request_messages
+        body.tools = tools.build_tools_for_request()
+    else
+        body.system = system
+        for _, m in ipairs(request_messages) do
+            if m.role ~= "system" then table.insert(body.messages, m) end
+        end
+        body.tools = tools.build_tools_for_request()
+    end
+
+    local resp = opencode.llm_complete_raw(cjson.encode(body))
+    if not resp then return nil, nil, "llm request failed" end
+
+    local content, reasoning, err, tool_calls
+    if protocol == "anthropic" then
+        content, reasoning, err, tool_calls = parse_anthropic_response(resp)
+    else
+        content, reasoning, err, tool_calls = parse_openai_response(resp)
+    end
+    return content or "", err, tool_calls or {}
+end
+
+-- REPL mode: chat_once uses trace, returns final text
+function chat_once(session_id, project_ns, user_query)
+    local system = prompt.build_system_prompt(session_id, project_ns, tools.get_project_root())
+    local messages = { { role = "user", content = user_query } }
     _G.session_messages[session_id] = messages
     trace.init(session_id, tools.get_project_root())
     trace.agent_start(user_query)
 
-            local max_iterations = 8
-    for i = 1, max_iterations do
+    local protocol = opencode.llm_protocol()
+    for i = 1, 8 do
         log.info("llm iteration %d", i)
+        local content, err, tool_calls = chat_iteration(session_id, system, messages, protocol)
+        if err then log.error("%s", err); trace.error(err); return content or "(error)" end
+        log.debug("content: %s", (content or ""):sub(1, 200))
 
-        -- Apply sliding-window + LRU compression before sending
-        local request_messages, archived = context.build_messages(session_id, system, messages)
-        if archived and #archived > 0 then
-            log.info("archived %d old messages to KV Cache", #archived)
-            trace.context_archive(#archived)
-        end
-
-        -- Build full request body in Lua for easy debugging
-        local request_body = {
-            model = opencode.get_model and opencode.get_model() or "kimi-latest",
-            messages = {},
-            temperature = 1.0
-        }
-        if protocol ~= "anthropic" then
-            request_body.messages = request_messages
-            request_body.tools = tools.build_tools_for_request()
-        else
-            -- Anthropic: system is top-level, messages is just conversation
-            request_body.system = system
-            request_body.messages = {}
-            for _, m in ipairs(request_messages) do
-                if m.role ~= "system" then
-                    table.insert(request_body.messages, m)
-                end
-            end
-            request_body.tools = tools.build_tools_for_request()
-        end
-
-        local body_json = json.encode(request_body)
-        if not body_json then
-            return "(encode error)"
-        end
-        log.debug("request body (first 500): %s", body_json:sub(1, 500))
-        trace.llm_request(body_json:sub(1, 500))
-
-        local response = opencode.llm_complete_raw(body_json)
-        if not response then
-            log.warn("llm_complete_raw returned nil")
-            trace.error("llm_complete_raw returned nil")
-            return nil
-        end
-        log.debug("llm response: %s", response:sub(1, 200))
-        trace.llm_response(response:sub(1, 500))
-
-        local content, reasoning, err, tool_calls
-        if protocol == "anthropic" then
-            content, reasoning, err, tool_calls = parse_anthropic_response(response)
-        else
-            content, reasoning, err, tool_calls = parse_openai_response(response)
-        end
-        if err then
-            log.error("parse error: %s", err)
-            trace.error("response parse error", { error = err })
-            return content or "(parse error)"
-        end
-
-        if not tool_calls or #tool_calls == 0 then
+        if #tool_calls == 0 then
+            pcall(generate_summary, session_id, "end_turn")
             return content or ""
         end
-
-        -- Append assistant message with tool_calls and execute tools
-        append_assistant(messages, content, reasoning, tool_calls)
+        append_assistant(messages, content, nil, tool_calls)
         execute_tools(messages, tool_calls)
     end
+    pcall(generate_summary, session_id, "max_iterations")
+    return "(too many tool iterations)"
+end
 
+-- ACP mode: acp_chat streams via ACP notifications
+function acp_chat(session_id, project_ns, user_query)
+    local system = prompt.build_system_prompt(session_id, project_ns, tools.get_project_root())
+    local messages = _G.session_messages[session_id]
+    if not messages then
+        messages = {}
+        _G.session_messages[session_id] = messages
+    end
+    table.insert(messages, { role = "user", content = user_query })
+
+    local protocol = opencode.llm_protocol()
+    local function acp(method, params) opencode.acp_send(method, cjson.encode(params)) end
+
+    for i = 1, 8 do
+        local content, err, tool_calls = chat_iteration(session_id, system, messages, protocol)
+        if err then return "(error)" end
+
+        if content ~= "" then
+            acp("session/update", {
+                sessionId = session_id,
+                update = { sessionUpdate = "content", content = { type = "text", text = content } }
+            })
+        end
+
+        if #tool_calls == 0 then
+            pcall(generate_summary, session_id, "end_turn")
+            return ""
+        end
+
+        append_assistant(messages, content, nil, tool_calls)
+        for _, tc in ipairs(tool_calls) do
+            acp("session/update", {
+                sessionId = session_id,
+                update = {
+                    sessionUpdate = "tool_call", toolCallId = tc.id, title = tc.name,
+                    kind = tc.name == "bash" and "execute" or tc.name == "read" and "read" or tc.name == "edit" and "edit" or "other",
+                    status = "in_progress", rawInput = tc.arguments
+                }
+            })
+            local result = tools.dispatch(tc)
+            acp("session/update", {
+                sessionId = session_id,
+                update = {
+                    sessionUpdate = "tool_call_update", toolCallId = tc.id,
+                    status = "completed", rawOutput = result
+                }
+            })
+            table.insert(messages, { role = "tool", tool_call_id = tc.id, content = cjson.encode(result) })
+        end
+    end
+    pcall(generate_summary, session_id, "max_iterations")
     return "(too many tool iterations)"
 end
 
@@ -472,14 +498,16 @@ function acp_dispatch(request_json)
 
     elseif method == "session/prompt" then
         local prompt_sid = params.sessionId or ""
+        -- Support per-request cwd (ACP protocol allows overriding)
+        local req_cwd = params.cwd or ""
         local user_text = ""
         if type(params.prompt) == "table" and #params.prompt > 0 then
             local first = params.prompt[1]
             user_text = first.text or (first.content and first.content.text) or ""
         end
-        -- Track session activity
         if acp_sessions[prompt_sid] then
             acp_sessions[prompt_sid].updated_at = os.time()
+            if req_cwd ~= "" then acp_sessions[prompt_sid].cwd = req_cwd end
         end
         local sess_project = (acp_sessions[prompt_sid] and acp_sessions[prompt_sid].cwd) or project_root
         local ok, err = pcall(acp_chat, prompt_sid, sess_project, user_text)
@@ -519,6 +547,81 @@ function acp_dispatch(request_json)
     else
         return respond_error(-32601, "Method not found: " .. method)
     end
+end
+
+-- Model management: load models.json with cjson, select and apply config
+local function load_models_file()
+    local paths = { "/etc/aicoding/models.json",
+                    os.getenv("HOME") .. "/.aicoding/models.json",
+                    "/opt/my_db/aicoding/models.json" }
+    for _, p in ipairs(paths) do
+        local f, err = io.open(p, "r")
+        if f then
+            local text = f:read("*a")
+            f:close()
+            local ok, models = pcall(cjson.decode, text)
+            if ok and type(models) == "table" then return models end
+        end
+    end
+    return {}
+end
+
+-- Select and apply model config. Returns model name string.
+-- If model_name is nil/empty, shows interactive picker on stderr.
+function select_model(model_name)
+    local models = load_models_file()
+    if #models == 0 then return "kimi-latest" end
+
+    -- Find by name or model id
+    local idx = nil
+    if model_name and model_name ~= "" then
+        for i, m in ipairs(models) do
+            if m.name == model_name or m.model == model_name then idx = i; break end
+        end
+        if not idx then
+            io.stderr:write("Model '" .. model_name .. "' not found, using " .. models[1].name .. "\n")
+            idx = 1
+        end
+    end
+
+    -- If only one model or non-interactive, use first
+    if not idx then
+        if #models == 1 then
+            idx = 1
+        else
+            io.stderr:write("\nAvailable models:\n")
+            for i, m in ipairs(models) do
+                io.stderr:write(string.format("  %d. %s (%s)\n", i, m.name, m.provider))
+            end
+            io.stderr:write(string.format("Select model (1-%d, or press Enter for %s): ", #models, models[1].name))
+            io.stderr:flush()
+            local line = io.stdin:read("*l")
+            if line and line ~= "" then
+                local n = tonumber(line)
+                if n and n >= 1 and n <= #models then idx = n else idx = 1 end
+            else
+                idx = 1
+            end
+        end
+    end
+
+    local m = models[idx]
+    -- Apply env vars
+    if m.provider == "anthropic" then
+        os.setenv("LLM_PROTOCOL", "anthropic", true)
+        os.setenv("ANTHROPIC_MODEL", m.model, true)
+    elseif m.provider == "deepseek" then
+        os.setenv("LLM_PROTOCOL", "openai", true)
+        local ds_url = os.getenv("DEEPSEEK_BASE_URL")
+        if ds_url then os.setenv("OPENAI_BASE_URL", ds_url, true) end
+        local ds_key = os.getenv("DEEPSEEK_API_KEY")
+        if ds_key then os.setenv("OPENAI_API_KEY", ds_key, true) end
+        os.setenv("OPENAI_MODEL", m.model, true)
+    else
+        os.setenv("LLM_PROTOCOL", "openai", true)
+        os.setenv("OPENAI_MODEL", m.model, true)
+    end
+    return m.name
 end
 
 log.info("opencode Lua runtime loaded")

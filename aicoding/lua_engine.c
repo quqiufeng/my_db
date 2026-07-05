@@ -518,6 +518,14 @@ int lua_engine_dostring(lua_engine_t* e, const char* code) {
     return luaL_dostring(e->L, code);
 }
 
+void lua_engine_set_llm(lua_engine_t* e, llm_client_t* llm) {
+    if (!e) return;
+    if (e->llm) llm_client_free(e->llm);
+    e->llm = llm;
+    lua_pushlightuserdata(e->L, llm);
+    lua_setglobal(e->L, "__llm");
+}
+
 char* lua_engine_call_s(lua_engine_t* e, const char* func,
                         const char** args, size_t nargs) {
     if (!e || !func) return NULL;

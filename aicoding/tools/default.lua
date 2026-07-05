@@ -1177,16 +1177,33 @@ function M.dispatch(tool_call)
         end
         args = decoded
     end
+    if type(args) ~= "table" then
+        return { ok = false, error = "tool arguments must be a table, got " .. type(args) }
+    end
+    -- Find tool handler
     for _, t in ipairs(M.tools) do
         if t.name == name then
+            -- Validate required params against schema if available
+            if t.parameters and t.parameters.required then
+                for _, req_key in ipairs(t.parameters.required) do
+                    if args[req_key] == nil then
+                        return { ok = false, error = string.format("missing required parameter '%s' for tool '%s'", req_key, name) }
+                    end
+                end
+            end
             local ok, res = pcall(t.handler, args)
             if not ok then
-                return { ok = false, error = tostring(res) }
+                return { ok = false, error = name .. " failed: " .. tostring(res) }
             end
             return res
         end
     end
-    return { ok = false, error = "unknown tool: " .. tostring(name) }
+    -- Unknown tool: list available tools
+    local names = {}
+    for _, t in ipairs(M.tools) do
+        table.insert(names, t.name)
+    end
+    return { ok = false, error = "unknown tool: " .. tostring(name) .. ". available: " .. table.concat(names, ", ") }
 end
 
 return M
