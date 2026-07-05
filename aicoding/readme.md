@@ -86,7 +86,7 @@
 |------|------|
 | **Zed 原生集成** | `--acp` 模式通过 ACP 协议接入 Zed Agent Panel，无需额外 UI |
 | **独立二进制** | 编译成单个 `aicoding`，无 Node.js / Bun / Electron 依赖 |
-| **无限上下文** | 滑动窗口 + KV Cache 归档，默认 16K 窗口永不膨胀 |
+| **无限上下文** | 滑动窗口 + KV Cache 归档，默认 32K 窗口永不膨胀 |
 | **代码语义搜索** | 基于 Jina embeddings + HNSW，自然语言搜索已索引代码库 |
 | **符号上下文** | 调用链展开 (caller/callee)，支持深度控制和批量查询 |
 | **工具调用** | read/write/edit/glob/grep/bash/build/git/web_fetch 等 24+ 工具 |

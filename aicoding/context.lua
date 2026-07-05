@@ -13,7 +13,7 @@ local tokens = require("tokens")
 local M = {}
 
 -- 默认上下文 token 上限，可由环境变量覆盖
-M.MAX_TOKENS = tonumber(os.getenv("OPENCODE_CONTEXT_TOKENS")) or 16384
+M.MAX_TOKENS = tonumber(os.getenv("OPENCODE_CONTEXT_TOKENS")) or 32768
 
 -- 系统提示允许占用的比例（剩余给 messages）
 M.SYSTEM_PROMPT_RATIO = 0.35
