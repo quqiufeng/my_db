@@ -114,6 +114,8 @@ make
 
 生成 `aicoding` 二进制和 `libaicoding_agent.a` 静态库。
 
+> aicoding 的所有会话数据、记忆、知识库保存在项目根目录的 `.opencode/` 下，与 opencode 兼容。
+
 ### 2. 配置 LLM 密钥
 
 aicoding 在启动时按以下优先级加载配置（后加载的覆盖前面的）：

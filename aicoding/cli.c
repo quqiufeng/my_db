@@ -112,7 +112,7 @@ static void print_help(void) {
     printf("  --acp              ACP server mode (Zed integration, reads JSON-RPC from stdin)\n");
     printf("  --session ID       Session ID (default: default)\n");
     printf("  --project NS       Project directory (default: current dir)\n");
-    printf("  --cache DIR        KV Cache directory (default: ~/aicoding/<project_basename>)\n");
+    printf("  --cache DIR        KV Cache directory (default: <project_root>/.opencode)\n");
     printf("  --env FILE         Load env file (default: ./.env, fallback: ~/.aicoding/.env)\n");
     printf("  --model NAME       Use model from models.json (skips interactive picker)\n");
     printf("  --yes, --non-interactive  Auto-allow all permission prompts\n");
@@ -172,12 +172,22 @@ int main(int argc, char** argv) {
     if (non_interactive || acp_mode) setenv("OPENCODE_NON_INTERACTIVE", "1", 1);
     if (allow_all) setenv("OPENCODE_ALLOW_ALL", "1", 1);
 
-    /* Compute default cache directory: ~/aicoding/<project_basename> */
-    char default_cache_dir[1024];
+    /* Compute default cache directory: <project_root>/.opencode/ */
+    char default_cache_dir[2048];
     if (!cache_dir) {
-        const char* home = get_home_dir();
-        const char* base = project_basename(project_ns);
-        snprintf(default_cache_dir, sizeof(default_cache_dir), "%s/aicoding/%s", home, base);
+        const char* root = project_ns;
+        char abs_path[2048];
+        if (project_ns[0] == '.' || project_ns[0] != '/') {
+            char cwd[2048];
+            if (getcwd(cwd, sizeof(cwd))) {
+                if (strcmp(project_ns, ".") == 0)
+                    snprintf(abs_path, sizeof(abs_path), "%s", cwd);
+                else
+                    snprintf(abs_path, sizeof(abs_path), "%s/%s", cwd, project_ns);
+                root = abs_path;
+            }
+        }
+        snprintf(default_cache_dir, sizeof(default_cache_dir), "%s/.opencode", root);
         ensure_dir(default_cache_dir);
         cache_dir = default_cache_dir;
     }
