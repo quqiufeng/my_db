@@ -550,6 +550,9 @@ function acp_dispatch(request_json)
 end
 
 -- Model management: load models.json with cjson, select and apply config
+local ffi = require("ffi")
+ffi.cdef("int setenv(const char* name, const char* value, int overwrite);")
+local function setenv(k, v) ffi.C.setenv(k, v, 1) end
 local function load_models_file()
     local paths = { "/etc/aicoding/models.json",
                     os.getenv("HOME") .. "/.aicoding/models.json",
@@ -584,9 +587,9 @@ function select_model(model_name)
         end
     end
 
-    -- If only one model or non-interactive, use first
+    -- If only one model or non-interactive (stdin is a pipe, e.g. ACP mode), use first
     if not idx then
-        if #models == 1 then
+        if #models == 1 or os.getenv("OPENCODE_NON_INTERACTIVE") then
             idx = 1
         else
             io.stderr:write("\nAvailable models:\n")
@@ -608,18 +611,18 @@ function select_model(model_name)
     local m = models[idx]
     -- Apply env vars
     if m.provider == "anthropic" then
-        os.setenv("LLM_PROTOCOL", "anthropic", true)
-        os.setenv("ANTHROPIC_MODEL", m.model, true)
+        setenv("LLM_PROTOCOL", "anthropic")
+        setenv("ANTHROPIC_MODEL", m.model)
     elseif m.provider == "deepseek" then
-        os.setenv("LLM_PROTOCOL", "openai", true)
+        setenv("LLM_PROTOCOL", "openai")
         local ds_url = os.getenv("DEEPSEEK_BASE_URL")
-        if ds_url then os.setenv("OPENAI_BASE_URL", ds_url, true) end
+        if ds_url then setenv("OPENAI_BASE_URL", ds_url) end
         local ds_key = os.getenv("DEEPSEEK_API_KEY")
-        if ds_key then os.setenv("OPENAI_API_KEY", ds_key, true) end
-        os.setenv("OPENAI_MODEL", m.model, true)
+        if ds_key then setenv("OPENAI_API_KEY", ds_key) end
+        setenv("OPENAI_MODEL", m.model)
     else
-        os.setenv("LLM_PROTOCOL", "openai", true)
-        os.setenv("OPENAI_MODEL", m.model, true)
+        setenv("LLM_PROTOCOL", "openai")
+        setenv("OPENAI_MODEL", m.model)
     end
     return m.name
 end
