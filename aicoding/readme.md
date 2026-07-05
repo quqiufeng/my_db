@@ -128,20 +128,20 @@ aicoding 在启动时按以下优先级加载配置（后加载的覆盖前面�
 ```bash
 mkdir -p ~/.aicoding
 cat > ~/.aicoding/.env << 'EOF'
-# 使用 Kimi（推荐，自带 kimi-latest 模型）
-OPENAI_API_KEY=sk-kimi-...
-OPENAI_BASE_URL=https://api.kimi.com/coding/v1
-LLM_USER_AGENT=KimiCLI/1.0.0
+# DeepSeek（默认，配合 --model deepseek-v4-flash）
+DEEPSEEK_API_KEY=sk-...
+DEEPSEEK_BASE_URL=https://api.deepseek.com
 
-# 或使用 DeepSeek
-# DEEPSEEK_API_KEY=sk-deepseek-...
-# DEEPSEEK_BASE_URL=https://api.deepseek.com
+# 或使用 Kimi
+# OPENAI_API_KEY=sk-kimi-...
+# OPENAI_BASE_URL=https://api.kimi.com/coding/v1
+# LLM_USER_AGENT=KimiCLI/1.0.0
 
 # 或使用 OpenAI
 # OPENAI_API_KEY=sk-...
 # OPENAI_BASE_URL=https://api.openai.com/v1
 
-# 通用设置
+# 通用
 LLM_PROTOCOL=openai
 LLM_TEMPERATURE=1.0
 EOF
@@ -160,15 +160,67 @@ EOF
   "agent_servers": {
     "aicoding": {
       "command": "/opt/my_db/aicoding/aicoding.sh",
-      "args": ["--acp", "--project", "."]
+      "args": ["--acp", "--project", ".", "--model", "deepseek-v4-flash"],
+      "env": {
+        "DEEPSEEK_API_KEY": "sk-your-key-here",
+        "DEEPSEEK_BASE_URL": "https://api.deepseek.com",
+        "LLM_PROTOCOL": "openai",
+        "LLM_TEMPERATURE": "1.0"
+      }
     }
   }
 }
 ```
 
-`--project .` 表示以当前项目目录为工作目录。如需固定目录可改为绝对路径。
+所有配置统一在 Zed 的 `settings.json` 中管理，无需额外的 `.env` 文件。`--project .` 表示以当前项目目录为工作目录。`--model` 指定模型，aicoding 会根据模型名自动设置对应的 provider 环境变量。
 
-API key 通过 `~/.aicoding/.env` 配置，不需要写在 settings.json 中。
+其他提供商配置示例：
+
+<details>
+<summary>Kimi</summary>
+
+```json
+{
+  "args": ["--acp", "--project", ".", "--model", "kimi-latest"],
+  "env": {
+    "OPENAI_API_KEY": "sk-kimi-...",
+    "OPENAI_BASE_URL": "https://api.kimi.com/coding/v1",
+    "LLM_USER_AGENT": "KimiCLI/1.0.0",
+    "LLM_PROTOCOL": "openai"
+  }
+}
+```
+</details>
+
+<details>
+<summary>OpenAI</summary>
+
+```json
+{
+  "args": ["--acp", "--project", ".", "--model", "gpt-4o"],
+  "env": {
+    "OPENAI_API_KEY": "sk-...",
+    "OPENAI_BASE_URL": "https://api.openai.com/v1",
+    "LLM_PROTOCOL": "openai"
+  }
+}
+```
+</details>
+
+<details>
+<summary>Anthropic Claude</summary>
+
+```json
+{
+  "args": ["--acp", "--project", "."],
+  "env": {
+    "ANTHROPIC_API_KEY": "sk-ant-...",
+    "ANTHROPIC_BASE_URL": "https://api.anthropic.com",
+    "LLM_PROTOCOL": "anthropic"
+  }
+}
+```
+</details>
 
 #### 3.2 使用 aicoding
 
