@@ -451,6 +451,7 @@ static const luaL_Reg opencode_lib[] = {
     {"http_response",       l_http_response},
     {"http_free",           l_http_free},
     {"get_lua_state",       l_get_lua_state},
+    {"acp_send",            l_acp_send},
     {NULL, NULL}
 };
 

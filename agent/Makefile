@@ -56,17 +56,9 @@ install: $(TARGET)
 	@echo "  INSTALL $(TARGET)"
 
 .PHONY: all tools clean test install
-
-# Test targets
-TEST_DIR = tests
-
-test:  
 	for t in ; do ./190561t || exit 1; done
 .PHONY: test
 
-
-# Test targets
-TEST_DIR = tests
 TEST_BINS = tests/test_election tests/test_protocol tests/test_json
 
 tests/test_election: tests/test_election.c src/election.c

@@ -14,6 +14,7 @@ lib_paths = [
     "libmydb.so", 
     "./libcache.so",
     "libcache.so",
+    "/opt/my_db/libmydb.so",
     "/usr/local/lib/libmydb.so",
     "/usr/lib/libmydb.so",
 ]

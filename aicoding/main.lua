@@ -244,59 +244,7 @@ function chat_once(session_id, project_ns, user_query)
     return "(too many tool iterations)"
 end
 
--- ACP mode: acp_chat streams via ACP notifications
-function acp_chat(session_id, project_ns, user_query)
-    local system = prompt.build_system_prompt(session_id, project_ns, tools.get_project_root())
-    local messages = _G.session_messages[session_id]
-    if not messages then
-        messages = {}
-        _G.session_messages[session_id] = messages
-    end
-    table.insert(messages, { role = "user", content = user_query })
-
-    local protocol = opencode.llm_protocol()
-    local function acp(method, params) opencode.acp_send(method, cjson.encode(params)) end
-
-    for i = 1, 8 do
-        local content, err, tool_calls = chat_iteration(session_id, system, messages, protocol)
-        if err then return "(error)" end
-
-        if content ~= "" then
-            acp("session/update", {
-                sessionId = session_id,
-                update = { sessionUpdate = "content", content = { type = "text", text = content } }
-            })
-        end
-
-        if #tool_calls == 0 then
-            pcall(generate_summary, session_id, "end_turn")
-            return ""
-        end
-
-        append_assistant(messages, content, nil, tool_calls)
-        for _, tc in ipairs(tool_calls) do
-            acp("session/update", {
-                sessionId = session_id,
-                update = {
-                    sessionUpdate = "tool_call", toolCallId = tc.id, title = tc.name,
-                    kind = tc.name == "bash" and "execute" or tc.name == "read" and "read" or tc.name == "edit" and "edit" or "other",
-                    status = "in_progress", rawInput = tc.arguments
-                }
-            })
-            local result = tools.dispatch(tc)
-            acp("session/update", {
-                sessionId = session_id,
-                update = {
-                    sessionUpdate = "tool_call_update", toolCallId = tc.id,
-                    status = "completed", rawOutput = result
-                }
-            })
-            table.insert(messages, { role = "tool", tool_call_id = tc.id, content = cjson.encode(result) })
-        end
-    end
-    pcall(generate_summary, session_id, "max_iterations")
-    return "(too many tool iterations)"
-end
+-- ACP chat loop: streams ACP JSON-RPC notifications, accumulates history, stores summaries
 
 function generate_summary(session_id, reason)
     local messages = _G.session_messages and _G.session_messages[session_id]
@@ -342,13 +290,19 @@ function run_gui(session_id, project_ns)
     return "GUI mode removed. Use --acp for Zed integration."
 end
 
--- ACP chat loop: like chat_once but streams ACP JSON-RPC notifications to stdout
+-- ACP chat loop: streams ACP JSON-RPC notifications, accumulates history, persists memory
 -- Called from C when --acp flag is used (Zed integration)
 function acp_chat(session_id, project_ns, user_query)
     local protocol = opencode.llm_protocol()
     local system = prompt.build_system_prompt(session_id, project_ns, tools.get_project_root())
 
-    local messages = { { role = "user", content = user_query } }
+    local messages = _G.session_messages[session_id]
+    if not messages then
+        messages = {}
+        _G.session_messages[session_id] = messages
+    end
+    table.insert(messages, { role = "user", content = user_query })
+
     local max_iterations = 8
     local function acp(method, params) opencode.acp_send(method, cjson.encode(params)) end
 
@@ -386,23 +340,20 @@ function acp_chat(session_id, project_ns, user_query)
         end
         if err then return content or "(parse error)" end
 
-        -- Stream text content via ACP
         if content and content ~= "" then
             acp("session/update", {
                 sessionId = session_id,
-                update = { sessionUpdate = "content", content = { type = "text", text = content } }
+                update = { sessionUpdate = "agent_message_chunk", content = { type = "text", text = content } }
             })
         end
 
         if not tool_calls or #tool_calls == 0 then
-            -- Store summary
             pcall(generate_summary, session_id, "end_turn")
             return ""
         end
 
         append_assistant(messages, content, reasoning, tool_calls)
         for _, tc in ipairs(tool_calls) do
-            -- Report tool call via ACP
             acp("session/update", {
                 sessionId = session_id,
                 update = {
@@ -418,7 +369,6 @@ function acp_chat(session_id, project_ns, user_query)
             local result = tools.dispatch(tc)
             local result_json = cjson.encode(result)
 
-            -- Report tool result via ACP
             acp("session/update", {
                 sessionId = session_id,
                 update = {

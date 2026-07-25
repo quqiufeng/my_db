@@ -177,7 +177,7 @@ void peer_mark_offline(void *vstate, peer_t *peer) {
     peer->fd    = -1;
     peer->state = PEER_OFFLINE;
     peer->heartbeat_miss = 0;
-    peer->next_reconnect = now_ms() + 1000;  /* 5s 后重连 */
+    peer->next_reconnect = now_ms() + 1000;  /* 1s 后重连 */
 }
 
 /* ===================================================================

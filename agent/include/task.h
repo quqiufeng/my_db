@@ -35,7 +35,7 @@ typedef struct {
  * =================================================================== */
 typedef struct {
     char     task_id[64];       /* 任务 ID */
-    char     node_id[64];       /* 执行节点 ID */
+    char     node_id[128];       /* 执行节点 ID */
     int      exit_code;         /* 退出码 */
     char     stdout_buf[4096];  /* 标准输出 */
     char     stderr_buf[1024];  /* 错误输出 */

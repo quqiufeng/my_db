@@ -8,6 +8,7 @@ local C = ffi.C
 local lib_paths = {
     "./libmydb.so",
     "libmydb.so",
+    "/opt/my_db/libmydb.so",
     "/usr/local/lib/libmydb.so",
     "/usr/lib/libmydb.so",
 }
@@ -725,6 +726,23 @@ end
 
 function mydb.cache_check(db_dir)
     return _lib.cache_check(db_dir) == 0
+end
+
+function Cache:search_semantic(cache_dir, query, max_results, namespace)
+    max_results = max_results or 10
+    local cmd = string.format("/opt/my_db/tools/vector_search --json %s %q %d",
+        cache_dir, query, max_results)
+    if namespace and namespace ~= "" then
+        cmd = cmd .. " " .. namespace
+    end
+    local f = io.popen(cmd, "r")
+    if not f then return {} end
+    local output = f:read("*a")
+    f:close()
+    if not output or output == "" then return {} end
+    local ok, results = pcall(require("cjson").decode, output)
+    if ok and type(results) == "table" then return results end
+    return {}
 end
 
 return mydb

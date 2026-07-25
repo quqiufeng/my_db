@@ -244,7 +244,7 @@ int plugin_load_all(agent_state_t *state) {
         int len = strlen(entry->d_name);
         if (len < 4 || strcmp(entry->d_name + len - 4, ".lua") != 0)
             continue;
-        char path[512];
+        char path[1024];
         snprintf(path, sizeof(path), "%s/%s", pm->plugin_dir, entry->d_name);
         if (plugin_load_one(state, path) == 0)
             count++;

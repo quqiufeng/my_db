@@ -6,7 +6,6 @@
 #include <stdlib.h>
 #include <arpa/inet.h>
 #include "agent.h"
-#include <errno.h>
 #include <stdlib.h>   /* htonl, ntohl */
 
 /* ===================================================================
