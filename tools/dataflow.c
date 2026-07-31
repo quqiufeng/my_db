@@ -369,7 +369,8 @@ static int analyze_meta(const char* meta_file) {
         while (*kind_p && *kind_p != '"' && i < 31) kind[i++] = *kind_p++;
         line_start = atoi(line_p);
         
-        if (strcmp(kind, "function") != 0 && strcmp(kind, "method") != 0) continue;
+        if (strcmp(kind, "function") != 0 && strcmp(kind, "method") != 0 &&
+            strcmp(kind, "ts_function") != 0 && strcmp(kind, "ts_method") != 0) continue;
         
         i = 0;
         const char* cp = content_p;
