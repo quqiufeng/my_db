@@ -87,7 +87,8 @@ local function sha256(data)
             local s1 = bit.bxor(rotr(w[i - 2], 17), rotr(w[i - 2], 19), bit.rshift(w[i - 2], 10))
             w[i] = bit.band(w[i - 16] + s0 + w[i - 7] + s1, 0xffffffff)
         end
-        local a, b, c, d, e, f, g, hh = table.unpack(h)
+        local unpack_fn = table.unpack or unpack
+        local a, b, c, d, e, f, g, hh = unpack_fn(h)
         for i = 1, 64 do
             local S1 = bit.bxor(rotr(e, 6), rotr(e, 11), rotr(e, 25))
             local ch = bit.bxor(bit.band(e, f), bit.band(bit.bnot(e), g))
@@ -249,6 +250,15 @@ local function permit(action, resource)
         end
     end
     if effect == "ask" then
+        -- ACP mode: no tty prompt available; auto-allow so tools keep working
+        -- (interactive permission UI on the client side is a later milestone).
+        if os.getenv("OPENCODE_ACP") == "1" then
+            return true, nil
+        end
+        if os.getenv("OPENCODE_NON_INTERACTIVE") == "1" then
+            log.warn("permission denied (non-interactive): %s %s", action, resource)
+            return false, "denied by user (non-interactive)"
+        end
         log.info("asking user for permission: %s %s", action, resource)
         local answer = permissions.prompt_user(action, resource)
         if answer == "deny" then

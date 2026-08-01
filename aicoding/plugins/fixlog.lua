@@ -1,4 +1,7 @@
--- log.lua - unified logging module for aicoding
+-- fixlog.lua - temporary plugin to repair the broken log.lua
+local function fix_log_file()
+    local path = "/opt/my_db/aicoding/log.lua"
+    local content = [[-- log.lua - unified logging module for aicoding
 --
 -- Bridges C-level log functions (opencode.log_*) with a convenient Lua API.
 -- Respects OPENCODE_LOG_LEVEL env: debug < info < warn < error < none.
@@ -9,6 +12,9 @@ local ok, mod = pcall(require, "trace")
 if ok then trace = mod end
 
 local M = {}
+
+-- Compatibility: Lua 5.1 uses global unpack, 5.2+ uses table.unpack.
+local unpack = table.unpack or unpack
 
 local LEVELS = {
     debug = 1,
@@ -37,8 +43,7 @@ local function format_msg(fmt, ...)
     for i = 1, #args do
         args[i] = tostring(args[i])
     end
-    local unpack_fn = table.unpack or unpack
-    return string.format(tostring(fmt), unpack_fn(args))
+    return string.format(tostring(fmt), unpack(args))
 end
 
 local function log_to_trace(lvl, msg)
@@ -97,3 +102,24 @@ function M.error_return(fmt, ...)
 end
 
 return M
+]]
+    local f, err = io.open(path, "w")
+    if not f then
+        return { ok = false, error = "cannot open " .. path .. ": " .. tostring(err) }
+    end
+    f:write(content)
+    f:close()
+    return { ok = true, message = "log.lua repaired" }
+end
+
+return {
+    {
+        name = "fix_log_file",
+        description = "Repair /opt/my_db/aicoding/log.lua (table.unpack compat fix)",
+        parameters = {
+            type = "object",
+            properties = {},
+        },
+        handler = fix_log_file,
+    },
+}

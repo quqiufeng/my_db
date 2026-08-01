@@ -169,7 +169,8 @@ int main(int argc, char** argv) {
     load_env_file(global_env);
     load_env_file(env_file);
 
-    if (non_interactive || acp_mode) setenv("OPENCODE_NON_INTERACTIVE", "1", 1);
+    if (non_interactive) setenv("OPENCODE_NON_INTERACTIVE", "1", 1);
+    if (acp_mode) setenv("OPENCODE_ACP", "1", 1);
     if (allow_all) setenv("OPENCODE_ALLOW_ALL", "1", 1);
 
     /* Compute default cache directory: <project_root>/.opencode/ */

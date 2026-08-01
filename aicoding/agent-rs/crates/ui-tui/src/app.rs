@@ -49,6 +49,25 @@ pub struct App {
 
 type PromptFut = Pin<Box<dyn Future<Output = Result<agent_acp::SessionPromptResult, AcpError>>>>;
 
+fn diff_line_style(l: &str) -> Option<Style> {
+    if l.starts_with("diff --git") || l.starts_with("index ") || l.starts_with("+++") || l.starts_with("---")
+    {
+        Some(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )
+    } else if l.starts_with('+') {
+        Some(Style::default().fg(Color::Green))
+    } else if l.starts_with('-') {
+        Some(Style::default().fg(Color::Red))
+    } else if l.starts_with("@@") {
+        Some(Style::default().fg(Color::Cyan))
+    } else {
+        None
+    }
+}
+
 pub struct LineInfo {
     pub msg: Option<usize>,
     pub is_tool_title: bool,
@@ -171,6 +190,11 @@ impl App {
             } => {
                 let text = match raw_output {
                     Some(Value::String(s)) => s,
+                    Some(Value::Object(obj)) => match obj.get("output") {
+                        Some(Value::String(s)) => s.clone(),
+                        Some(other) => other.to_string(),
+                        None => Value::Object(obj).to_string(),
+                    },
                     Some(other) => other.to_string(),
                     None => String::new(),
                 };
@@ -296,6 +320,11 @@ impl App {
                         ]),
                     });
                     if item.expanded {
+                        let is_diff = item.output.lines().any(|l| {
+                            l.starts_with("diff --git")
+                                || (l.starts_with("@@") && l.contains("@@"))
+                                || l.starts_with("+++ ")
+                        });
                         for (n, l) in item.output.lines().enumerate() {
                             if n >= 200 {
                                 out.push(LineInfo {
@@ -308,13 +337,16 @@ impl App {
                                 });
                                 break;
                             }
+                            let style = if is_diff {
+                                diff_line_style(l)
+                                    .unwrap_or(Style::default().fg(Color::DarkGray))
+                            } else {
+                                Style::default().fg(Color::DarkGray)
+                            };
                             out.push(LineInfo {
                                 msg: Some(i),
                                 is_tool_title: false,
-                                line: Line::from(Span::styled(
-                                    format!("  │ {l}"),
-                                    Style::default().fg(Color::DarkGray),
-                                )),
+                                line: Line::from(Span::styled(format!("  │ {l}"), style)),
                             });
                         }
                         out.push(LineInfo {
@@ -576,5 +608,52 @@ fn handle_edit_key(app: &mut App, k: &crossterm::event::KeyEvent) {
         KeyCode::Delete => input.delete(),
         KeyCode::Char(c) => input.insert_char(c),
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn style_fg(s: &Style) -> Option<Color> {
+        s.fg
+    }
+
+    #[test]
+    fn diff_detection() {
+        let diff = "diff --git a/app.txt b/app.txt\nindex 3b18e51..a2b2a71 100644\n--- a/app.txt\n+++ b/app.txt\n@@ -1 +1,2 @@\n hello world\n+hello world again\n";
+        let is_diff = diff.lines().any(|l| {
+            l.starts_with("diff --git")
+                || (l.starts_with("@@") && l.contains("@@"))
+                || l.starts_with("+++ ")
+        });
+        assert!(is_diff, "diff output should be detected");
+
+        let normal = "-rw-r--r-- 1 root root 10 file.txt\n-rw-r--r-- 1 root root 20 other\n";
+        let is_diff = normal.lines().any(|l| {
+            l.starts_with("diff --git")
+                || (l.starts_with("@@") && l.contains("@@"))
+                || l.starts_with("+++ ")
+        });
+        assert!(!is_diff, "ls-style output should not be flagged as diff");
+    }
+
+    #[test]
+    fn diff_line_colors() {
+        let cases = [
+            ("diff --git a/x b/x", Some(Color::Cyan)),
+            ("index 3b18e51..a2b2a71 100644", Some(Color::Cyan)),
+            ("--- a/x", Some(Color::Cyan)),
+            ("+++ b/x", Some(Color::Cyan)),
+            ("+added line", Some(Color::Green)),
+            ("-removed line", Some(Color::Red)),
+            ("@@ -1 +1,2 @@", Some(Color::Cyan)),
+            (" context line", None),
+            ("  indented context", None),
+        ];
+        for (line, want) in cases {
+            let got = diff_line_style(line).map(|s| style_fg(&s)).flatten();
+            assert_eq!(got, want, "line: {line:?}");
+        }
     }
 }
