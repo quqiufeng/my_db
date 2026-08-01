@@ -6,12 +6,13 @@ use agent_acp::types::{SessionUpdateParams, Update};
 use agent_acp::{Client, ClientConfig};
 
 async fn run_turn(
-    client: &mut Client,
+    client: &Client,
+    events_rx: tokio::sync::broadcast::Receiver<agent_acp::types::Event>,
     session_id: &str,
     text: &str,
     cwd: &str,
 ) -> Result<bool, Box<dyn std::error::Error>> {
-    let mut events = client.subscribe();
+    let mut events = events_rx;
     let prompt = client.session_prompt(session_id, text, Some(cwd));
     tokio::pin!(prompt);
     let mut ctrl_c_count = 0;
@@ -82,7 +83,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("[agent-cli] engine: {bin_path}");
     eprintln!("[agent-cli] project: {project_root}");
 
-    let (mut client, _reader_task) = Client::spawn(cfg).await?;
+    let (client, events_rx, _reader_task) = Client::spawn(cfg).await?;
     let info = client.initialize().await?;
     eprintln!(
         "[agent-cli] connected to {} v{} (protocol {})",
@@ -109,7 +110,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         if text == "/quit" || text == "/exit" {
             break;
         }
-        let cancelled = run_turn(&mut client, &sess.session_id, &text, &project_root).await?;
+        let cancelled = run_turn(&client, events_rx.resubscribe(), &sess.session_id, &text, &project_root).await?;
         if cancelled {
             let _ = client.session_cancel(&sess.session_id).await;
             eprintln!("[agent-cli] turn cancelled");

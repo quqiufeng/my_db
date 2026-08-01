@@ -109,7 +109,7 @@ static void print_config_help(const char* env_file) {
 static void print_help(void) {
     printf("aicoding CLI\n");
     printf("Usage: aicoding [options]\n");
-    printf("  --acp              ACP server mode (Zed integration, reads JSON-RPC from stdin)\n");
+    printf("  --acp              ACP server mode (JSON-RPC over stdio)\n");
     printf("  --session ID       Session ID (default: default)\n");
     printf("  --project NS       Project directory (default: current dir)\n");
     printf("  --cache DIR        KV Cache directory (default: <project_root>/.opencode)\n");
@@ -258,7 +258,7 @@ int main(int argc, char** argv) {
         project_ns);
     lua_engine_dostring(L, proj_cmd);
 
-    // ===== ACP mode: JSON-RPC over stdio for Zed =====
+    // ===== ACP mode: JSON-RPC over stdio =====
     if (acp_mode) {
         fprintf(stderr, "[acp] ACP server mode. Session: %s, Project: %s, Model: %s\n",
                 session_id, project_ns, cfg.model);

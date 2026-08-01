@@ -111,3 +111,8 @@ opencode/opencode_cli
 opencode/gui/target/
 opencode/gui/Cargo.lock
 tools/pdf2md
+
+# aicoding runtime data
+.aicoding/
+.opencode/
+*.bak

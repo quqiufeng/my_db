@@ -25,14 +25,14 @@ pub enum AcpError {
 
 pub struct Client {
     tx: mpsc::Sender<Outbound>,
-    events: tokio::sync::broadcast::Receiver<Event>,
     next_id: Arc<std::sync::atomic::AtomicU64>,
     engine_name: String,
+    model: String,
 }
 
 impl Client {
-    pub fn subscribe(&mut self) -> tokio::sync::broadcast::Receiver<Event> {
-        self.events.resubscribe()
+    pub fn model_name(&self) -> &str {
+        &self.model
     }
 }
 
@@ -56,7 +56,7 @@ enum Outbound {
 }
 
 impl Client {
-    pub async fn spawn(cfg: ClientConfig) -> Result<(Self, JoinHandle<Result<(), AcpError>>), AcpError> {
+    pub async fn spawn(cfg: ClientConfig) -> Result<(Self, tokio::sync::broadcast::Receiver<Event>, JoinHandle<Result<(), AcpError>>), AcpError> {
         let mut cmd = tokio::process::Command::new(&cfg.bin_path);
         cmd.args(["--acp", "--project", &cfg.project_root, "--model", &cfg.model])
             .stdin(Stdio::piped())
@@ -149,20 +149,20 @@ impl Client {
             }
         });
 
-        let mut client = Self {
+        let client = Self {
             tx,
-            events: events_rx,
             next_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
             engine_name: format!("{} (pid {})", cfg.bin_path, child.id().unwrap_or(0)),
+            model: cfg.model.clone(),
         };
         client
             .request::<InitializeParams, InitializeResult>("initialize", Some(InitializeParams {}))
             .await?;
-        Ok((client, reader_task))
+        Ok((client, events_rx, reader_task))
     }
 
     pub async fn request<Req: Serialize, Res: for<'de> serde::Deserialize<'de>>(
-        &mut self,
+        &self,
         method: &str,
         params: Option<Req>,
     ) -> Result<Res, AcpError> {
@@ -186,7 +186,7 @@ impl Client {
         serde_json::from_value(raw).map_err(|e| AcpError::Protocol(format!("bad response: {e}")))
     }
 
-    pub async fn notify(&mut self, method: &str, params: Value) -> Result<(), AcpError> {
+    pub async fn notify(&self, method: &str, params: Value) -> Result<(), AcpError> {
         let id = self.next_id.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let (reply_tx, _) = oneshot::channel();
         let payload = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params})
@@ -198,17 +198,17 @@ impl Client {
             .map_err(|_| AcpError::EngineExited("engine channel closed".into()))
     }
 
-    pub async fn initialize(&mut self) -> Result<InitializeResult, AcpError> {
+    pub async fn initialize(&self) -> Result<InitializeResult, AcpError> {
         self.request("initialize", Some(InitializeParams {})).await
     }
 
-    pub async fn session_new(&mut self, cwd: &str) -> Result<SessionNewResult, AcpError> {
+    pub async fn session_new(&self, cwd: &str) -> Result<SessionNewResult, AcpError> {
         self.request("session/new", Some(SessionNewParams { cwd: cwd.into() }))
             .await
     }
 
     pub async fn session_prompt(
-        &mut self,
+        &self,
         session_id: &str,
         text: &str,
         cwd: Option<&str>,
@@ -225,7 +225,7 @@ impl Client {
     }
 
     pub async fn session_set_mode(
-        &mut self,
+        &self,
         session_id: &str,
         mode_id: &str,
     ) -> Result<SessionSetModeResult, AcpError> {
@@ -239,7 +239,7 @@ impl Client {
         .await
     }
 
-    pub async fn session_close(&mut self, session_id: &str) -> Result<(), AcpError> {
+    pub async fn session_close(&self, session_id: &str) -> Result<(), AcpError> {
         let _: Value = self.request(
             "session/close",
             Some(SessionCloseParams { session_id: session_id.into() }),
@@ -248,24 +248,13 @@ impl Client {
         Ok(())
     }
 
-    pub async fn session_list(&mut self) -> Result<SessionListResult, AcpError> {
+    pub async fn session_list(&self) -> Result<SessionListResult, AcpError> {
         self.request("session/list", Some(SessionListParams {})).await
     }
 
-    pub async fn session_cancel(&mut self, session_id: &str) -> Result<(), AcpError> {
+    pub async fn session_cancel(&self, session_id: &str) -> Result<(), AcpError> {
         self.notify("session/cancel", json!({ "sessionId": session_id }))
             .await
-    }
-
-    pub async fn next_event(&mut self) -> Result<Event, AcpError> {
-        self.events.recv().await.map_err(|e| match e {
-            tokio::sync::broadcast::error::RecvError::Lagged(_) => {
-                AcpError::Protocol("event stream lagged".into())
-            }
-            tokio::sync::broadcast::error::RecvError::Closed => {
-                AcpError::EngineExited("event channel closed".into())
-            }
-        })
     }
 
     pub fn engine_name(&self) -> &str {
