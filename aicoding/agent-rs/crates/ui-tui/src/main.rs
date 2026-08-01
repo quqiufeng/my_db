@@ -14,6 +14,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut project = PathBuf::from(".");
     let mut continue_mode = false;
     let mut resume_session: Option<String> = None;
+    let mut attach_addr: Option<String> = None;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -30,6 +31,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     resume_session = Some(args[i].clone());
                 }
             }
+            "--port" => {
+                i += 1;
+                if i < args.len() {
+                    attach_addr = Some(format!("127.0.0.1:{}", args[i]));
+                }
+            }
             other => {
                 eprintln!("unknown arg: {other}");
                 std::process::exit(2);
@@ -43,6 +50,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cfg = ClientConfig::default_config(&project);
     eprintln!("[agent-tui] engine: {}", cfg.bin_path);
     eprintln!("[agent-tui] project: {project_str}");
+    if let Some(addr) = &attach_addr {
+        eprintln!("[agent-tui] attach: {addr}");
+    }
 
-    app::run(cfg, project_str, continue_mode, resume_session).await
+    app::run(cfg, project_str, continue_mode, resume_session, attach_addr).await
 }

@@ -57,37 +57,71 @@ enum Outbound {
 }
 
 impl Client {
-    pub async fn spawn(cfg: ClientConfig) -> Result<(Self, tokio::sync::broadcast::Receiver<Event>, JoinHandle<Result<(), AcpError>>), AcpError> {
-        let mut cmd = tokio::process::Command::new(&cfg.bin_path);
-        cmd.args(["--acp", "--project", &cfg.project_root, "--model", &cfg.model])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit());
-        if let Some(session) = &cfg.session {
-            cmd.args(["--session", session]);
-        }
-        if let Some(env_file) = &cfg.env_file {
-            cmd.args(["--env", env_file]);
-        }
-        if let Some(ld) = &cfg.ld_library_path {
-            cmd.env("LD_LIBRARY_PATH", ld);
-        }
-        for (k, v) in &cfg.extra_env {
-            cmd.env(k, v);
-        }
-        let mut child = cmd.spawn()?;
-        let stdin = child.stdin.take().ok_or_else(|| AcpError::Protocol("no stdin".into()))?;
-        let stdout = child.stdout.take().ok_or_else(|| AcpError::Protocol("no stdout".into()))?;
+    pub async fn spawn(
+        cfg: ClientConfig,
+    ) -> Result<(Self, tokio::sync::broadcast::Receiver<Event>, JoinHandle<Result<(), AcpError>>), AcpError>
+    {
+        Self::open(cfg, None).await
+    }
 
-        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
-        use tokio::io::BufReader;
+    /// Connect to a remote engine bridge (`aicoding serve --port N`).
+    pub async fn attach(
+        cfg: ClientConfig,
+        addr: String,
+    ) -> Result<(Self, tokio::sync::broadcast::Receiver<Event>, JoinHandle<Result<(), AcpError>>), AcpError>
+    {
+        Self::open(cfg, Some(addr)).await
+    }
+
+    async fn open(
+        cfg: ClientConfig,
+        tcp_addr: Option<String>,
+    ) -> Result<(Self, tokio::sync::broadcast::Receiver<Event>, JoinHandle<Result<(), AcpError>>), AcpError>
+    {
+        use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
+
+        let engine_name: String;
+        let writer: Box<dyn AsyncWrite + Unpin + Send>;
+        let reader: Box<dyn AsyncRead + Unpin + Send>;
+        if let Some(addr) = &tcp_addr {
+            let stream = tokio::net::TcpStream::connect(addr).await?;
+            let (r, w) = stream.into_split();
+            writer = Box::new(w);
+            reader = Box::new(r);
+            engine_name = format!("{addr} (tcp)");
+        } else {
+            let mut cmd = tokio::process::Command::new(&cfg.bin_path);
+            cmd.args(["--acp", "--project", &cfg.project_root, "--model", &cfg.model])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::inherit());
+            if let Some(session) = &cfg.session {
+                cmd.args(["--session", session]);
+            }
+            if let Some(env_file) = &cfg.env_file {
+                cmd.args(["--env", env_file]);
+            }
+            if let Some(ld) = &cfg.ld_library_path {
+                cmd.env("LD_LIBRARY_PATH", ld);
+            }
+            for (k, v) in &cfg.extra_env {
+                cmd.env(k, v);
+            }
+            let mut child = cmd.spawn()?;
+            let pid = child.id().unwrap_or(0);
+            let stdin = child.stdin.take().ok_or_else(|| AcpError::Protocol("no stdin".into()))?;
+            let stdout = child.stdout.take().ok_or_else(|| AcpError::Protocol("no stdout".into()))?;
+            writer = Box::new(stdin);
+            reader = Box::new(stdout);
+            engine_name = format!("{} (pid {})", cfg.bin_path, pid);
+        }
 
         let (tx, mut rx) = mpsc::channel::<Outbound>(64);
         let (events_tx, events_rx) = tokio::sync::broadcast::channel::<Event>(256);
         let pending = Arc::new(Mutex::new(HashMap::new()));
 
         let writer_pending = pending.clone();
-        let mut writer_stdin = stdin;
+        let mut writer_stdin = writer;
         tokio::spawn(async move {
             while let Some(msg) = rx.recv().await {
                 match msg {
@@ -120,7 +154,7 @@ impl Client {
 
         let reader_pending = pending.clone();
         let reader_events = events_tx.clone();
-        let mut reader = BufReader::new(stdout);
+        let mut reader = BufReader::new(reader);
         let mut buf = String::new();
         let reader_task = tokio::spawn(async move {
             loop {
@@ -173,7 +207,7 @@ impl Client {
         let client = Self {
             tx,
             next_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
-            engine_name: format!("{} (pid {})", cfg.bin_path, child.id().unwrap_or(0)),
+            engine_name,
             model: cfg.model.clone(),
         };
         client

@@ -653,9 +653,9 @@ function select_model(model_name)
         if m.apiKey and m.apiKey ~= "" then setenv("ANTHROPIC_API_KEY", m.apiKey) end
     elseif m.provider == "deepseek" then
         setenv("LLM_PROTOCOL", "openai")
-        local ds_url = m.baseUrl or os.getenv("DEEPSEEK_BASE_URL")
+        local ds_url = m.baseUrl or os.getenv("OPENAI_BASE_URL") or os.getenv("DEEPSEEK_BASE_URL")
         if ds_url then setenv("OPENAI_BASE_URL", ds_url) end
-        local ds_key = m.apiKey or os.getenv("DEEPSEEK_API_KEY")
+        local ds_key = m.apiKey or os.getenv("OPENAI_API_KEY") or os.getenv("DEEPSEEK_API_KEY")
         if ds_key then setenv("OPENAI_API_KEY", ds_key) end
         setenv("OPENAI_MODEL", m.model)
     else

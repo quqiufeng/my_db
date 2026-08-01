@@ -51,7 +51,7 @@ static const char* project_basename(const char* project_ns) {
     return project_ns;
 }
 
-static int load_env_file(const char* path) {
+static int load_env_file(const char* path, int force) {
     FILE* f = fopen(path, "r");
     if (!f) return -1;
     char line[2048];
@@ -63,7 +63,7 @@ static int load_env_file(const char* path) {
         *eq = '\0';
         char* key = trim(p);
         char* val = trim(eq + 1);
-        if (strlen(key) > 0) setenv(key, val, 1);
+        if (strlen(key) > 0) setenv(key, val, force);
     }
     fclose(f);
     return 0;
@@ -84,6 +84,7 @@ static void print_help(void) {
     printf("aicoding CLI\n");
     printf("Usage: aicoding [options]\n");
     printf("  --acp              ACP server mode (JSON-RPC over stdio)\n");
+    printf("  serve --port N     Standalone TCP bridge (aicoding serve)\n");
     printf("  --session ID       Session ID (default: default)\n");
     printf("  --project NS       Project directory (default: current dir)\n");
     printf("  --cache DIR        KV Cache directory (default: <project_root>/.opencode)\n");
@@ -115,6 +116,11 @@ int main(int argc, char** argv) {
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--acp") == 0) acp_mode = 1;
+        else if (strcmp(argv[i], "serve") == 0) {
+            /* serve: standalone TCP bridge; delegates to serve_main(). */
+            extern int serve_main(int argc, char** argv);
+            return serve_main(argc, argv);
+        }
         else if (strcmp(argv[i], "--session") == 0 && i + 1 < argc) session_id = argv[++i];
         else if (strcmp(argv[i], "--project") == 0 && i + 1 < argc) project_ns = argv[++i];
         else if (strcmp(argv[i], "--cache") == 0 && i + 1 < argc) cache_dir = argv[++i];
@@ -135,13 +141,16 @@ int main(int argc, char** argv) {
     /* Load env files. System-wide /etc/aicoding/.env is loaded first
      * (lowest priority), then global ~/.aicoding/.env, then project
      * ./.env or --env FILE (highest priority). This way all users
-     * (including root via sudo) share the same config.
+     * (including root via sudo) share the same config. System and global
+     * files act as fallbacks only: variables already set in the caller's
+     * environment are not overwritten. An explicit --env FILE is loaded
+     * last and wins over everything.
      */
-    load_env_file("/etc/aicoding/.env");
+    load_env_file("/etc/aicoding/.env", 0);
     char global_env[1024];
     snprintf(global_env, sizeof(global_env), "%s/.aicoding/.env", get_home_dir());
-    load_env_file(global_env);
-    load_env_file(env_file);
+    load_env_file(global_env, 0);
+    load_env_file(env_file, 1);
 
     if (non_interactive) setenv("OPENCODE_NON_INTERACTIVE", "1", 1);
     if (acp_mode) setenv("OPENCODE_ACP", "1", 1);
@@ -217,7 +226,10 @@ int main(int argc, char** argv) {
 
     /* Create LLM client and inject into Lua engine */
     llm_client_t* llm = llm_client_create(&cfg);
-    llm_config_free_fields(&cfg);
+    if (!llm) {
+        fprintf(stderr, "failed to create llm client\n");
+        goto cleanup;
+    }
     lua_engine_set_llm(L, llm);
 
     s = session_create(cache, session_id, project_ns, cfg.model);
@@ -225,6 +237,12 @@ int main(int argc, char** argv) {
         fprintf(stderr, "failed to create session\n");
         goto cleanup;
     }
+    if (acp_mode) {
+        fprintf(stderr, "[acp] ACP server mode. Session: %s, Project: %s, Model: %s\n",
+                session_id, project_ns, cfg.model);
+    }
+    /* cfg fields are only referenced above (create/session_create copy them). */
+    llm_config_free_fields(&cfg);
 
     if (test_compress) {
         if (lua_engine_dostring(L, "local compress = require('compress'); local ok, info = compress.wrap('test system prompt with context window and KV Cache and tool call', 1); print('compressed:', ok); if info then print('saved:', info.saved_tokens, 'ratio:', info.ratio) end") != 0) {
@@ -242,8 +260,6 @@ int main(int argc, char** argv) {
 
     // ===== ACP mode: JSON-RPC over stdio =====
     if (acp_mode) {
-        fprintf(stderr, "[acp] ACP server mode. Session: %s, Project: %s, Model: %s\n",
-                session_id, project_ns, cfg.model);
         fprintf(stderr, "[acp] Reading JSON-RPC from stdin...\n");
 
         char line[65536];

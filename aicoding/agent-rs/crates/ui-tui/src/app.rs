@@ -613,8 +613,12 @@ pub async fn run(
     project: String,
     continue_mode: bool,
     resume_session: Option<String>,
+    attach_addr: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let (client, mut events_rx, _engine_task) = Client::spawn(cfg).await?;
+    let (client, mut events_rx, _engine_task) = match &attach_addr {
+        Some(addr) => Client::attach(cfg, addr.clone()).await?,
+        None => Client::spawn(cfg).await?,
+    };
     let info = client.initialize().await?;
 
     let resume = if let Some(sid) = resume_session {

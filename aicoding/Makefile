@@ -3,7 +3,7 @@ LUAJIT ?= /usr/local/luajit
 CFLAGS = -Wall -O2 -g -I$(LUAJIT)/include/luajit-2.1 -I../include -I.
 LDFLAGS = -L$(LUAJIT)/lib -lluajit-5.1 -L.. -lmydb -lvector_engine -lm -ldl -lpthread
 
-SRCS = session.c lua_engine.c llm_client.c http_async.c
+SRCS = session.c lua_engine.c llm_client.c http_async.c serve.c
 OBJS = $(SRCS:.c=.o)
 
 .PHONY: all clean test cli regression install uninstall
