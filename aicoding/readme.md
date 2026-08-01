@@ -87,7 +87,7 @@
 |------|------|
 | **Rust 客户端** | agent-rs 通过 ACP 协议连接引擎，终端流式渲染，引擎/UI 完全解耦 |
 | **独立二进制** | 编译成单个 `aicoding`，无 Node.js / Bun / Electron 依赖 |
-| **无限上下文** | 滑动窗口 + KV Cache 归档，默认 64K 窗口永不膨胀 |
+| **无限上下文** | 记忆无限（KV Cache 永不丢失），视野宽度可调，默认 64K 只决定单次请求装载量 |
 | **代码语义搜索** | 基于 Jina embeddings + HNSW，自然语言搜索已索引代码库 |
 | **符号上下文** | 调用链展开 (caller/callee)，支持深度控制和批量查询 |
 | **工具调用** | read/write/edit/glob/grep/bash/build/git/web_fetch 等 24+ 工具 |
@@ -229,27 +229,29 @@ aicoding 有两层存储，分工不同：
 
 opencode 的上下文依赖一个不断增长的 `messages` 数组。项目越大、对话越长，数组就越接近模型上限（128K-200K）。到了上限就必须压缩截断，丢失信息。**大项目开发到一半就卡住了，因为之前的上下文全部丢失。**
 
-aicoding 的上下文是**固定大小的滑动窗口**（默认 64K），永远不会增长：
+aicoding 的上下文**本质上没有限制**——全部内容都在 KV Cache 记忆里。所谓"上下文窗口"只是一个**数字**（`OPENCODE_CONTEXT_TOKENS`，默认 64K），它决定的不是"能记住多少"，而是"每次请求的视野宽度"——当前视野之外的记忆仍在，随时按需召回：
 
 ```text
 每次 LLM 请求：
 +------------------------------------------+
-|  64K 滑动窗口 (固定大小)                   |
+|  视野宽度 (可调数字, 默认 64K)             |
 |  +---------+----------+--------------+   |
-|  | system  | 最近 N 轮 | tool 结果    |   |
+|  | system  | 最近 N 轮 | 召回的内容    |   |
 |  | prompt  | 对话      |              |   |
 |  +---------+----------+--------------+   |
-|         |    超出窗口的 -> 归档到 KV Cache  |
+|       视野外的内容 → 仍在 KV Cache 中     |
 +------------------------------------------+
-                      v
-  KV Cache (.opencode/, 无大小限制)
+                      ▲
+                      │ 按需召回 (kv_search / kv_get / read)
+                      │
+  KV Cache (.opencode/, 无大小限制)  ← 完整记忆
   +----------------------------------+
   | 全部历史对话 / facts / 归档       |
-  | <- 模型通过 kv_search 按需召回    |
+  | 项目知识 / 会话摘要 / 代码索引     |
   +----------------------------------+
 ```
 
-超出窗口的旧消息自动归档到 KV Cache，**不丢失**。模型通过 `kv_search` / `kv_get` 随时召回。项目再大、对话再长，也永远不会达到"上限"。
+记忆是无限的，视野是当前快照。项目再大、对话再长，**永远不会丢失**——因为上下文从来不是"装不下的东西"，只是"此刻没看而已"。
 
 ### 2. 代码搜索 — 全局共享
 
@@ -260,14 +262,14 @@ aicoding 的上下文是**固定大小的滑动窗口**（默认 64K），永远
 | 语义向量 + HNSW | `/opt/code_caches/xxx_cache/vectors/` | GPU 加速，自然语言搜代码 |
 | 代码 chunks/符号 | `/memory/cache.bin` | 所有已索引项目的全量代码 |
 
-### 滑动窗口机制 (context.lua)
+### 视野宽度机制 (context.lua)
 
-上下文窗口默认 64K tokens，由 `OPENCODE_CONTEXT_TOKENS` 调整：
+视野宽度默认 64K tokens，由 `OPENCODE_CONTEXT_TOKENS` 调整——它只是**每次请求装载多少记忆**的参数，不是记忆上限：
 
-- **窗口固定**：每次发往 LLM 的消息不会超过这个值，不随项目增长而膨胀
+- **视野可调**：随模型上下文能力自由调整（128K 模型可设 128K），只影响成本不影响记忆
 - **保留最近**：至少保留最近 4 轮完整的 user/assistant/tool 对话组
-- **自动归档**：超出窗口的旧消息 -> KV Cache `/agent/{session}/history/`，7 天 TTL
-- **按需召回**：模型通过 `kv_search` / `kv_get` / `read` 随时读取归档信息
+- **自动归档**：视野之外的消息仍在 KV Cache `/agent/{session}/history/`（7 天 TTL），**不删除**
+- **按需召回**：模型通过 `kv_search` / `kv_get` / `read` 随时把记忆装回视野
 - **自动摘要**：每轮对话结束自动提取摘要和关键事实到 KV Cache
 - **跨 session 预热**：新 session 启动时自动读取上次的摘要和 facts
 
@@ -397,7 +399,7 @@ local ok, out = mem.context("schedule", "/code/local/linux", { depth = 2 })
 | `OPENAI_MODEL` | `deepseek-v4-flash` | 模型名称 |
 | `LLM_PROTOCOL` | `openai` | `openai` 或 `anthropic` |
 | `LLM_TEMPERATURE` | `1.0` | 采样温度 |
-| `OPENCODE_CONTEXT_TOKENS` | `16384` | 上下文窗口上限 |
+| `OPENCODE_CONTEXT_TOKENS` | `16384` | 单次请求视野宽度（非记忆上限） |
 | `OPENCODE_SESSION` | `default` | Session ID |
 | `OPENCODE_LOG_LEVEL` | `info` | 日志级别 |
 | `ACP_CWD` | `$HOME` | ACP 模式工作目录 |
@@ -410,7 +412,7 @@ local ok, out = mem.context("schedule", "/code/local/linux", { depth = 2 })
 |------|--------------|----------|
 | 运行时 | Bun/Node.js + Electron + TUI | C + LuaJIT 单二进制引擎 + Rust 客户端 |
 | UI | 自建 TUI (SolidJS) | **agent-rs (Rust)：终端 REPL → TUI/Web** |
-| 上下文 | 不断增长，依赖 compaction | **有界窗口 + KV Cache 按需召回** |
+| 上下文 | 不断增长，依赖 compaction | **记忆无限 + 可调视野 + KV Cache 按需召回** |
 | 持久化 | SQLite | mmap KV Cache |
 | 工具定义 | TypeScript 硬编码 | Lua 脚本，热更新 |
 | 协议 | 内部 | **ACP 标准协议，引擎/UI 解耦** |

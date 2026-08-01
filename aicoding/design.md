@@ -1386,7 +1386,7 @@ UI 层（agent-rs）负责体验：记忆操作可视化（"写入记忆 X"）�
 | 工具集 read/write/edit/apply_patch/glob/grep/bash/webfetch | ✅ 全部 + build/git/diff/file_delete（24+ 工具） |
 | 权限三态 ask/allow/deny + 危险命令/路径保护 | ✅ permissions.lua |
 | Plan / Build Agent | ✅ agents/plan.lua + build.lua |
-| 上下文管理（compaction/summary/overflow） | ✅ 滑动窗口 + KV Cache 归档（**不截断**） |
+| 上下文管理（compaction/summary/overflow） | ✅ 记忆无限 + 可调视野（窗口只是数字参数） |
 | 快照 / revert | ✅ checkpoint + undo_last / rollback_to |
 | AGENTS.md / 项目指令注入 | ✅ conventions.lua 按项目类型自动注入 |
 | 插件系统 | ✅ Lua 插件热加载（plugin_create/load/list） |
@@ -1418,11 +1418,11 @@ UI 层（agent-rs）负责体验：记忆操作可视化（"写入记忆 X"）�
 
 | 维度 | 原生 opencode | aicoding + agent-rs |
 |---|---|---|
-| 上下文完整性 | compaction 压缩截断，长会话丢信息 | 固定窗口 + KV Cache 归档，**永不丢失** |
+| 上下文完整性 | compaction 压缩截断，长会话丢信息 | 记忆无限（KV Cache 全量归档），视野可调，**永不丢失** |
 | 推理模型能力 | transform.ts 硬编码禁用 deepseek-chat/reasoner/r1/v3 的 reasoning effort（`return {}`） | **无 transform 层**，effort 直传 |
 | Prompt cache 命中 | 消息重写/注入破坏缓存 key | 消息原样回传，缓存稳定命中 |
 | 跨会话记忆 | 会话结束即忘 | kv_* 永久记忆，新会话自动预热摘要 |
-| 工具结果完整性 | 无限上下文膨胀 → 截断 | 有界窗口 + 归档后按需召回 |
+| 工具结果完整性 | 无限上下文膨胀 → 截断 | 全量记忆 + 视野内召回，无截断 |
 | 可审计性 | 黑盒 | 全部记忆明文 JSON，`cache_query` 可查可删 |
 
 ### 21.4 性能优势
@@ -1432,7 +1432,7 @@ UI 层（agent-rs）负责体验：记忆操作可视化（"写入记忆 X"）�
 | 运行时 | Bun/Node.js + SolidJS + Effect-TS | C + LuaJIT 单二进制 + Rust 客户端 |
 | 启动时间 | 数百 ms | ~10ms（引擎进程） |
 | 内存占用 | 高 | 低（mmap 零拷贝） |
-| token 成本 | 上下文无限增长 | 固定窗口 + 按需召回，长会话成本线性下降 |
+| token 成本 | 上下文无限增长 | 固定视野 + 按需召回，成本与视野成正比而非会话长度 |
 | 工具执行 | JS 解释执行 | 原生 C + LuaJIT |
 
 ### 21.5 验收基准（开发中按此核对）
