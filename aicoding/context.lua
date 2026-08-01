@@ -150,15 +150,16 @@ function M.build_messages(session, system_prompt, messages)
 
     local out = { { role = "system", content = system_prompt } }
     for _, m in ipairs(compressed) do
-        -- Reasoning/thinking is internal to the model; it must not be fed
-        -- back into the conversation (it bloats the window and can confuse
-        -- later turns). Keep content and tool_calls only.
-        local m2 = { role = m.role, content = m.content }
-        if m.tool_calls then
-            m2.tool_calls = m.tool_calls
-        end
-        if m.tool_call_id then
-            m2.tool_call_id = m.tool_call_id
+        -- Copy the message wholesale. Keep every protocol field (content,
+        -- tool_calls, tool_call_id, reasoning_content, ...): OpenAI-compatible
+        -- APIs like deepseek consume reasoning_content natively as an
+        -- assistant field and require tool_call_id on tool results, so
+        -- dropping fields here breaks multi-turn tool calls or reply
+        -- generation. reasoning_content stays out of system_prompt / plain
+        -- text, but is preserved as its own assistant field.
+        local m2 = {}
+        for k, v in pairs(m) do
+            m2[k] = v
         end
         table.insert(out, m2)
     end
