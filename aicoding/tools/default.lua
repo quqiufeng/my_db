@@ -365,6 +365,61 @@ M.tools = {
         end
     },
     {
+        name = "question",
+        description = "Ask the user an interactive question and wait for their answer. Provide options as a list of choices to constrain the answer; without options the user types a free-form answer. Returns the user's answer.",
+        parameters = {
+            question = { type = "string", required = true, description = "The question to ask the user" },
+            options = { type = "array", items = { type = "string" }, required = false, description = "Optional list of choices; the user picks one of them" }
+        },
+        handler = function(args)
+            local question = args.question or ""
+            local options = args.options or {}
+            if type(options) ~= "table" then options = {} end
+            if os.getenv("OPENCODE_ACP") == "1" then
+                local resp_line = opencode.acp_request("question/request",
+                    cjson.encode({ question = question, options = options }))
+                if resp_line then
+                    local ok, decoded = pcall(cjson.decode, resp_line)
+                    if ok and decoded and decoded.result and decoded.result.answer then
+                        return { ok = true, answer = decoded.result.answer }
+                    end
+                end
+                log.warn("question request failed")
+                return { ok = false, error = "question request failed" }
+            end
+            if os.getenv("OPENCODE_NON_INTERACTIVE") == "1" then
+                return { ok = false, error = "cannot ask user in non-interactive mode" }
+            end
+            local tty = io.open("/dev/tty", "w")
+            local tin = io.open("/dev/tty", "r")
+            local answer = ""
+            if tty and tin then
+                tty:write(question .. "\n")
+                if #options > 0 then
+                    for i, o in ipairs(options) do
+                        tty:write(string.format("  %d. %s\n", i, o))
+                    end
+                    tty:write("Choice: ")
+                else
+                    tty:write("Answer: ")
+                end
+                tty:flush()
+                local line = tin:read("*l") or ""
+                if #options > 0 then
+                    local n = tonumber(line)
+                    if n and n >= 1 and n <= #options then
+                        answer = options[n]
+                    end
+                else
+                    answer = line
+                end
+                tin:close()
+                tty:close()
+            end
+            return { ok = true, answer = answer }
+        end
+    },
+    {
         name = "kv_search",
         description = "Search the KV Cache for relevant code, facts, or history. Use search_type='semantic' for natural language code search over indexed repos. Results are reranked locally; use min_score to filter noise.",
         parameters = {

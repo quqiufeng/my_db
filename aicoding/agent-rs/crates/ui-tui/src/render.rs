@@ -33,6 +33,9 @@ pub fn draw(frame: &mut Frame, app: &App) {
     if let Some(p) = &app.pending_permission {
         draw_permission(frame, app, p);
     }
+    if let Some(q) = &app.pending_question {
+        draw_question(frame, app, q);
+    }
 }
 
 fn draw_todos(frame: &mut Frame, app: &App, area: Rect) {
@@ -90,6 +93,67 @@ fn draw_permission(frame: &mut Frame, app: &App, p: &crate::app::PendingPermissi
         )
         .wrap(ratatui::widgets::Wrap { trim: false });
     let h = 8.min(frame.area().height.saturating_sub(2));
+    let area = ratatui::layout::Rect {
+        x: (frame.area().width.saturating_sub(width)) / 2,
+        y: (frame.area().height.saturating_sub(h)) / 2,
+        width,
+        height: h,
+    };
+    frame.render_widget(ratatui::widgets::Clear, area);
+    frame.render_widget(inner, area);
+    let _ = app;
+}
+
+fn draw_question(frame: &mut Frame, app: &App, q: &crate::app::PendingQuestion) {
+    let width = 72.min(frame.area().width.saturating_sub(4));
+    let mut lines = vec![Line::from(vec![
+        Span::styled(
+            " Question ",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ])];
+    lines.push(Line::from(Span::styled(
+        &q.question,
+        Style::default().fg(Color::White),
+    )));
+    lines.push(Line::from(Span::raw("")));
+    if q.options.is_empty() {
+        lines.push(Line::from(vec![
+            Span::styled("Answer: ", Style::default().fg(Color::Cyan)),
+            Span::styled(
+                if q.input.is_empty() { " " } else { &q.input },
+                Style::default().fg(Color::White),
+            ),
+        ]));
+        lines.push(Line::from(Span::styled(
+            "[enter] send   [esc] cancel",
+            Style::default().fg(Color::Cyan),
+        )));
+    } else {
+        for (i, o) in q.options.iter().enumerate() {
+            lines.push(Line::from(vec![
+                Span::styled(format!("  {} ", i + 1), Style::default().fg(Color::Yellow)),
+                Span::styled(o, Style::default().fg(Color::White)),
+            ]));
+        }
+        lines.push(Line::from(Span::raw("")));
+        lines.push(Line::from(Span::styled(
+            "press the number to choose   [esc] cancel",
+            Style::default().fg(Color::Cyan),
+        )));
+    }
+    let text = ratatui::text::Text::from(lines);
+    let inner = Paragraph::new(text)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Yellow))
+                .border_type(BorderType::Rounded),
+        )
+        .wrap(ratatui::widgets::Wrap { trim: false });
+    let h = (q.options.len() as u16 + 8).min(frame.area().height.saturating_sub(2));
     let area = ratatui::layout::Rect {
         x: (frame.area().width.saturating_sub(width)) / 2,
         y: (frame.area().height.saturating_sub(h)) / 2,

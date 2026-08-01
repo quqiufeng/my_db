@@ -9,6 +9,7 @@ use tokio::sync::mpsc;
 
 use crate::event::{self, UiEvent};
 use crate::input::Input;
+use crossterm::event::{KeyCode, KeyModifiers, KeyEvent};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
@@ -37,6 +38,13 @@ pub struct PendingPermission {
     pub resource: String,
 }
 
+pub struct PendingQuestion {
+    pub request_id: u64,
+    pub question: String,
+    pub options: Vec<String>,
+    pub input: String,
+}
+
 #[derive(Clone)]
 pub struct TodoItem {
     pub id: String,
@@ -59,10 +67,45 @@ pub struct App {
     pub status: String,
     pub focus: Option<usize>,
     pub pending_permission: Option<PendingPermission>,
+    pub pending_question: Option<PendingQuestion>,
     pub todos: Vec<TodoItem>,
 }
 
 type PromptFut = Pin<Box<dyn Future<Output = Result<agent_acp::SessionPromptResult, AcpError>>>>;
+
+/// Handle a key while a question dialog is open.
+/// Returns Some((request_id, answer)) when a numbered option was picked
+/// immediately; otherwise updates the input buffer in place.
+fn handle_question_key(pq: &mut Option<PendingQuestion>, k: &KeyEvent) -> Option<(u64, String)> {
+    let q = pq.as_mut()?;
+    if !q.options.is_empty() {
+        if let KeyCode::Char(c) = k.code {
+            if k.modifiers.is_empty() {
+                if let Some(n) = c.to_digit(10) {
+                    if n >= 1 && n <= q.options.len() as u32 {
+                        let answer = q.options[n as usize - 1].clone();
+                        let request_id = q.request_id;
+                        pq.take();
+                        return Some((request_id, answer));
+                    }
+                }
+            }
+        }
+        return None;
+    }
+    match k.code {
+        KeyCode::Char(c)
+            if k.modifiers.is_empty() || k.modifiers.contains(KeyModifiers::SHIFT) =>
+        {
+            q.input.push(c);
+        }
+        KeyCode::Backspace => {
+            q.input.pop();
+        }
+        _ => {}
+    }
+    None
+}
 
 fn diff_line_style(l: &str) -> Option<Style> {
     if l.starts_with("diff --git") || l.starts_with("index ") || l.starts_with("+++") || l.starts_with("---")
@@ -106,6 +149,7 @@ impl App {
             status: String::new(),
             focus: None,
             pending_permission: None,
+            pending_question: None,
             todos: Vec::new(),
         }
     }
@@ -189,6 +233,33 @@ impl App {
                     request_id: req_id,
                     action,
                     resource,
+                });
+            } else if ev.method == "question/request" {
+                let (question, options) = ev
+                    .params
+                    .as_ref()
+                    .map(|p| {
+                        (
+                            p.get("question")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("?")
+                                .to_string(),
+                            p.get("options")
+                                .and_then(|v| v.as_array())
+                                .map(|a| {
+                                    a.iter()
+                                        .filter_map(|v| v.as_str().map(String::from))
+                                        .collect()
+                                })
+                                .unwrap_or_default(),
+                        )
+                    })
+                    .unwrap_or(("?".into(), Vec::new()));
+                self.pending_question = Some(PendingQuestion {
+                    request_id: req_id,
+                    question,
+                    options,
+                    input: String::new(),
                 });
             }
             return;
@@ -590,6 +661,51 @@ pub async fn run(
                                     tokio::spawn(async move {
                                         if let Err(e) = arc.respond(req.request_id, result).await {
                                             eprintln!("[tui] permission respond failed: {e}");
+                                        }
+                                    });
+                                }
+                            }
+                        } else if app.pending_question.is_some() {
+                            if event::is_interrupt(&k) {
+                                let req = app
+                                    .pending_question
+                                    .take()
+                                    .expect("guarded by is_some");
+                                let arc = app.client.clone();
+                                tokio::spawn(async move {
+                                    if let Err(e) = arc
+                                        .respond(req.request_id, serde_json::json!({ "answer": "" }))
+                                        .await
+                                    {
+                                        eprintln!("[tui] question cancel failed: {e}");
+                                    }
+                                });
+                            } else if event::is_enter(&k) {
+                                let req = app
+                                    .pending_question
+                                    .take()
+                                    .expect("guarded by is_some");
+                                let answer = req.input.trim().to_string();
+                                let arc = app.client.clone();
+                                tokio::spawn(async move {
+                                    if let Err(e) = arc
+                                        .respond(req.request_id, serde_json::json!({ "answer": answer }))
+                                        .await
+                                    {
+                                        eprintln!("[tui] question respond failed: {e}");
+                                    }
+                                });
+                            } else {
+                                if let Some((rid, answer)) =
+                                    handle_question_key(&mut app.pending_question, &k)
+                                {
+                                    let arc = app.client.clone();
+                                    tokio::spawn(async move {
+                                        if let Err(e) = arc
+                                            .respond(rid, serde_json::json!({ "answer": answer }))
+                                            .await
+                                        {
+                                            eprintln!("[tui] question respond failed: {e}");
                                         }
                                     });
                                 }
