@@ -638,16 +638,33 @@ function select_model(model_name)
     if m.provider == "anthropic" then
         setenv("LLM_PROTOCOL", "anthropic")
         setenv("ANTHROPIC_MODEL", m.model)
+        if m.baseUrl and m.baseUrl ~= "" then setenv("ANTHROPIC_BASE_URL", m.baseUrl) end
+        if m.apiKey and m.apiKey ~= "" then setenv("ANTHROPIC_API_KEY", m.apiKey) end
     elseif m.provider == "deepseek" then
         setenv("LLM_PROTOCOL", "openai")
-        local ds_url = os.getenv("DEEPSEEK_BASE_URL")
+        local ds_url = m.baseUrl or os.getenv("DEEPSEEK_BASE_URL")
         if ds_url then setenv("OPENAI_BASE_URL", ds_url) end
-        local ds_key = os.getenv("DEEPSEEK_API_KEY")
+        local ds_key = m.apiKey or os.getenv("DEEPSEEK_API_KEY")
         if ds_key then setenv("OPENAI_API_KEY", ds_key) end
         setenv("OPENAI_MODEL", m.model)
     else
         setenv("LLM_PROTOCOL", "openai")
+        if m.baseUrl and m.baseUrl ~= "" then setenv("OPENAI_BASE_URL", m.baseUrl) end
+        if m.apiKey and m.apiKey ~= "" then setenv("OPENAI_API_KEY", m.apiKey) end
         setenv("OPENAI_MODEL", m.model)
+    end
+    -- Model-level extra headers (e.g. x-api-key, custom auth)
+    if m.headers and type(m.headers) == "table" then
+        local lines = {}
+        for k, v in pairs(m.headers) do
+            table.insert(lines, k .. ": " .. tostring(v))
+        end
+        if #lines > 0 then
+            local combined = table.concat(lines, "\n")
+            local existing = os.getenv("LLM_EXTRA_HEADER")
+            if existing and existing ~= "" then combined = existing .. "\n" .. combined end
+            setenv("LLM_EXTRA_HEADER", combined)
+        end
     end
     return m.name
 end

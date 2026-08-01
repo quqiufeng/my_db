@@ -223,7 +223,13 @@ int main(int argc, char** argv) {
     const char* lua_args[] = { model_name ? model_name : "" };
     char* selected = lua_engine_call_s(L, "select_model", lua_args, 1);
     if (selected) {
-        fprintf(stderr, "[model] %s\n", selected);
+        const char* base = getenv("OPENAI_BASE_URL");
+        if (!base) base = getenv("ANTHROPIC_BASE_URL");
+        if (base) {
+            fprintf(stderr, "[model] %s -> %s\n", selected, base);
+        } else {
+            fprintf(stderr, "[model] %s\n", selected);
+        }
         free(selected);
     }
 

@@ -265,7 +265,14 @@ static CURL* setup_post_openai(llm_client_t* c, const char* url, struct curl_sli
         *headers = curl_slist_append(*headers, ua);
     }
     if (c->config.extra_header && *c->config.extra_header) {
-        *headers = curl_slist_append(*headers, c->config.extra_header);
+        char* copy = strdup(c->config.extra_header);
+        if (copy) {
+            char* save = NULL;
+            for (char* line = strtok_r(copy, "\n", &save); line; line = strtok_r(NULL, "\n", &save)) {
+                *headers = curl_slist_append(*headers, line);
+            }
+            free(copy);
+        }
     }
 
     curl_easy_setopt(curl, CURLOPT_URL, url);
