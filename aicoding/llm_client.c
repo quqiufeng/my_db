@@ -497,6 +497,9 @@ char* llm_complete_raw(llm_client_t* c, const char* request_body_json) {
         free(resp.data);
         return NULL;
     }
+    if (getenv("OPENCODE_DEBUG")) {
+        fprintf(stderr, "[LLM RAW RESP] %.4000s\n", resp.data ? resp.data : "(null)");
+    }
     return resp.data;
 }
 
