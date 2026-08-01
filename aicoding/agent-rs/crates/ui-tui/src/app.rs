@@ -1,27 +1,32 @@
 use agent_acp::types::{SessionUpdateParams, Update};
 use agent_acp::{AcpError, Client, ClientConfig};
-use std::sync::Arc;
+use serde_json::Value;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 use tokio::sync::broadcast;
 use tokio::sync::mpsc;
 
 use crate::event::{self, UiEvent};
 use crate::input::Input;
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span};
+
+#[derive(Clone)]
+pub struct ToolItem {
+    pub id: String,
+    pub title: String,
+    pub kind: String,
+    pub status: String,
+    pub output: String,
+    pub expanded: bool,
+}
 
 #[derive(Clone)]
 pub enum UiMsg {
     User(String),
     Assistant(String),
-    ToolStart {
-        id: String,
-        title: String,
-        kind: String,
-    },
-    ToolDone {
-        id: String,
-        status: String,
-    },
+    ToolCall(ToolItem),
     Info(String),
     Error(String),
 }
@@ -39,9 +44,16 @@ pub struct App {
     pub esc_armed: bool,
     pub should_quit: bool,
     pub status: String,
+    pub focus: Option<usize>,
 }
 
 type PromptFut = Pin<Box<dyn Future<Output = Result<agent_acp::SessionPromptResult, AcpError>>>>;
+
+pub struct LineInfo {
+    pub msg: Option<usize>,
+    pub is_tool_title: bool,
+    pub line: Line<'static>,
+}
 
 impl App {
     pub fn new(client: Arc<Client>, session_id: String, project: String, model: String) -> Self {
@@ -58,6 +70,7 @@ impl App {
             esc_armed: false,
             should_quit: false,
             status: String::new(),
+            focus: None,
         }
     }
 
@@ -80,18 +93,20 @@ impl App {
         self.messages.push(UiMsg::User(text.clone()));
         self.input.clear();
         self.busy = true;
+        self.focus = None;
         Some((self.session_id.clone(), text))
     }
 
     fn handle_command(&mut self, cmd: &str) {
-        let (name, args) = match cmd.split_once(' ') {
-            Some((n, a)) => (n, a.trim()),
-            None => (cmd, ""),
+        let name = match cmd.split_once(' ') {
+            Some((n, _)) => n,
+            None => cmd,
         };
         match name {
             "/quit" | "/exit" | "/q" => self.should_quit = true,
             "/new" => {
                 self.messages.clear();
+                self.focus = None;
                 self.status = "new session".into();
             }
             "/models" => {
@@ -104,7 +119,7 @@ impl App {
                 self.messages.push(UiMsg::Info(
                     "commands: /quit /new /models /help\n\
                      enter send · shift+enter newline · esc interrupt (x2)\n\
-                     ctrl+a/e home/end · ctrl+w/k/u edit · up/down history"
+                     (empty input) j/k or ↑/↓ scroll · pagedown/pageup page · enter/tab expand tool"
                         .into(),
                 ));
             }
@@ -113,16 +128,15 @@ impl App {
                     .push(UiMsg::Error(format!("unknown command: {other}")));
             }
         }
-        let _ = args;
     }
 
     pub fn on_event(&mut self, ev: agent_acp::types::Event) {
         if ev.method != "session/update" {
             return;
         }
-        let Ok(params) = serde_json::from_value::<SessionUpdateParams>(
-            ev.params.unwrap_or(serde_json::Value::Null),
-        ) else {
+        let Ok(params) =
+            serde_json::from_value::<SessionUpdateParams>(ev.params.unwrap_or(Value::Null))
+        else {
             return;
         };
         match params.update {
@@ -138,23 +152,274 @@ impl App {
                 tool_call_id,
                 title,
                 kind,
+                status,
                 ..
             } => {
-                self.messages.push(UiMsg::ToolStart {
+                self.messages.push(UiMsg::ToolCall(ToolItem {
                     id: tool_call_id,
                     title,
                     kind,
-                });
+                    status,
+                    output: String::new(),
+                    expanded: false,
+                }));
             }
             Update::ToolCallUpdate {
                 tool_call_id,
                 status,
-                ..
+                raw_output,
             } => {
-                self.messages.push(UiMsg::ToolDone {
-                    id: tool_call_id,
-                    status,
-                });
+                let text = match raw_output {
+                    Some(Value::String(s)) => s,
+                    Some(other) => other.to_string(),
+                    None => String::new(),
+                };
+                for msg in self.messages.iter_mut().rev() {
+                    if let UiMsg::ToolCall(item) = msg {
+                        if item.id == tool_call_id {
+                            item.status = status;
+                            if !text.is_empty() {
+                                item.output = text;
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn layout_lines(&self) -> Vec<LineInfo> {
+        let mut out = Vec::new();
+        for (i, msg) in self.messages.iter().enumerate() {
+            match msg {
+                UiMsg::User(text) => {
+                    out.push(LineInfo {
+                        msg: Some(i),
+                        is_tool_title: false,
+                        line: Line::from(Span::styled(
+                            "┌ You",
+                            Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+                        )),
+                    });
+                    for l in text.lines() {
+                        out.push(LineInfo {
+                            msg: Some(i),
+                            is_tool_title: false,
+                            line: Line::from(Span::styled(
+                                format!("│ {l}"),
+                                Style::default().fg(Color::Green),
+                            )),
+                        });
+                    }
+                    out.push(LineInfo {
+                        msg: Some(i),
+                        is_tool_title: false,
+                        line: Line::from(Span::styled(
+                            "└",
+                            Style::default().fg(Color::Green),
+                        )),
+                    });
+                    out.push(LineInfo {
+                        msg: Some(i),
+                        is_tool_title: false,
+                        line: Line::default(),
+                    });
+                }
+                UiMsg::Assistant(text) => {
+                    out.push(LineInfo {
+                        msg: Some(i),
+                        is_tool_title: false,
+                        line: Line::from(Span::styled(
+                            "┌ Assistant",
+                            Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD),
+                        )),
+                    });
+                    for l in text.lines() {
+                        out.push(LineInfo {
+                            msg: Some(i),
+                            is_tool_title: false,
+                            line: Line::from(Span::styled(
+                                format!("│ {l}"),
+                                Style::default().fg(Color::Blue),
+                            )),
+                        });
+                    }
+                    out.push(LineInfo {
+                        msg: Some(i),
+                        is_tool_title: false,
+                        line: Line::from(Span::styled(
+                            "└",
+                            Style::default().fg(Color::Blue),
+                        )),
+                    });
+                    out.push(LineInfo {
+                        msg: Some(i),
+                        is_tool_title: false,
+                        line: Line::default(),
+                    });
+                }
+                UiMsg::ToolCall(item) => {
+                    let (icon, fg) = match item.status.as_str() {
+                        "completed" => ("✓", Color::Green),
+                        "failed" => ("✖", Color::Red),
+                        _ => ("●", Color::Yellow),
+                    };
+                    let title = if item.status == "running" {
+                        format!("▸ {} ({})", item.title, item.kind)
+                    } else {
+                        format!("{icon} {} ({})", item.title, item.kind)
+                    };
+                    let expand_hint = if item.expanded { "▾" } else { "▸" };
+                    out.push(LineInfo {
+                        msg: Some(i),
+                        is_tool_title: true,
+                        line: Line::from(vec![
+                            Span::styled(
+                                format!("  {title}"),
+                                Style::default()
+                                    .fg(fg)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                            Span::styled(
+                                format!("  [{id}] ", id = item.id),
+                                Style::default().fg(Color::DarkGray),
+                            ),
+                            Span::styled(
+                                if item.expanded || item.status == "running" {
+                                    format!("{expand_hint}")
+                                } else {
+                                    String::new()
+                                },
+                                Style::default().fg(Color::DarkGray),
+                            ),
+                        ]),
+                    });
+                    if item.expanded {
+                        for (n, l) in item.output.lines().enumerate() {
+                            if n >= 200 {
+                                out.push(LineInfo {
+                                    msg: Some(i),
+                                    is_tool_title: false,
+                                    line: Line::from(Span::styled(
+                                        format!("  ⋮ ({n} more lines hidden, scroll to view)"),
+                                        Style::default().fg(Color::DarkGray),
+                                    )),
+                                });
+                                break;
+                            }
+                            out.push(LineInfo {
+                                msg: Some(i),
+                                is_tool_title: false,
+                                line: Line::from(Span::styled(
+                                    format!("  │ {l}"),
+                                    Style::default().fg(Color::DarkGray),
+                                )),
+                            });
+                        }
+                        out.push(LineInfo {
+                            msg: Some(i),
+                            is_tool_title: false,
+                            line: Line::default(),
+                        });
+                    } else if item.status == "completed" {
+                        out.push(LineInfo {
+                            msg: Some(i),
+                            is_tool_title: false,
+                            line: Line::default(),
+                        });
+                    }
+                }
+                UiMsg::Info(text) => {
+                    out.push(LineInfo {
+                        msg: Some(i),
+                        is_tool_title: false,
+                        line: Line::from(Span::styled(
+                            format!("ℹ {text}"),
+                            Style::default().fg(Color::DarkGray),
+                        )),
+                    });
+                    out.push(LineInfo {
+                        msg: Some(i),
+                        is_tool_title: false,
+                        line: Line::default(),
+                    });
+                }
+                UiMsg::Error(text) => {
+                    out.push(LineInfo {
+                        msg: Some(i),
+                        is_tool_title: false,
+                        line: Line::from(Span::styled(
+                            format!("✖ {text}"),
+                            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                        )),
+                    });
+                    out.push(LineInfo {
+                        msg: Some(i),
+                        is_tool_title: false,
+                        line: Line::default(),
+                    });
+                }
+            }
+        }
+        if out.is_empty() {
+            out.push(LineInfo {
+                msg: None,
+                is_tool_title: false,
+                line: Line::from(Span::styled(
+                    " (no messages yet)",
+                    Style::default().fg(Color::DarkGray),
+                )),
+            });
+        }
+        out
+    }
+
+    pub fn view_top(&self, view_h: usize) -> usize {
+        let total = self.layout_lines().len();
+        match self.focus {
+            Some(f) => {
+                if view_h == 0 {
+                    return f;
+                }
+                let center = f.saturating_sub(view_h / 2);
+                center.min(total.saturating_sub(view_h))
+            }
+            None => total.saturating_sub(view_h),
+        }
+    }
+
+    fn scroll_step(&mut self, delta: isize) {
+        let total = self.layout_lines().len();
+        let cur = self.focus.unwrap_or(total.saturating_sub(1));
+        if delta > 0 {
+            let next = cur + delta as usize;
+            if next + 1 >= total {
+                self.focus = None;
+            } else {
+                self.focus = Some(next);
+            }
+        } else {
+            self.focus = Some(cur.saturating_sub((-delta) as usize));
+        }
+    }
+
+    fn toggle_focus(&mut self) {
+        let Some(f) = self.focus else { return };
+        let lines = self.layout_lines();
+        let mut target = None;
+        for i in (0..=f).rev() {
+            if lines[i].is_tool_title {
+                target = Some(i);
+                break;
+            }
+        }
+        let Some(ti) = target else { return };
+        let Some(mi) = lines[ti].msg else { return };
+        self.focus = Some(ti);
+        if let Some(UiMsg::ToolCall(item)) = self.messages.get_mut(mi) {
+            if item.status != "running" {
+                item.expanded = !item.expanded;
             }
         }
     }
@@ -205,9 +470,7 @@ pub async fn run(
                                     app.status = "esc again to interrupt".into();
                                 }
                             }
-                        } else if event::is_soft_enter(&k) {
-                            app.input.insert_char('\n');
-                        } else if event::is_enter(&k) {
+                        } else if event::is_enter(&k) && !app.input.is_empty() {
                             if let Some((sid, text)) = app.submit() {
                                 let cwd = app.project.clone();
                                 let arc = app.client.clone();
@@ -216,28 +479,8 @@ pub async fn run(
                                 };
                                 prompt_fut = Some(Box::pin(fut));
                             }
-                        } else if k.code == crossterm::event::KeyCode::Up {
-                            if let Some(idx) = app.hist_idx {
-                                if idx > 0 {
-                                    app.hist_idx = Some(idx - 1);
-                                    app.input.set(&app.history[idx - 1]);
-                                }
-                            } else if !app.history.is_empty() {
-                                app.hist_idx = Some(app.history.len() - 1);
-                                app.input.set(&app.history[app.history.len() - 1]);
-                            }
-                        } else if k.code == crossterm::event::KeyCode::Down {
-                            if let Some(idx) = app.hist_idx {
-                                if idx + 1 < app.history.len() {
-                                    app.hist_idx = Some(idx + 1);
-                                    app.input.set(&app.history[idx + 1]);
-                                } else {
-                                    app.hist_idx = None;
-                                    app.input.clear();
-                                }
-                            }
                         } else {
-                            handle_edit_key(&mut app, &k);
+                            handle_key(&mut app, &k);
                         }
                         app.esc_armed = false;
                     }
@@ -285,6 +528,33 @@ pub async fn run(
     Ok(())
 }
 
+fn handle_key(app: &mut App, k: &crossterm::event::KeyEvent) {
+    use crossterm::event::{KeyCode, KeyModifiers};
+    if event::is_soft_enter(k) {
+        app.input.insert_char('\n');
+        return;
+    }
+    if app.busy {
+        return;
+    }
+    if app.input.is_empty() {
+        match k.code {
+            KeyCode::Down => app.scroll_step(1),
+            KeyCode::Up => app.scroll_step(-1),
+            KeyCode::PageDown | KeyCode::Char('f') if k.modifiers.contains(KeyModifiers::CONTROL) => {
+                app.scroll_step(10)
+            }
+            KeyCode::PageUp | KeyCode::Char('b') if k.modifiers.contains(KeyModifiers::CONTROL) => {
+                app.scroll_step(-10)
+            }
+            KeyCode::Enter | KeyCode::Tab => app.toggle_focus(),
+            _ => handle_edit_key(app, k),
+        }
+    } else {
+        handle_edit_key(app, k);
+    }
+}
+
 fn handle_edit_key(app: &mut App, k: &crossterm::event::KeyEvent) {
     use crossterm::event::{KeyCode, KeyModifiers};
     let input = &mut app.input;
@@ -296,6 +566,8 @@ fn handle_edit_key(app: &mut App, k: &crossterm::event::KeyEvent) {
         KeyCode::Char('w') if k.modifiers.contains(KeyModifiers::CONTROL) => input.kill_word_before(),
         KeyCode::Char('k') if k.modifiers.contains(KeyModifiers::CONTROL) => input.kill_to_end(),
         KeyCode::Char('u') if k.modifiers.contains(KeyModifiers::CONTROL) => input.kill_to_start(),
+        KeyCode::Char('h') if k.modifiers.contains(KeyModifiers::CONTROL) => input.backspace(),
+        KeyCode::Char('d') if k.modifiers.contains(KeyModifiers::CONTROL) => input.delete(),
         KeyCode::Left => input.move_left(),
         KeyCode::Right => input.move_right(),
         KeyCode::Home => input.move_home(),

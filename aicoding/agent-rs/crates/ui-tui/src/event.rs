@@ -1,5 +1,5 @@
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
-use std::io::IsTerminal;
+
 use tokio::sync::mpsc;
 
 pub enum UiEvent {
@@ -9,25 +9,23 @@ pub enum UiEvent {
 }
 
 pub fn spawn_input_thread(tx: mpsc::Sender<UiEvent>) {
-    std::thread::spawn(move || {
-        loop {
-            match crossterm::event::read() {
-                Ok(Event::Key(k)) => {
-                    if tx.blocking_send(UiEvent::Key(k)).is_err() {
-                        break;
-                    }
-                }
-                Ok(Event::Resize(w, h)) => {
-                    if tx.blocking_send(UiEvent::Resize(w, h)).is_err() {
-                        break;
-                    }
-                }
-                Ok(_) => {}
-                Err(e) => {
-                    eprintln!("[input] error: {e}");
-                    let _ = tx.blocking_send(UiEvent::Error(e.to_string()));
+    std::thread::spawn(move || loop {
+        match crossterm::event::read() {
+            Ok(Event::Key(k)) => {
+                if tx.blocking_send(UiEvent::Key(k)).is_err() {
                     break;
                 }
+            }
+            Ok(Event::Resize(w, h)) => {
+                if tx.blocking_send(UiEvent::Resize(w, h)).is_err() {
+                    break;
+                }
+            }
+            Ok(_) => {}
+            Err(e) => {
+                eprintln!("[input] error: {e}");
+                let _ = tx.blocking_send(UiEvent::Error(e.to_string()));
+                break;
             }
         }
     });
