@@ -25,6 +25,7 @@ aicoding: cli.c libaicoding_agent.a
 test: all test/test_session
 	LD_LIBRARY_PATH=/opt/my_db:/usr/local/luajit/lib:./ ./test/test_session
 	LD_LIBRARY_PATH=/opt/my_db:/usr/local/luajit/lib:./ ./aicoding --test
+	$(MAKE) -C agent-rs test AICODING_LD_PATH=/opt/my_db
 
 regression: all
 	./tests/run_regression.sh .

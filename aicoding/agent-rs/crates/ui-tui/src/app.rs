@@ -2,6 +2,7 @@ use agent_acp::types::{SessionUpdateParams, Update};
 use agent_acp::{AcpError, Client, ClientConfig};
 use serde_json::Value;
 use std::future::Future;
+use std::ops::{Deref, DerefMut};
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::broadcast;
@@ -13,7 +14,7 @@ use crossterm::event::{KeyCode, KeyModifiers, KeyEvent};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ToolItem {
     pub id: String,
     pub title: String,
@@ -23,7 +24,7 @@ pub struct ToolItem {
     pub expanded: bool,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum UiMsg {
     User(String),
     Assistant(String),
@@ -52,8 +53,9 @@ pub struct TodoItem {
     pub status: String,
 }
 
-pub struct App {
-    pub client: Arc<Client>,
+/// Pure UI state and logic. No I/O: it does not hold a Client, terminal or
+/// engine handle, so it can be unit-tested without a running engine.
+pub struct AppState {
     pub session_id: String,
     pub project: String,
     pub model: String,
@@ -71,14 +73,41 @@ pub struct App {
     pub todos: Vec<TodoItem>,
 }
 
+/// Thin wrapper pairing the testable state machine with the live client.
+pub struct App {
+    pub client: Arc<Client>,
+    pub state: AppState,
+}
+
+impl Deref for App {
+    type Target = AppState;
+    fn deref(&self) -> &Self::Target {
+        &self.state
+    }
+}
+
+impl DerefMut for App {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.state
+    }
+}
+
+impl App {
+    pub fn new(client: Arc<Client>, session_id: String, project: String, model: String) -> Self {
+        Self {
+            client,
+            state: AppState::new(session_id, project, model),
+        }
+    }
+}
+
 type ActionFut = Pin<Box<dyn Future<Output = Result<ActionOutcome, AcpError>>>>;
 
+#[derive(Debug)]
 pub enum SubmitAction {
     Prompt { session_id: String, text: String },
     SwitchModel(String),
-}
-
-pub enum ActionOutcome {
+}pub enum ActionOutcome {
     Prompt(agent_acp::SessionPromptResult),
     SwitchModel(String),
 }
@@ -142,10 +171,9 @@ pub struct LineInfo {
     pub line: Line<'static>,
 }
 
-impl App {
-    pub fn new(client: Arc<Client>, session_id: String, project: String, model: String) -> Self {
+impl AppState {
+    pub fn new(session_id: String, project: String, model: String) -> Self {
         Self {
-            client,
             session_id,
             project,
             model,
@@ -884,6 +912,295 @@ fn handle_edit_key(app: &mut App, k: &crossterm::event::KeyEvent) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agent_acp::types::Event;
+    use serde_json::json;
+
+    fn state() -> AppState {
+        AppState::new("s1".into(), "/proj".into(), "test-model".into())
+    }
+
+    fn event(method: &str, params: Value) -> Event {
+        Event {
+            jsonrpc: "2.0".into(),
+            method: method.into(),
+            params: Some(params),
+            engine_request_id: None,
+        }
+    }
+
+    fn update(params: Value) -> Event {
+        event("session/update", params)
+    }
+
+    #[test]
+    fn submit_sends_prompt() {
+        let mut s = state();
+        s.input.set("hello agent");
+        let action = s.submit().expect("action");
+        match action {
+            SubmitAction::Prompt { session_id, text } => {
+                assert_eq!(session_id, "s1");
+                assert_eq!(text, "hello agent");
+            }
+            other => panic!("expected prompt, got {other:?}"),
+        }
+        assert!(s.busy);
+        assert!(s.input.is_empty());
+        assert_eq!(s.messages.len(), 1); // user message pushed
+    }
+
+    #[test]
+    fn submit_empty_or_busy_is_none() {
+        let mut s = state();
+        assert!(s.submit().is_none()); // empty
+        s.input.set("text");
+        s.busy = true;
+        assert!(s.submit().is_none()); // busy blocks submit
+        assert!(s.busy);
+    }
+
+    #[test]
+    fn submit_model_command() {
+        let mut s = state();
+        s.input.set("/model deepseek-v4-pro");
+        let action = s.submit().expect("action");
+        match action {
+            SubmitAction::SwitchModel(name) => assert_eq!(name, "deepseek-v4-pro"),
+            other => panic!("expected switch model, got {other:?}"),
+        }
+        assert!(s.busy);
+    }
+
+    #[test]
+    fn submit_unknown_slash_is_command() {
+        let mut s = state();
+        s.input.set("/nope");
+        assert!(s.submit().is_none());
+        assert!(!s.busy);
+        assert!(matches!(s.messages.last(), Some(UiMsg::Error(_))));
+    }
+
+    #[test]
+    fn quit_command() {
+        let mut s = state();
+        s.input.set("/quit");
+        assert!(s.submit().is_none());
+        assert!(s.should_quit);
+    }
+
+    #[test]
+    fn help_and_models_commands() {
+        let mut s = state();
+        s.input.set("/help");
+        s.submit();
+        assert!(matches!(s.messages.last(), Some(UiMsg::Info(_))));
+        s.input.set("/models");
+        s.submit();
+        assert!(matches!(s.messages.last(), Some(UiMsg::Info(_))));
+    }
+
+    #[test]
+    fn new_command_clears_messages() {
+        let mut s = state();
+        s.push(UiMsg::User("old".into()));
+        s.input.set("/new");
+        s.submit();
+        assert!(s.messages.is_empty());
+        assert_eq!(s.status, "new session");
+    }
+
+    #[test]
+    fn agent_chunk_accumulates() {
+        let mut s = state();
+        s.on_event(update(json!({
+            "sessionId": "s1",
+            "update": { "sessionUpdate": "agent_message_chunk", "content": { "type": "text", "text": "Hello" } }
+        })));
+        s.on_event(update(json!({
+            "sessionId": "s1",
+            "update": { "sessionUpdate": "agent_message_chunk", "content": { "type": "text", "text": " world" } }
+        })));
+        match &s.messages[0] {
+            UiMsg::Assistant(t) => assert_eq!(t, "Hello world"),
+            other => panic!("expected assistant, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tool_call_lifecycle() {
+        let mut s = state();
+        s.on_event(update(json!({
+            "sessionId": "s1",
+            "update": {
+                "sessionUpdate": "tool_call",
+                "toolCallId": "t1",
+                "title": "bash",
+                "kind": "bash",
+                "status": "in_progress",
+                "rawInput": null
+            }
+        })));
+        assert_eq!(s.messages.len(), 1);
+        match &s.messages[0] {
+            UiMsg::ToolCall(item) => {
+                assert_eq!(item.id, "t1");
+                assert_eq!(item.status, "in_progress");
+            }
+            other => panic!("expected toolcall, got {other:?}"),
+        }
+        s.on_event(update(json!({
+            "sessionId": "s1",
+            "update": {
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "t1",
+                "status": "completed",
+                "rawOutput": { "output": "done" }
+            }
+        })));
+        match &s.messages[0] {
+            UiMsg::ToolCall(item) => {
+                assert_eq!(item.status, "completed");
+                assert_eq!(item.output, "done");
+            }
+            other => panic!("expected toolcall, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn todo_add_and_update() {
+        let mut s = state();
+        s.on_event(update(json!({
+            "sessionId": "s1",
+            "update": { "sessionUpdate": "todo", "type": "upsert", "id": "a", "content": "fix", "status": "in_progress" }
+        })));
+        assert_eq!(s.todos.len(), 1);
+        s.on_event(update(json!({
+            "sessionId": "s1",
+            "update": { "sessionUpdate": "todo", "type": "upsert", "id": "a", "content": "fix", "status": "completed" }
+        })));
+        assert_eq!(s.todos.len(), 1);
+        assert_eq!(s.todos[0].status, "completed");
+    }
+
+    #[test]
+    fn permission_request_sets_pending() {
+        let mut s = state();
+        let mut ev = event(
+            "permission/request",
+            json!({ "action": "bash", "resource": "ls" }),
+        );
+        ev.engine_request_id = Some(42);
+        s.on_event(ev);
+        let p = s.pending_permission.expect("pending");
+        assert_eq!(p.request_id, 42);
+        assert_eq!(p.action, "bash");
+        assert_eq!(p.resource, "ls");
+    }
+
+    #[test]
+    fn question_request_with_options() {
+        let mut s = state();
+        let mut ev = event(
+            "question/request",
+            json!({ "question": "pick", "options": ["one", "two"] }),
+        );
+        ev.engine_request_id = Some(7);
+        s.on_event(ev);
+        let q = s.pending_question.expect("pending");
+        assert_eq!(q.options, vec!["one".to_string(), "two".to_string()]);
+    }
+
+    #[test]
+    fn non_update_event_ignored() {
+        let mut s = state();
+        s.on_event(event("unknown/method", json!({})));
+        assert!(s.messages.is_empty());
+        assert!(s.pending_permission.is_none());
+        assert!(s.pending_question.is_none());
+    }
+
+    #[test]
+    fn question_key_numbered_options() {
+        let mut q = Some(PendingQuestion {
+            request_id: 5,
+            question: "pick".into(),
+            options: vec!["a".into(), "b".into()],
+            input: String::new(),
+        });
+        let k = KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE);
+        let (rid, answer) = handle_question_key(&mut q, &k).expect("picked");
+        assert_eq!(rid, 5);
+        assert_eq!(answer, "b");
+        assert!(q.is_none()); // dialog consumed
+    }
+
+    #[test]
+    fn question_key_free_text_and_backspace() {
+        let mut q = Some(PendingQuestion {
+            request_id: 1,
+            question: "name?".into(),
+            options: vec![],
+            input: String::new(),
+        });
+        let k = KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE);
+        assert!(handle_question_key(&mut q, &k).is_none());
+        assert_eq!(q.as_ref().unwrap().input, "h");
+        let bs = KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE);
+        assert!(handle_question_key(&mut q, &bs).is_none());
+        assert_eq!(q.as_ref().unwrap().input, "");
+    }
+
+    #[test]
+    fn layout_lines_structure() {
+        let mut s = state();
+        s.push(UiMsg::User("hi".into()));
+        s.push(UiMsg::Assistant("yo".into()));
+        s.push(UiMsg::Info("note".into()));
+        s.push(UiMsg::Error("bad".into()));
+        let lines = s.layout_lines();
+        let text: Vec<String> = lines.iter().map(|l| l.line.to_string()).collect();
+        let joined = text.join("\n");
+        assert!(joined.contains("┌ You"));
+        assert!(joined.contains("│ hi"));
+        assert!(joined.contains("┌ Assistant"));
+        assert!(joined.contains("│ yo"));
+        assert!(joined.contains("ℹ note"));
+        assert!(joined.contains("✖ bad"));
+    }
+
+    #[test]
+    fn view_top_empty_and_scroll_to_bottom() {
+        let s = state();
+        assert_eq!(s.view_top(10), 0); // empty => top 0
+        let mut s = state();
+        for i in 0..20 {
+            s.push(UiMsg::User(format!("line {i}")));
+        }
+        // No focus => anchored to bottom.
+        assert_eq!(s.view_top(10), s.layout_lines().len().saturating_sub(10));
+        // With focus => centered on that line.
+        s.focus = Some(0);
+        assert_eq!(s.view_top(10), 0);
+    }
+
+    #[test]
+    fn scroll_step_moves_focus() {
+        let mut s = state();
+        for i in 0..20 {
+            s.push(UiMsg::User(format!("line {i}")));
+        }
+        let total = s.layout_lines().len();
+        // Scrolling down past the bottom stays anchored at the bottom (focus None).
+        s.scroll_step(1);
+        assert!(s.focus.is_none());
+        // Scrolling up from the bottom moves focus into view.
+        s.scroll_step(-1);
+        assert!(s.focus.is_some());
+        assert!(s.focus.unwrap() + 1 < total);
+        // Scrolling far up clamps at the top.
+        s.scroll_step(-1000);
+        assert_eq!(s.focus, Some(0));
+    }
 
     fn style_fg(s: &Style) -> Option<Color> {
         s.fg

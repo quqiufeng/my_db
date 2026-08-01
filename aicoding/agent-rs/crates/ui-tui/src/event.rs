@@ -70,3 +70,61 @@ pub fn permission_choice(k: &KeyEvent) -> Option<Option<serde_json::Value>> {
         _ => None,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn key(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
+        KeyEvent::new(code, modifiers)
+    }
+
+    #[test]
+    fn enter_detection() {
+        assert!(is_enter(&key(KeyCode::Enter, KeyModifiers::NONE)));
+        // shift+enter is a soft enter, not a send
+        assert!(!is_enter(&key(KeyCode::Enter, KeyModifiers::SHIFT)));
+        assert!(is_soft_enter(&key(KeyCode::Enter, KeyModifiers::SHIFT)));
+        assert!(is_soft_enter(&key(KeyCode::Enter, KeyModifiers::CONTROL)));
+        assert!(is_soft_enter(&key(KeyCode::Enter, KeyModifiers::ALT)));
+        assert!(is_soft_enter(&key(KeyCode::Char('j'), KeyModifiers::CONTROL)));
+        assert!(!is_soft_enter(&key(KeyCode::Char('j'), KeyModifiers::NONE)));
+    }
+
+    #[test]
+    fn quit_detection() {
+        assert!(is_quit(&key(KeyCode::Char('c'), KeyModifiers::CONTROL)));
+        assert!(is_quit(&key(KeyCode::Char('d'), KeyModifiers::CONTROL)));
+        assert!(!is_quit(&key(KeyCode::Char('c'), KeyModifiers::NONE)));
+        assert!(!is_quit(&key(KeyCode::Char('q'), KeyModifiers::CONTROL)));
+    }
+
+    #[test]
+    fn interrupt_is_esc_only() {
+        assert!(is_interrupt(&key(KeyCode::Esc, KeyModifiers::NONE)));
+        assert!(!is_interrupt(&key(KeyCode::Char('c'), KeyModifiers::CONTROL)));
+    }
+
+    #[test]
+    fn permission_keys() {
+        use serde_json::json;
+        assert_eq!(
+            permission_choice(&key(KeyCode::Char('y'), KeyModifiers::NONE)),
+            Some(Some(json!({ "allow": true })))
+        );
+        assert_eq!(
+            permission_choice(&key(KeyCode::Char('N'), KeyModifiers::SHIFT)),
+            Some(Some(json!({ "allow": false })))
+        );
+        assert_eq!(
+            permission_choice(&key(KeyCode::Char('a'), KeyModifiers::NONE)),
+            Some(Some(json!({ "always": true })))
+        );
+        assert_eq!(
+            permission_choice(&key(KeyCode::Esc, KeyModifiers::NONE)),
+            Some(None)
+        );
+        assert_eq!(permission_choice(&key(KeyCode::Enter, KeyModifiers::NONE)), None);
+        assert_eq!(permission_choice(&key(KeyCode::Char('x'), KeyModifiers::NONE)), None);
+    }
+}

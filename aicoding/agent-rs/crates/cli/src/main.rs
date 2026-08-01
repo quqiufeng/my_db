@@ -39,6 +39,9 @@ async fn run_turn(
                             Update::ToolCallUpdate { tool_call_id, status, .. } => {
                                 println!("tool[{tool_call_id}] -> {status}");
                             }
+                            Update::Todo { content, status, .. } => {
+                                println!("\ntodo[{status}] {content}");
+                            }
                         }
                     }
                     Ok(_) => {}

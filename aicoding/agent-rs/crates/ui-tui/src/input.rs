@@ -128,3 +128,88 @@ impl Input {
         self.buf.chars().filter(|&c| c == '\n').count() + 1
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn insert_and_cursor() {
+        let mut i = Input::new();
+        i.insert_char('a');
+        i.insert_char('b');
+        assert_eq!(i.buf, "ab");
+        assert_eq!(i.cursor, 2);
+        i.move_left();
+        i.insert_char('X');
+        assert_eq!(i.buf, "aXb");
+        assert_eq!(i.cursor, 2);
+    }
+
+    #[test]
+    fn insert_utf8_multi_byte() {
+        let mut i = Input::new();
+        i.insert_char('中');
+        i.insert_char('文');
+        assert_eq!(i.buf, "中文");
+        assert_eq!(i.cursor, 6);
+        i.move_left();
+        i.insert_char('-');
+        assert_eq!(i.buf, "中-文");
+    }
+
+    #[test]
+    fn backspace_and_delete() {
+        let mut i = Input::new();
+        i.set("hello");
+        i.move_left();
+        i.backspace();
+        assert_eq!(i.buf, "helo");
+        assert_eq!(i.cursor, 3);
+        i.delete();
+        assert_eq!(i.buf, "hel");
+        // backspace at start is a no-op
+        i.move_home();
+        i.backspace();
+        assert_eq!(i.buf, "hel");
+    }
+
+    #[test]
+    fn word_navigation() {
+        let mut i = Input::new();
+        i.set("foo bar baz");
+        i.move_word_left();
+        assert_eq!(i.cursor, 8); // start of "baz"
+        i.move_word_left();
+        assert_eq!(i.cursor, 4); // start of "bar"
+        i.move_word_right();
+        assert_eq!(i.cursor, 7); // space after "bar"
+        i.move_word_right();
+        assert_eq!(i.cursor, 11); // end of buffer
+    }
+
+    #[test]
+    fn kill_operations() {
+        let mut i = Input::new();
+        i.set("hello world");
+        i.move_word_left(); // to start of "world" (index 6)
+        assert_eq!(i.cursor, 6);
+        i.kill_word_before();
+        assert_eq!(i.buf, "world");
+        assert_eq!(i.cursor, 0);
+        i.kill_to_start(); // no-op at start
+        assert_eq!(i.buf, "world");
+        i.set("abc");
+        i.move_home();
+        i.kill_to_end();
+        assert_eq!(i.buf, "");
+    }
+
+    #[test]
+    fn line_counting() {
+        let mut i = Input::new();
+        assert_eq!(i.line_count(), 1);
+        i.insert_char('\n');
+        assert_eq!(i.line_count(), 2);
+    }
+}
