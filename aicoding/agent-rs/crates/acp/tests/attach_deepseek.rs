@@ -29,7 +29,10 @@ async fn attach_live_deepseek_pong() {
                     Ok(Event { method, params, .. }) if method == "session/update" => {
                         if let Ok(p) = serde_json::from_value::<agent_acp::types::SessionUpdateParams>(params.unwrap_or(serde_json::Value::Null)) {
                             if let Update::AgentMessageChunk { content } = p.update {
-                                got.push_str(&content.text);
+                                // Skip reasoning (thinking) chunks; only the visible reply.
+                                if content.kind != "thinking" {
+                                    got.push_str(&content.text);
+                                }
                             }
                         }
                     }
@@ -42,5 +45,8 @@ async fn attach_live_deepseek_pong() {
     }
     client.session_close(&sess.session_id).await.ok();
     println!("ASSISTANT TEXT: [{got}]");
-    assert!(got.trim().eq_ignore_ascii_case("pong"), "expected pong, got: {got}");
+    assert!(
+        got.trim().eq_ignore_ascii_case("pong"),
+        "expected pong, got: {got}"
+    );
 }

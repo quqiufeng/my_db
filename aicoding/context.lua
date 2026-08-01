@@ -9,6 +9,7 @@
 
 local memory = require("memory")
 local tokens = require("tokens")
+local json = require("json")
 
 local M = {}
 
@@ -149,7 +150,14 @@ function M.build_messages(session, system_prompt, messages)
 
     local out = { { role = "system", content = system_prompt } }
     for _, m in ipairs(compressed) do
-        table.insert(out, m)
+        -- Reasoning/thinking is internal to the model; it must not be fed
+        -- back into the conversation (it bloats the window and can confuse
+        -- later turns). Keep content and tool_calls only.
+        local m2 = { role = m.role, content = m.content }
+        if m.tool_calls then
+            m2.tool_calls = m.tool_calls
+        end
+        table.insert(out, m2)
     end
 
     return out, archived
