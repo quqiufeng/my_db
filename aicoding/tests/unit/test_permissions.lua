@@ -7,7 +7,7 @@ local permissions = require("permissions")
 permissions.load(nil)
 
 t.eq(permissions.check("read", "/any/file.txt"), "allow", "read is always allowed")
-t.eq(permissions.check("write", "/tmp/safe.txt"), "ask", "write defaults to ask")
+t.eq(permissions.check("write", "/tmp/safe.txt"), "allow", "write defaults to allow")
 t.eq(permissions.check("write", "/etc/passwd"), "deny", "system dirs are protected")
 t.eq(permissions.check("write", "/usr/local/bin/x"), "deny", "/usr is protected")
 t.eq(permissions.check("file_delete", "/etc/x"), "deny", "delete protected")

@@ -201,6 +201,12 @@ impl AppState {
         if text.is_empty() || self.busy {
             return None;
         }
+        // Bare quit words exit the app (no need for the / prefix).
+        if text == "quit" || text == "exit" || text == "q" {
+            self.input.clear();
+            self.should_quit = true;
+            return None;
+        }
         if let Some(name) = text.strip_prefix("/model ") {
             let name = name.trim().to_string();
             self.input.clear();
@@ -986,6 +992,21 @@ mod tests {
         s.input.set("/quit");
         assert!(s.submit().is_none());
         assert!(s.should_quit);
+    }
+
+    #[test]
+    fn bare_quit_words_exit() {
+        for word in ["quit", "exit", "q"] {
+            let mut s = state();
+            s.input.set(word);
+            assert!(s.submit().is_none(), "{word} should not send a prompt");
+            assert!(s.should_quit, "{word} should quit");
+        }
+        // "quality" is not a quit word.
+        let mut s = state();
+        s.input.set("quality");
+        assert!(s.submit().is_some());
+        assert!(!s.should_quit);
     }
 
     #[test]
