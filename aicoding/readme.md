@@ -196,7 +196,7 @@ echo '{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":
 
 ### 5. 多模型切换
 
-aicoding 内置 5 个模型（`/opt/my_db/aicoding/models.json`），可在 `~/.aicoding/models.json` 中添加自定义模型：
+aicoding 内置 2 个模型（`/opt/my_db/aicoding/models.json`）：`deepseek-v4-flash`（快速免费）和 `deepseek-v4-pro`（高质量）。可在 `~/.aicoding/models.json` 中添加自定义模型：
 
 ```json
 [
@@ -394,7 +394,7 @@ local ok, out = mem.context("schedule", "/code/local/linux", { depth = 2 })
 |------|--------|------|
 | `OPENAI_API_KEY` | — | LLM API 密钥 |
 | `OPENAI_BASE_URL` | `https://api.openai.com/v1` | API 基础地址 |
-| `OPENAI_MODEL` | `kimi-latest` | 模型名称 |
+| `OPENAI_MODEL` | `deepseek-v4-flash` | 模型名称 |
 | `LLM_PROTOCOL` | `openai` | `openai` 或 `anthropic` |
 | `LLM_TEMPERATURE` | `1.0` | 采样温度 |
 | `OPENCODE_CONTEXT_TOKENS` | `16384` | 上下文窗口上限 |

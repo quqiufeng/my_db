@@ -1,27 +1,12 @@
 [
   {
-    "name": "kimi-latest",
-    "provider": "openai",
-    "model": "kimi-latest"
-  },
-  {
     "name": "deepseek-v4-flash",
     "provider": "deepseek",
     "model": "deepseek-v4-flash"
   },
   {
-    "name": "deepseek-v3",
+    "name": "deepseek-v4-pro",
     "provider": "deepseek",
-    "model": "deepseek-v3"
-  },
-  {
-    "name": "claude-3-5-sonnet",
-    "provider": "anthropic",
-    "model": "claude-3-5-sonnet-20241022"
-  },
-  {
-    "name": "deepseek-chat",
-    "provider": "deepseek",
-    "model": "deepseek-chat"
+    "model": "deepseek-v4-pro"
   }
 ]
