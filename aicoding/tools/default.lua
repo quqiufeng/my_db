@@ -300,6 +300,32 @@ local function checkpoint_files(paths, reason)
     return checkpoint.create(session_id, project_root, files, reason)
 end
 
+-- Stable string hash for MCP client keys (FNV-1a via bxor).
+local function hash_string(s)
+    local h = 2166136261
+    for i = 1, #s do
+        h = bit.bxor(h, s:byte(i))
+        h = (h * 16777619) % 4294967296
+    end
+    return h
+end
+
+local function index_contains(t, v)
+    for _, item in ipairs(t or {}) do
+        if item == v then return true end
+    end
+    return false
+end
+
+local function map_mcp_type(t)
+    if t == "number" or t == "integer" then return "integer"
+    elseif t == "boolean" then return "boolean"
+    elseif t == "array" then return "array"
+    elseif t == "object" then return "object"
+    end
+    return "string"
+end
+
 M.tools = {
     {
         name = "todo_write",
@@ -607,7 +633,24 @@ M.tools = {
                 if not content then
                     return { ok = false, error = err }
                 end
-                return { ok = true, type = "image", path = path, base64 = base64_encode(content) }
+                local mime = path:match("%.([^.]+)$")
+                local b64 = base64_encode(content)
+                -- Report dimensions if available, plus base64 for vision-capable
+                -- models (kept out of the reply to avoid huge output).
+                local dims_cmd = string.format("file -b %s 2>/dev/null | grep -oE '[0-9]+ x [0-9]+'", cjson.encode(path))
+                local dp = io.popen(dims_cmd)
+                local dims = (dp:read("*a") or ""):gsub("%s+", "")
+                dp:close()
+                return {
+                    ok = true,
+                    type = "image",
+                    path = path,
+                    mime = mime,
+                    size_bytes = #content,
+                    dimensions = dims ~= "" and dims or nil,
+                    note = "Image content is available as base64; supply it to a vision-capable model when visual understanding is needed.",
+                    base64 = b64
+                }
             end
 
             -- Regular file
@@ -1272,6 +1315,99 @@ M.tools = {
         handler = function(args)
             local sid = args.session_id or session_id
             return checkpoint.restore(sid, project_root, args.checkpoint_id)
+        end
+    },
+    {
+        name = "mcp_connect",
+        description = "Connect to a Model Context Protocol (MCP) server over Streamable HTTP and merge its tools into the agent's toolset. endpoint is the server URL; optional headers are passed as an array of \"Key: Value\" strings.",
+        parameters = {
+            endpoint = { type = "string", required = true, description = "MCP server URL (Streamable HTTP transport)" },
+            headers = { type = "array", required = false, description = "Extra HTTP headers, e.g. [\"Authorization: Bearer x\"]" },
+            timeout = { type = "integer", required = false, description = "Request timeout in seconds (default 30)" }
+        },
+        handler = function(args)
+            local mcp = require("mcp_client")
+            local client = mcp.new()
+            local ok, err = client:connect(args.endpoint, {
+                headers = args.headers,
+                timeout = args.timeout,
+            })
+            if not ok then return { ok = false, error = err } end
+            local tools, terr = client:tools()
+            if not tools then return { ok = false, error = terr } end
+            -- Store client under a stable key derived from the endpoint.
+            local key = "mcp_" .. tostring(math.floor(math.abs(hash_string(args.endpoint))))
+            M.mcp_clients = M.mcp_clients or {}
+            M.mcp_clients[key] = client
+
+            -- Wrap each MCP tool as a local tool that forwards to the server.
+            local added = 0
+            for _, t in ipairs(tools) do
+                if type(t) == "table" and t.name then
+                    local params = t.inputSchema or {}
+                    local params_spec = {}
+                    local required = params.required or {}
+                    local props = params.properties or {}
+                    for pname, p in pairs(props) do
+                        params_spec[pname] = {
+                            type = map_mcp_type(p.type),
+                            required = index_contains(required, pname),
+                            description = p.description
+                        }
+                    end
+                    local c = client
+                    local tname = t.name
+                    table.insert(M.tools, {
+                        name = "mcp:" .. tname,
+                        description = (t.description or "MCP tool") .. " [via MCP " .. key .. "]",
+                        parameters = params_spec,
+                        handler = function(cargs)
+                            local res, cerr = c:call(tname, cargs)
+                            if not res then return { ok = false, error = cerr } end
+                            return res
+                        end
+                    })
+                    added = added + 1
+                end
+            end
+            M.register_tools("/agent/default")
+            return { ok = true, endpoint = args.endpoint, tools_connected = added }
+        end
+    },
+    {
+        name = "mcp_list",
+        description = "List connected MCP servers and their tools.",
+        parameters = {},
+        handler = function(args)
+            local out = {}
+            M.mcp_clients = M.mcp_clients or {}
+            for key, client in pairs(M.mcp_clients) do
+                local tools, err = client:tools()
+                table.insert(out, {
+                    key = key,
+                    endpoint = client.endpoint,
+                    tools = tools or {},
+                    error = err
+                })
+            end
+            return { ok = true, servers = out }
+        end
+    },
+    {
+        name = "task",
+        description = "Delegate a self-contained sub-task to a sub-agent with its own isolated context. Use this to execute units of work in parallel or to offload research/exploration that does not need the full conversation. Returns the sub-agent's final answer.",
+        parameters = {
+            prompt = { type = "string", required = true, description = "The self-contained task for the sub-agent" },
+            mode = { type = "string", enum = {"general", "explore", "plan"}, required = false, description = "Sub-agent mode (default general)" }
+        },
+        handler = function(args)
+            local subagent = require("subagent")
+            local ok, result = subagent.run_task(args.prompt, {
+                project_root = project_root,
+                mode = args.mode,
+            })
+            if not ok then return { ok = false, error = result } end
+            return { ok = true, result = result }
         end
     }
 }
