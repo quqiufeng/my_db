@@ -38,6 +38,32 @@ size_t cache_entry_total_size(cache_entry_header_t* header) {
     return (size + MYDB_ALIGN - 1) & ~(MYDB_ALIGN - 1);
 }
 
+// Scan the pool and verify the entry chain is structurally sound: every
+// entry header must have sane key_len/value_len and stay within pool.used.
+// Returns true when the pool looks intact. A corrupted cache.bin (which
+// previously caused SIGSEGV once a persisted index referencing bad offsets
+// was loaded) is detected here so cache_open can fall back to a rebuild.
+static bool cache_pool_validate(cache_t* cache) {
+    if (!cache || !cache->pool.base || cache->pool.used <= CACHE_HEADER_SIZE)
+        return cache && cache->pool.base; // empty pool is fine
+    size_t offset = CACHE_HEADER_SIZE;
+    while (offset + CACHE_ENTRY_HEADER_ALIGNED <= cache->pool.used) {
+        cache_entry_header_t* header = (cache_entry_header_t*)CACHE_PTR(cache, offset);
+        if (header->key_len == 0 || header->key_len > CACHE_MAX_KEY_LEN ||
+            header->value_len > CACHE_MAX_VALUE_LEN) {
+            return false;
+        }
+        size_t total = cache_entry_total_size(header);
+        if (total < CACHE_ENTRY_HEADER_ALIGNED) return false;
+        if (offset + total > cache->pool.used) return false;
+        offset += total;
+    }
+    // Allow trailing slack smaller than one entry; otherwise the chain is
+    // inconsistent.
+    return offset == cache->pool.used || offset + CACHE_ENTRY_HEADER_ALIGNED > cache->pool.used;
+}
+
+
 // 初始化 cache 文件头（在 pool 头基础上写入扩展信息）
 static void cache_header_init(cache_t* cache) {
     void* base = cache->pool.base;
@@ -289,7 +315,13 @@ cache_t* cache_open(const char* db_dir, size_t max_memory) {
         clock_gettime(CLOCK_MONOTONIC, &t_now);
         long init_ms = (t_now.tv_sec - t_start.tv_sec) * 1000 + (t_now.tv_nsec - t_start.tv_nsec) / 1000000;
         
-        int index_loaded = (cache_index_load(cache) == 0);
+        // index.bin may reference offsets that are no longer valid in a
+        // corrupted cache.bin; validate the pool first and fall back to a
+        // full scan/rebuild instead of SIGSEGV'ing on bad offsets.
+        bool pool_ok = cache_pool_validate(cache);
+        if (!pool_ok)
+            fprintf(stderr, "[CACHE] pool validation failed, forcing rebuild\n");
+        int index_loaded = (pool_ok && cache_index_load(cache) == 0);
         clock_gettime(CLOCK_MONOTONIC, &t_now);
         long load_ms = (t_now.tv_sec - t_start.tv_sec) * 1000 + (t_now.tv_nsec - t_start.tv_nsec) / 1000000 - init_ms;
         
