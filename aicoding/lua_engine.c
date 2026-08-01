@@ -456,6 +456,8 @@ static int l_acp_request(lua_State* L) {
     return 1;
 }
 
+static int l_set_llm(lua_State* L);
+
 static const luaL_Reg opencode_lib[] = {
     {"cache_get",          l_cache_get},
     {"cache_set",          l_cache_set},
@@ -480,10 +482,41 @@ static const luaL_Reg opencode_lib[] = {
     {"get_lua_state",       l_get_lua_state},
     {"acp_send",            l_acp_send},
     {"acp_request",         l_acp_request},
+    {"set_llm",             l_set_llm},
     {NULL, NULL}
 };
 
 /* ---------- lifecycle ---------- */
+
+// Rebuild the LLM client from the current environment (e.g. after
+// select_model() switched models at runtime). Returns boolean success.
+static int l_set_llm(lua_State* L) {
+    llm_config_t cfg;
+    llm_config_from_env(&cfg);
+    if (!cfg.base_url[0] || !cfg.api_key[0] || !cfg.model[0]) {
+        llm_config_free_fields(&cfg);
+        lua_pushboolean(L, 0);
+        return 1;
+    }
+    llm_client_t* llm = llm_client_create(&cfg);
+    llm_config_free_fields(&cfg);
+    if (!llm) {
+        lua_pushboolean(L, 0);
+        return 1;
+    }
+    lua_getglobal(L, "__engine");
+    lua_engine_t* e = lua_touserdata(L, -1);
+    lua_pop(L, 1);
+    if (e) {
+        lua_engine_set_llm(e, llm);
+    } else {
+        llm_client_free(llm);
+        lua_pushboolean(L, 0);
+        return 1;
+    }
+    lua_pushboolean(L, 1);
+    return 1;
+}
 
 lua_engine_t* lua_engine_create(cache_t* cache, const llm_config_t* llm_config) {
     lua_State* L = luaL_newstate();
@@ -502,6 +535,8 @@ lua_engine_t* lua_engine_create(cache_t* cache, const llm_config_t* llm_config) 
     /* Store cache/llm pointers as hidden globals for bindings */
     lua_pushlightuserdata(L, cache);
     lua_setglobal(L, "__cache");
+    lua_pushlightuserdata(L, e);
+    lua_setglobal(L, "__engine");
     lua_pushlightuserdata(L, e->llm);
     lua_setglobal(L, "__llm");
 

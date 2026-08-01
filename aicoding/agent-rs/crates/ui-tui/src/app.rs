@@ -71,7 +71,17 @@ pub struct App {
     pub todos: Vec<TodoItem>,
 }
 
-type PromptFut = Pin<Box<dyn Future<Output = Result<agent_acp::SessionPromptResult, AcpError>>>>;
+type ActionFut = Pin<Box<dyn Future<Output = Result<ActionOutcome, AcpError>>>>;
+
+pub enum SubmitAction {
+    Prompt { session_id: String, text: String },
+    SwitchModel(String),
+}
+
+pub enum ActionOutcome {
+    Prompt(agent_acp::SessionPromptResult),
+    SwitchModel(String),
+}
 
 /// Handle a key while a question dialog is open.
 /// Returns Some((request_id, answer)) when a numbered option was picked
@@ -158,10 +168,20 @@ impl App {
         self.messages.push(msg);
     }
 
-    pub fn submit(&mut self) -> Option<(String, String)> {
+    pub fn submit(&mut self) -> Option<SubmitAction> {
         let text = self.input.buf.trim().to_string();
         if text.is_empty() || self.busy {
             return None;
+        }
+        if let Some(name) = text.strip_prefix("/model ") {
+            let name = name.trim().to_string();
+            self.input.clear();
+            if name.is_empty() {
+                return None;
+            }
+            self.busy = true;
+            self.focus = None;
+            return Some(SubmitAction::SwitchModel(name));
         }
         if text.starts_with('/') {
             self.handle_command(&text);
@@ -174,7 +194,10 @@ impl App {
         self.input.clear();
         self.busy = true;
         self.focus = None;
-        Some((self.session_id.clone(), text))
+        Some(SubmitAction::Prompt {
+            session_id: self.session_id.clone(),
+            text,
+        })
     }
 
     fn handle_command(&mut self, cmd: &str) {
@@ -191,13 +214,13 @@ impl App {
             }
             "/models" => {
                 self.messages.push(UiMsg::Info(format!(
-                    "models: deepseek-v4-flash, deepseek-v4-pro (current: {}; restart to switch via AICODING_MODEL)",
+                    "current model: {} · switch with /model <name> (e.g. /model deepseek-v4-pro)",
                     self.model
                 )));
             }
             "/help" => {
                 self.messages.push(UiMsg::Info(
-                    "commands: /quit /new /models /help\n\
+                    "commands: /quit /new /model <name> /models /help\n\
                      enter send · shift+enter newline · esc interrupt (x2)\n\
                      (empty input) j/k or ↑/↓ scroll · pagedown/pageup page · enter/tab expand tool"
                         .into(),
@@ -643,7 +666,7 @@ pub async fn run(
         std::io::stdout(),
     ))?;
 
-    let mut prompt_fut: Option<PromptFut> = None;
+    let mut action_fut: Option<ActionFut> = None;
 
     let result: Result<(), Box<dyn std::error::Error>> = loop {
         tokio::select! {
@@ -715,7 +738,7 @@ pub async fn run(
                         } else if event::is_interrupt(&k) {
                             if app.busy {
                                 if app.esc_armed {
-                                    prompt_fut = None;
+                                    action_fut = None;
                                     let _ = app.client.session_cancel(&app.session_id).await;
                                     app.busy = false;
                                     app.push(UiMsg::Info("interrupted".into()));
@@ -725,13 +748,29 @@ pub async fn run(
                                 }
                             }
                         } else if event::is_enter(&k) && !app.input.is_empty() {
-                            if let Some((sid, text)) = app.submit() {
-                                let cwd = app.project.clone();
-                                let arc = app.client.clone();
-                                let fut = async move {
-                                    arc.session_prompt(&sid, &text, Some(&cwd)).await
-                                };
-                                prompt_fut = Some(Box::pin(fut));
+                            if let Some(action) = app.submit() {
+                                match action {
+                                    SubmitAction::Prompt { session_id, text } => {
+                                        let cwd = app.project.clone();
+                                        let arc = app.client.clone();
+                                        let fut = async move {
+                                            Ok(ActionOutcome::Prompt(
+                                                arc.session_prompt(&session_id, &text, Some(&cwd))
+                                                    .await?,
+                                            ))
+                                        };
+                                        action_fut = Some(Box::pin(fut));
+                                    }
+                                    SubmitAction::SwitchModel(name) => {
+                                        let arc = app.client.clone();
+                                        let fut = async move {
+                                            Ok(ActionOutcome::SwitchModel(
+                                                arc.switch_model(&name).await?,
+                                            ))
+                                        };
+                                        action_fut = Some(Box::pin(fut));
+                                    }
+                                }
                             }
                         } else {
                             handle_key(&mut app, &k);
@@ -753,21 +792,26 @@ pub async fn run(
                 }
             }
             res = async {
-                prompt_fut.as_mut().expect("guarded by precondition").await
-            }, if prompt_fut.is_some() => {
+                action_fut.as_mut().expect("guarded by precondition").await
+            }, if action_fut.is_some() => {
                 match res {
-                    Ok(resp) => {
+                    Ok(ActionOutcome::Prompt(resp)) => {
                         app.busy = false;
                         if resp.stop_reason == "max_iterations" {
                             app.push(UiMsg::Info("reached max tool iterations".into()));
                         }
+                    }
+                    Ok(ActionOutcome::SwitchModel(name)) => {
+                        app.busy = false;
+                        app.model = name.clone();
+                        app.push(UiMsg::Info(format!("model switched to {name}")));
                     }
                     Err(e) => {
                         app.busy = false;
                         app.push(UiMsg::Error(format!("turn error: {e}")));
                     }
                 }
-                prompt_fut = None;
+                action_fut = None;
             }
         }
         if app.should_quit {

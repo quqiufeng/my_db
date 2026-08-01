@@ -308,8 +308,43 @@ static CURL* setup_post(llm_client_t* c, const char* url, struct curl_slist** he
     return setup_post_openai(c, url, headers);
 }
 
-llm_client_t* llm_client_create(const llm_config_t* config) {
-    if (!config || !config->base_url || !config->api_key || !config->model) return NULL;
+/* Build an LLM config from the environment (LLM_PROTOCOL + provider vars).
+ * Caller must free the returned strings with llm_config_free_fields. */
+void llm_config_from_env(llm_config_t* cfg) {
+    memset(cfg, 0, sizeof(*cfg));
+    const char* proto = getenv("LLM_PROTOCOL");
+    cfg->protocol = (proto && strcasecmp(proto, "anthropic") == 0) ? LLM_PROTOCOL_ANTHROPIC : LLM_PROTOCOL_OPENAI;
+
+    if (cfg->protocol == LLM_PROTOCOL_ANTHROPIC) {
+        cfg->base_url = strdup(getenv("ANTHROPIC_BASE_URL") ? getenv("ANTHROPIC_BASE_URL") : "");
+        cfg->api_key  = strdup(getenv("ANTHROPIC_API_KEY") ? getenv("ANTHROPIC_API_KEY") : "");
+        cfg->model    = strdup(getenv("ANTHROPIC_MODEL") ? getenv("ANTHROPIC_MODEL") : "");
+    } else {
+        cfg->base_url = strdup(getenv("OPENAI_BASE_URL") ? getenv("OPENAI_BASE_URL") : "");
+        cfg->api_key  = strdup(getenv("OPENAI_API_KEY") ? getenv("OPENAI_API_KEY") : "");
+        cfg->model    = strdup(getenv("OPENAI_MODEL") ? getenv("OPENAI_MODEL") : "");
+
+        /* DeepSeek uses OpenAI-compatible protocol but has its own env vars as aliases. */
+        if (!cfg->base_url[0]) { free(cfg->base_url); cfg->base_url = strdup(getenv("DEEPSEEK_BASE_URL") ? getenv("DEEPSEEK_BASE_URL") : ""); }
+        if (!cfg->api_key[0])  { free(cfg->api_key);  cfg->api_key  = strdup(getenv("DEEPSEEK_API_KEY") ? getenv("DEEPSEEK_API_KEY") : ""); }
+        if (!cfg->model[0])    { free(cfg->model);    cfg->model    = strdup(getenv("DEEPSEEK_MODEL") ? getenv("DEEPSEEK_MODEL") : ""); }
+    }
+    cfg->user_agent = strdup(getenv("LLM_USER_AGENT") ? getenv("LLM_USER_AGENT") : "");
+    cfg->extra_header = strdup(getenv("LLM_EXTRA_HEADER") ? getenv("LLM_EXTRA_HEADER") : "");
+    const char* temp = getenv("LLM_TEMPERATURE");
+    cfg->temperature = temp ? atof(temp) : 0.7;
+    cfg->max_tokens = 4096;
+}
+
+void llm_config_free_fields(llm_config_t* cfg) {
+    free(cfg->base_url);
+    free(cfg->api_key);
+    free(cfg->model);
+    free(cfg->user_agent);
+    free(cfg->extra_header);
+}
+
+llm_client_t* llm_client_create(const llm_config_t* config) {    if (!config || !config->base_url || !config->api_key || !config->model) return NULL;
     llm_client_t* c = calloc(1, sizeof(llm_client_t));
     if (!c) return NULL;
 

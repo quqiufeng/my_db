@@ -28,6 +28,11 @@ typedef struct llm_client llm_client_t;
 /* Lifecycle */
 llm_client_t* llm_client_create(const llm_config_t* config);
 void          llm_client_free(llm_client_t* c);
+
+/* Build an llm_config_t from environment variables. Strings are strdup'd;
+ * free them with llm_config_free_fields. */
+void llm_config_from_env(llm_config_t* cfg);
+void llm_config_free_fields(llm_config_t* cfg);
 int           llm_client_protocol(const llm_client_t* c); /* returns LLM_PROTOCOL_* */
 const char*   llm_client_model(const llm_client_t* c);
 

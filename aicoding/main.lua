@@ -552,6 +552,17 @@ function acp_dispatch(request_json)
         acp_sessions[prompt_sid] = nil
         return respond({})
 
+    elseif method == "model/switch" then
+        local name = params.model or ""
+        if name == "" then return respond({ error = "missing model" }) end
+        local selected = select_model(name)
+        local ok = opencode.set_llm()
+        if ok then
+            log.info("model switched to %s", selected)
+            return respond({ model = selected, ok = true })
+        end
+        return respond({ error = "failed to switch model", model = selected, ok = false })
+
     elseif method == "session/list" then
         local list = {}
         for sid, s in pairs(acp_sessions) do
@@ -614,7 +625,7 @@ function select_model(model_name)
 
     -- If only one model or non-interactive (stdin is a pipe, e.g. ACP mode), use first
     if not idx then
-        if #models == 1 or os.getenv("OPENCODE_NON_INTERACTIVE") then
+        if #models == 1 or os.getenv("OPENCODE_NON_INTERACTIVE") or os.getenv("OPENCODE_ACP") == "1" then
             idx = 1
         else
             io.stderr:write("\nAvailable models:\n")

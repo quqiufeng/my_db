@@ -69,32 +69,6 @@ static int load_env_file(const char* path) {
     return 0;
 }
 
-static void configure_llm(llm_config_t* cfg) {
-    memset(cfg, 0, sizeof(*cfg));
-    const char* proto = getenv("LLM_PROTOCOL");
-    cfg->protocol = (proto && strcasecmp(proto, "anthropic") == 0) ? LLM_PROTOCOL_ANTHROPIC : LLM_PROTOCOL_OPENAI;
-
-    if (cfg->protocol == LLM_PROTOCOL_ANTHROPIC) {
-        cfg->base_url = getenv("ANTHROPIC_BASE_URL");
-        cfg->api_key = getenv("ANTHROPIC_API_KEY");
-        cfg->model = getenv("ANTHROPIC_MODEL");
-    } else {
-        cfg->base_url = getenv("OPENAI_BASE_URL");
-        cfg->api_key = getenv("OPENAI_API_KEY");
-        cfg->model = getenv("OPENAI_MODEL");
-
-        /* DeepSeek uses OpenAI-compatible protocol but has its own env vars as aliases. */
-        if (!cfg->base_url) cfg->base_url = getenv("DEEPSEEK_BASE_URL");
-        if (!cfg->api_key) cfg->api_key = getenv("DEEPSEEK_API_KEY");
-        if (!cfg->model) cfg->model = getenv("DEEPSEEK_MODEL");
-    }
-    cfg->user_agent = getenv("LLM_USER_AGENT");
-    cfg->extra_header = getenv("LLM_EXTRA_HEADER");
-    const char* temp = getenv("LLM_TEMPERATURE");
-    cfg->temperature = temp ? atof(temp) : 0.7;
-    cfg->max_tokens = 4096;
-}
-
 static int is_configured(llm_config_t* cfg) {
     return cfg->base_url && cfg->api_key && cfg->model;
 }
@@ -235,7 +209,7 @@ int main(int argc, char** argv) {
 
     /* Now configure LLM from env vars (set by select_model) */
     llm_config_t cfg;
-    configure_llm(&cfg);
+    llm_config_from_env(&cfg);
     if (!is_configured(&cfg)) {
         print_config_help(env_file);
         goto cleanup;
@@ -243,6 +217,7 @@ int main(int argc, char** argv) {
 
     /* Create LLM client and inject into Lua engine */
     llm_client_t* llm = llm_client_create(&cfg);
+    llm_config_free_fields(&cfg);
     lua_engine_set_llm(L, llm);
 
     s = session_create(cache, session_id, project_ns, cfg.model);

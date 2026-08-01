@@ -286,6 +286,21 @@ impl Client {
         self.request("session/list", Some(SessionListParams {})).await
     }
 
+    pub async fn switch_model(&self, name: &str) -> Result<String, AcpError> {
+        #[derive(serde::Serialize)]
+        struct SwitchParams<'a> {
+            model: &'a str,
+        }
+        #[derive(serde::Deserialize)]
+        struct SwitchResult {
+            model: String,
+        }
+        Ok(self
+            .request::<_, SwitchResult>("model/switch", Some(SwitchParams { model: name }))
+            .await?
+            .model)
+    }
+
     pub async fn session_cancel(&self, session_id: &str) -> Result<(), AcpError> {
         self.notify("session/cancel", json!({ "sessionId": session_id }))
             .await
