@@ -1368,3 +1368,92 @@ UI 层（agent-rs）负责体验：记忆操作可视化（"写入记忆 X"）�
 ### 20.7 一句话总结
 
 > **C + LuaJIT 引擎不变，agent-rs 作为独立的 Rust ACP 客户端提供 UI（REPL → TUI → Web），引擎/UI 通过 ACP 协议完全解耦。**
+
+---
+
+## 21. 对齐目标：opencode 80% 功能 + 更优质量/性能
+
+### 21.1 总目标
+
+功能上对齐原生 opencode 的 **80%**（核心交互闭环），质量与性能全面优于 opencode。本文档是开发与验收基准。
+
+### 21.2 功能对齐矩阵
+
+#### 已有 / 超集（引擎已实现）
+
+| opencode 功能 | aicoding 现状 |
+|---|---|
+| 工具集 read/write/edit/apply_patch/glob/grep/bash/webfetch | ✅ 全部 + build/git/diff/file_delete（24+ 工具） |
+| 权限三态 ask/allow/deny + 危险命令/路径保护 | ✅ permissions.lua |
+| Plan / Build Agent | ✅ agents/plan.lua + build.lua |
+| 上下文管理（compaction/summary/overflow） | ✅ 滑动窗口 + KV Cache 归档（**不截断**） |
+| 快照 / revert | ✅ checkpoint + undo_last / rollback_to |
+| AGENTS.md / 项目指令注入 | ✅ conventions.lua 按项目类型自动注入 |
+| 插件系统 | ✅ Lua 插件热加载（plugin_create/load/list） |
+| 会话持久化 | ✅ KV Cache（mmap 零拷贝） |
+| 模型选择 | ✅ models.json + `--model` |
+| web_fetch 外部文档 | ✅ |
+| 结构化调试（trace） | ✅ trace_query（opencode 无对应） |
+| 记忆系统（跨会话永久记忆） | ✅ kv_* / knowledge_*（opencode 无对应） |
+
+#### 缺失（对齐 80% 需补）
+
+| # | 功能 | 实现位置 | 优先级 | 状态 |
+|---|---|---|---|---|
+| 1 | `question` 工具（交互式提问） | 引擎 | 高 | 计划 |
+| 2 | `todo` 工具（任务清单） | 引擎 | 高 | 计划 |
+| 3 | TUI（会话列表/模型切换/diff 视图） | agent-rs | 高 | 计划 |
+| 4 | `--continue` 续会话 | agent-rs | 高 | 计划 |
+| 5 | 权限 `always` 持久化授权 | 引擎 | 中 | 计划 |
+| 6 | serve 模式（HTTP + SSE） | agent-rs | 中 | 计划 |
+| 7 | 多 provider 配置切换 | 引擎 | 中 | 计划 |
+
+#### 放弃项（省下的 20%）
+
+- **MCP client**：对个人编码助手场景边际价值低
+- **LSP 集成（20+ 语言服务器）**：代码语义搜索 + 调用图已覆盖其主要价值
+- **serve 全套 / SDK 代码生成 / OpenAPI**：仅 serve 模式（HTTP+SSE）保留，SDK 生成放弃
+
+### 21.3 质量优势（对 opencode 硬伤的定点打击）
+
+| 维度 | 原生 opencode | aicoding + agent-rs |
+|---|---|---|
+| 上下文完整性 | compaction 压缩截断，长会话丢信息 | 固定窗口 + KV Cache 归档，**永不丢失** |
+| 推理模型能力 | transform.ts 硬编码禁用 deepseek-chat/reasoner/r1/v3 的 reasoning effort（`return {}`） | **无 transform 层**，effort 直传 |
+| Prompt cache 命中 | 消息重写/注入破坏缓存 key | 消息原样回传，缓存稳定命中 |
+| 跨会话记忆 | 会话结束即忘 | kv_* 永久记忆，新会话自动预热摘要 |
+| 工具结果完整性 | 无限上下文膨胀 → 截断 | 有界窗口 + 归档后按需召回 |
+| 可审计性 | 黑盒 | 全部记忆明文 JSON，`cache_query` 可查可删 |
+
+### 21.4 性能优势
+
+| 指标 | 原生 opencode | aicoding + agent-rs |
+|---|---|---|
+| 运行时 | Bun/Node.js + SolidJS + Effect-TS | C + LuaJIT 单二进制 + Rust 客户端 |
+| 启动时间 | 数百 ms | ~10ms（引擎进程） |
+| 内存占用 | 高 | 低（mmap 零拷贝） |
+| token 成本 | 上下文无限增长 | 固定窗口 + 按需召回，长会话成本线性下降 |
+| 工具执行 | JS 解释执行 | 原生 C + LuaJIT |
+
+### 21.5 验收基准（开发中按此核对）
+
+1. 核心交互闭环：输入 → 流式回复 → 工具调用（含状态）→ 权限询问 → 结果回写
+2. 长会话（>100 轮）上下文无丢失，`kv_search` 可召回任意历史事实
+3. 推理模型（deepseek-v4-flash 等）reasoning effort 参数直传，不被剥离
+4. 同一会话重复请求 prompt cache 命中（token 消耗可观察下降）
+5. 跨会话：新会话启动自动注入上次摘要，可继续未完成任务
+6. 权限：ask/allow/deny 三态生效，`always` 授权跨会话持久化
+7. 工具集 ≥ opencode 核心 16 项，全部通过 ACP 事件流展示
+
+### 21.6 路线图（对齐 80% 的顺序）
+
+| 阶段 | 内容 | 目标 |
+|---|---|---|
+| P1 | question / todo 工具 + 权限持久化（引擎） | 工具集对齐核心 16 项 |
+| P2 | agent-rs TUI（ratatui）：会话/模型/输入/流式/工具面板 | UI 对齐 opencode TUI |
+| P3 | `--continue` + 多 provider 配置 | 会话/模型对齐 |
+| P4 | serve 模式（HTTP+SSE）→ Web UI | 形态对齐 opencode app |
+
+### 21.7 一句话总结
+
+> **功能对齐 opencode 核心闭环的 80%（工具/权限/会话/UI），质量与性能在其硬伤上全面超越：上下文永不丢失、推理能力直传、prompt cache 不破坏、跨会话永久记忆。**
