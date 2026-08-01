@@ -28,6 +28,7 @@ pub struct ToolItem {
 pub enum UiMsg {
     User(String),
     Assistant(String),
+    Thinking(String),
     ToolCall(ToolItem),
     Info(String),
     Error(String),
@@ -332,7 +333,14 @@ impl AppState {
         match params.update {
             Update::AgentMessageChunk { content } => {
                 let text = content.text;
-                if let Some(UiMsg::Assistant(buf)) = self.messages.last_mut() {
+                let is_thinking = content.kind == "thinking";
+                if is_thinking {
+                    if let Some(UiMsg::Thinking(buf)) = self.messages.last_mut() {
+                        buf.push_str(&text);
+                    } else {
+                        self.messages.push(UiMsg::Thinking(text));
+                    }
+                } else if let Some(UiMsg::Assistant(buf)) = self.messages.last_mut() {
                     buf.push_str(&text);
                 } else {
                     self.messages.push(UiMsg::Assistant(text));
@@ -461,6 +469,36 @@ impl AppState {
                             "└",
                             Style::default().fg(Color::Blue),
                         )),
+                    });
+                    out.push(LineInfo {
+                        msg: Some(i),
+                        is_tool_title: false,
+                        line: Line::default(),
+                    });
+                }
+                UiMsg::Thinking(text) => {
+                    let title_style = Style::default()
+                        .fg(Color::DarkGray)
+                        .add_modifier(Modifier::ITALIC);
+                    let body_style = Style::default()
+                        .fg(Color::DarkGray)
+                        .add_modifier(Modifier::ITALIC);
+                    out.push(LineInfo {
+                        msg: Some(i),
+                        is_tool_title: false,
+                        line: Line::from(Span::styled("┌ Thinking", title_style)),
+                    });
+                    for l in text.lines() {
+                        out.push(LineInfo {
+                            msg: Some(i),
+                            is_tool_title: false,
+                            line: Line::from(Span::styled(format!("│ {l}"), body_style)),
+                        });
+                    }
+                    out.push(LineInfo {
+                        msg: Some(i),
+                        is_tool_title: false,
+                        line: Line::from(Span::styled("└", title_style)),
                     });
                     out.push(LineInfo {
                         msg: Some(i),
@@ -1045,6 +1083,34 @@ mod tests {
             UiMsg::Assistant(t) => assert_eq!(t, "Hello world"),
             other => panic!("expected assistant, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn thinking_chunk_accumulates_separately() {
+        let mut s = state();
+        s.on_event(update(json!({
+            "sessionId": "s1",
+            "update": { "sessionUpdate": "agent_message_chunk", "content": { "type": "thinking", "text": "hmm" } }
+        })));
+        s.on_event(update(json!({
+            "sessionId": "s1",
+            "update": { "sessionUpdate": "agent_message_chunk", "content": { "type": "thinking", "text": "..." } }
+        })));
+        s.on_event(update(json!({
+            "sessionId": "s1",
+            "update": { "sessionUpdate": "agent_message_chunk", "content": { "type": "text", "text": "answer" } }
+        })));
+        assert_eq!(s.messages.len(), 2);
+        match &s.messages[0] {
+            UiMsg::Thinking(t) => assert_eq!(t, "hmm..."),
+            other => panic!("expected thinking, got {other:?}"),
+        }
+        match &s.messages[1] {
+            UiMsg::Assistant(t) => assert_eq!(t, "answer"),
+            other => panic!("expected assistant, got {other:?}"),
+        }
+        let rendered = s.layout_lines();
+        assert!(rendered.iter().any(|l| l.line.to_string().contains("Thinking")));
     }
 
     #[test]

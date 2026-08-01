@@ -149,6 +149,11 @@ local function stream_openai_turn(session_id, body_json)
         local delta = choice.delta or {}
         if delta.reasoning_content and delta.reasoning_content ~= "" then
             reasoning_parts[#reasoning_parts + 1] = delta.reasoning_content
+            acp("session/update", {
+                sessionId = session_id,
+                update = { sessionUpdate = "agent_message_chunk",
+                           content = { type = "thinking", text = delta.reasoning_content } }
+            })
         end
         if delta.content and delta.content ~= "" then
             full_text[#full_text + 1] = delta.content
@@ -432,6 +437,12 @@ function acp_chat(session_id, project_ns, user_query)
             acp("session/update", {
                 sessionId = session_id,
                 update = { sessionUpdate = "agent_message_chunk", content = { type = "text", text = content } }
+            })
+        end
+        if not streamed and reasoning and reasoning ~= "" then
+            acp("session/update", {
+                sessionId = session_id,
+                update = { sessionUpdate = "agent_message_chunk", content = { type = "thinking", text = reasoning } }
             })
         end
 
