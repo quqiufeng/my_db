@@ -429,6 +429,33 @@ static int l_acp_send(lua_State* L) {
     return 0;
 }
 
+// ACP request: write a JSON-RPC request to stdout (engine-initiated), then
+// block reading the matching response line from stdin. Returns the raw
+// response line to Lua (or nil on EOF). Engine requests use a separate id
+// range (>= 10000) so they never collide with client-initiated request ids.
+static int l_acp_request(lua_State* L) {
+    const char* method = luaL_checkstring(L, 1);
+    const char* params_json = luaL_checkstring(L, 2);
+    static int engine_req_id = 10000;
+    int id = ++engine_req_id;
+    fprintf(stdout, "{\"jsonrpc\":\"2.0\",\"id\":%d,\"method\":\"%s\",\"params\":%s}\n",
+            id, method, params_json);
+    fflush(stdout);
+    char id_str[32];
+    snprintf(id_str, sizeof(id_str), "\"id\":%d", id);
+    char line[65536];
+    while (fgets(line, sizeof(line), stdin)) {
+        if (strstr(line, id_str)) {
+            size_t n = strlen(line);
+            while (n > 0 && (line[n-1] == '\n' || line[n-1] == '\r')) { line[--n] = '\0'; }
+            lua_pushlstring(L, line, n);
+            return 1;
+        }
+    }
+    lua_pushnil(L);
+    return 1;
+}
+
 static const luaL_Reg opencode_lib[] = {
     {"cache_get",          l_cache_get},
     {"cache_set",          l_cache_set},
@@ -452,6 +479,7 @@ static const luaL_Reg opencode_lib[] = {
     {"http_free",           l_http_free},
     {"get_lua_state",       l_get_lua_state},
     {"acp_send",            l_acp_send},
+    {"acp_request",         l_acp_request},
     {NULL, NULL}
 };
 

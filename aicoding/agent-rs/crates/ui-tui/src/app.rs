@@ -31,6 +31,12 @@ pub enum UiMsg {
     Error(String),
 }
 
+pub struct PendingPermission {
+    pub request_id: u64,
+    pub action: String,
+    pub resource: String,
+}
+
 pub struct App {
     pub client: Arc<Client>,
     pub session_id: String,
@@ -45,6 +51,7 @@ pub struct App {
     pub should_quit: bool,
     pub status: String,
     pub focus: Option<usize>,
+    pub pending_permission: Option<PendingPermission>,
 }
 
 type PromptFut = Pin<Box<dyn Future<Output = Result<agent_acp::SessionPromptResult, AcpError>>>>;
@@ -90,6 +97,7 @@ impl App {
             should_quit: false,
             status: String::new(),
             focus: None,
+            pending_permission: None,
         }
     }
 
@@ -150,6 +158,32 @@ impl App {
     }
 
     pub fn on_event(&mut self, ev: agent_acp::types::Event) {
+        if let Some(req_id) = ev.engine_request_id {
+            if ev.method == "permission/request" {
+                let (action, resource) = ev
+                    .params
+                    .as_ref()
+                    .map(|p| {
+                        (
+                            p.get("action")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("?")
+                                .to_string(),
+                            p.get("resource")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("?")
+                                .to_string(),
+                        )
+                    })
+                    .unwrap_or(("?".into(), "?".into()));
+                self.pending_permission = Some(PendingPermission {
+                    request_id: req_id,
+                    action,
+                    resource,
+                });
+            }
+            return;
+        }
         if ev.method != "session/update" {
             return;
         }
@@ -488,7 +522,22 @@ pub async fn run(
             input = input_rx.recv() => {
                 match input {
                     Some(UiEvent::Key(k)) => {
-                        if event::is_quit(&k) && app.input.is_empty() {
+                        if app.pending_permission.is_some() {
+                            if let Some(choice) = event::permission_choice(&k) {
+                                let req = app
+                                    .pending_permission
+                                    .take()
+                                    .expect("guarded by is_some");
+                                if let Some(result) = choice {
+                                    let arc = app.client.clone();
+                                    tokio::spawn(async move {
+                                        if let Err(e) = arc.respond(req.request_id, result).await {
+                                            eprintln!("[tui] permission respond failed: {e}");
+                                        }
+                                    });
+                                }
+                            }
+                        } else if event::is_quit(&k) && app.input.is_empty() {
                             app.should_quit = true;
                         } else if event::is_interrupt(&k) {
                             if app.busy {

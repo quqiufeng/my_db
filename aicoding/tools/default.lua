@@ -250,10 +250,28 @@ local function permit(action, resource)
         end
     end
     if effect == "ask" then
-        -- ACP mode: no tty prompt available; auto-allow so tools keep working
-        -- (interactive permission UI on the client side is a later milestone).
+        -- ACP mode: ask the client via a JSON-RPC request; the client shows
+        -- an interactive allow/deny/always prompt and responds.
         if os.getenv("OPENCODE_ACP") == "1" then
-            return true, nil
+            local resp_line = opencode.acp_request("permission/request",
+                cjson.encode({ action = action, resource = resource }))
+            if resp_line then
+                local ok, decoded = pcall(cjson.decode, resp_line)
+                if ok and decoded and decoded.result then
+                    local r = decoded.result
+                    if r.always then
+                        table.insert(permissions.rules, { action = action, resource = "*", effect = "allow" })
+                        return true, nil
+                    elseif r.allow then
+                        return true, nil
+                    else
+                        log.warn("permission denied by user: %s %s", action, resource)
+                        return false, "denied by user"
+                    end
+                end
+            end
+            log.warn("permission request failed, denying: %s %s", action, resource)
+            return false, "permission request failed"
         end
         if os.getenv("OPENCODE_NON_INTERACTIVE") == "1" then
             log.warn("permission denied (non-interactive): %s %s", action, resource)

@@ -163,6 +163,10 @@ pub struct Event {
     pub jsonrpc: String,
     pub method: String,
     pub params: Option<Value>,
+    /// Set when this line is an engine-initiated JSON-RPC *request*
+    /// (carries an id and expects a response from the client).
+    #[serde(default, skip)]
+    pub engine_request_id: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

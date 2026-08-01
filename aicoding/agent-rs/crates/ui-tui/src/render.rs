@@ -19,6 +19,46 @@ pub fn draw(frame: &mut Frame, app: &App) {
     draw_messages(frame, app, chunks[0]);
     draw_input(frame, app, chunks[1]);
     draw_status(frame, app, chunks[2]);
+    if let Some(p) = &app.pending_permission {
+        draw_permission(frame, app, p);
+    }
+}
+
+fn draw_permission(frame: &mut Frame, app: &App, p: &crate::app::PendingPermission) {
+    let width = 64.min(frame.area().width.saturating_sub(4));
+    let lines = vec![
+        Line::from(vec![
+            Span::styled(" Permission request ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        ]),
+        Line::from(Span::styled(
+            format!("{} '{}'", p.action, p.resource),
+            Style::default().fg(Color::White),
+        )),
+        Line::from(Span::raw("")),
+        Line::from(Span::styled(
+            "[y] allow   [n] deny   [a] always   [esc] cancel",
+            Style::default().fg(Color::Cyan),
+        )),
+    ];
+    let text = ratatui::text::Text::from(lines);
+    let inner = Paragraph::new(text)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Yellow))
+                .border_type(BorderType::Rounded),
+        )
+        .wrap(ratatui::widgets::Wrap { trim: false });
+    let h = 8.min(frame.area().height.saturating_sub(2));
+    let area = ratatui::layout::Rect {
+        x: (frame.area().width.saturating_sub(width)) / 2,
+        y: (frame.area().height.saturating_sub(h)) / 2,
+        width,
+        height: h,
+    };
+    frame.render_widget(ratatui::widgets::Clear, area);
+    frame.render_widget(inner, area);
+    let _ = app;
 }
 
 fn draw_messages(frame: &mut Frame, app: &App, area: Rect) {

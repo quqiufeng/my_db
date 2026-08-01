@@ -53,6 +53,7 @@ enum Outbound {
         payload: String,
         reply: oneshot::Sender<Result<Value, AcpError>>,
     },
+    Raw(String),
 }
 
 impl Client {
@@ -105,6 +106,14 @@ impl Client {
                             }
                         }
                     }
+                    Outbound::Raw(payload) => match writer_stdin.write_all(payload.as_bytes()).await {
+                        Ok(_) => {
+                            let _ = writer_stdin.flush().await;
+                        }
+                        Err(e) => {
+                            eprintln!("[acp] respond write failed: {e}");
+                        }
+                    },
                 }
             }
         });
@@ -128,7 +137,19 @@ impl Client {
                     Ok(v) => v,
                     Err(_) => continue,
                 };
-                if v.get("id").is_some_and(|i| i.is_number()) {
+                let has_id = v.get("id").is_some_and(|i| i.is_number());
+                let is_response = has_id && (v.get("result").is_some() || v.get("error").is_some());
+                if has_id && !is_response {
+                    // Engine-initiated request (e.g. permission/request):
+                    // broadcast it; the caller answers via Client::respond.
+                    let ev = Event {
+                        jsonrpc: "2.0".into(),
+                        method: v["method"].as_str().unwrap_or("").to_string(),
+                        params: v.get("params").cloned(),
+                        engine_request_id: v["id"].as_u64(),
+                    };
+                    let _ = reader_events.send(ev);
+                } else if is_response {
                     let id = v["id"].as_u64().unwrap_or(0);
                     if let Some(reply) = reader_pending.lock().await.remove(&id) {
                         let result = if let Some(err) = v.get("error") {
@@ -255,6 +276,15 @@ impl Client {
     pub async fn session_cancel(&self, session_id: &str) -> Result<(), AcpError> {
         self.notify("session/cancel", json!({ "sessionId": session_id }))
             .await
+    }
+
+    /// Answer an engine-initiated request (see Event::engine_request_id).
+    pub async fn respond(&self, id: u64, result: Value) -> Result<(), AcpError> {
+        let payload = json!({ "jsonrpc": "2.0", "id": id, "result": result }).to_string() + "\n";
+        self.tx
+            .send(Outbound::Raw(payload))
+            .await
+            .map_err(|_| AcpError::EngineExited("engine channel closed".into()))
     }
 
     pub fn engine_name(&self) -> &str {

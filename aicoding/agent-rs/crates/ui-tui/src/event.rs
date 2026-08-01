@@ -51,3 +51,22 @@ pub fn is_quit(k: &KeyEvent) -> bool {
 pub fn is_interrupt(k: &KeyEvent) -> bool {
     k.code == KeyCode::Esc
 }
+
+/// Interpret a key for the permission dialog.
+/// Returns None if the key is not a permission key;
+/// Some(None) means "dismiss without answering" (Esc);
+/// Some(Some(result)) answers the request.
+pub fn permission_choice(k: &KeyEvent) -> Option<Option<serde_json::Value>> {
+    use serde_json::json;
+    let c = match k.code {
+        KeyCode::Char(c) if k.modifiers.is_empty() || k.modifiers.contains(KeyModifiers::SHIFT) => c,
+        KeyCode::Esc => return Some(None),
+        _ => return None,
+    };
+    match c.to_ascii_lowercase() {
+        'y' => Some(Some(json!({ "allow": true }))),
+        'n' => Some(Some(json!({ "allow": false }))),
+        'a' => Some(Some(json!({ "always": true }))),
+        _ => None,
+    }
+}
