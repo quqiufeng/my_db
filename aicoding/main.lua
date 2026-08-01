@@ -25,9 +25,11 @@ local memory = require("memory")
 tools.register_tools("/agent/default")
 
 -- Session persistence: conversation history lives in the KV Cache under
--- /agent/{session_id}/messages so `--continue` can resume across processes.
+-- Conversation history is stored per project directory (memory is
+-- directory-scoped), so reopening the same directory resumes the
+-- conversation automatically.
 local function session_messages_key(session_id)
-    return string.format("/agent/%s/messages", session_id or "default")
+    return string.format("/project/%s/messages", session_id or "default")
 end
 
 function persist_session(session_id)
@@ -540,7 +542,7 @@ function acp_dispatch(request_json)
         local seen = {}
         for _, r in ipairs(entries) do
             local key = r.key or ""
-            local suffix = key:match("^/agent/([^/]+)/messages$")
+            local suffix = key:match("^/project/([^/]+)/messages$")
             if suffix and not seen[suffix] then
                 seen[suffix] = true
                 local raw = memory.read(key)
@@ -569,13 +571,13 @@ function acp_dispatch(request_json)
         return respond({ sessions = out })
 
     elseif method == "session/new" then
-        local new_sid = params.sessionId or ""
-        if new_sid == "" then
-            new_sid = "sess_" .. tostring(math.floor(os.time() * 1000)) .. "_" .. tostring(math.random(0, 99999))
-        end
+        -- Directory-scoped sessions: the session id is derived from the
+        -- project directory, so every connection to the same directory
+        -- shares one continuous conversation (no random session ids).
         local cwd = params.cwd or project_root
+        local new_sid = memory.encode_project(cwd) or "default"
         -- Resuming an existing session: restore its message history so the
-        -- conversation continues in place (used by agent-tui --continue).
+        -- conversation continues in place.
         if restore_session(new_sid) then
             log.info("resumed session %s (%d messages)", new_sid, #(_G.session_messages[new_sid] or {}))
         end
@@ -588,9 +590,11 @@ function acp_dispatch(request_json)
         return respond({ sessionId = new_sid, configOptions = cjson.null, modes = cjson.null })
 
     elseif method == "session/prompt" then
-        local prompt_sid = params.sessionId or ""
-        -- Support per-request cwd (ACP protocol allows overriding)
+        -- Directory-scoped: session id always derives from the directory, so
+        -- the conversation history is continuous regardless of the client.
         local req_cwd = params.cwd or ""
+        local sess_cwd = req_cwd ~= "" and req_cwd or project_root
+        local prompt_sid = memory.encode_project(sess_cwd) or "default"
         local user_text = ""
         if type(params.prompt) == "table" and #params.prompt > 0 then
             local first = params.prompt[1]
@@ -598,10 +602,11 @@ function acp_dispatch(request_json)
         end
         if acp_sessions[prompt_sid] then
             acp_sessions[prompt_sid].updated_at = os.time()
-            if req_cwd ~= "" then acp_sessions[prompt_sid].cwd = req_cwd end
+            acp_sessions[prompt_sid].cwd = sess_cwd
+        else
+            acp_sessions[prompt_sid] = { cwd = sess_cwd, created_at = os.time(), updated_at = os.time(), mode = "build" }
         end
-        local sess_project = (acp_sessions[prompt_sid] and acp_sessions[prompt_sid].cwd) or project_root
-        local ok, err = pcall(acp_chat, prompt_sid, sess_project, user_text)
+        local ok, err = pcall(acp_chat, prompt_sid, sess_cwd, user_text)
         if not ok then log.warn("acp_chat error: " .. tostring(err)) end
         return respond({ stopReason = "end_turn" })
 

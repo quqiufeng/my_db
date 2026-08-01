@@ -692,8 +692,6 @@ impl AppState {
 pub async fn run(
     cfg: ClientConfig,
     project: String,
-    continue_mode: bool,
-    resume_session: Option<String>,
     attach_addr: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (client, mut events_rx, _engine_task) = match &attach_addr {
@@ -702,34 +700,10 @@ pub async fn run(
     };
     let info = client.initialize().await?;
 
-    let resume = if let Some(sid) = resume_session {
-        Some(sid)
-    } else if continue_mode {
-        match client.session_list().await {
-            Ok(list) => {
-                let project_sessions: Vec<_> = list
-                    .sessions
-                    .iter()
-                    .filter(|s| s.cwd == project)
-                    .collect();
-                project_sessions
-                    .first()
-                    .map(|s| s.session_id.clone())
-                    .or_else(|| list.sessions.first().map(|s| s.session_id.clone()))
-            }
-            Err(e) => {
-                eprintln!("[agent-tui] session_list failed: {e}");
-                None
-            }
-        }
-    } else {
-        None
-    };
-
-    let sess = match &resume {
-        Some(sid) => client.session_new_with_id(&project, sid).await?,
-        None => client.session_new(&project).await?,
-    };
+    // Sessions are directory-scoped: the engine derives the session id from
+    // the project directory, so reopening the same directory automatically
+    // resumes the conversation. No explicit session id needed.
+    let sess = client.session_new(&project).await?;
     let model = client.model_name().to_string();
     let client = Arc::new(client);
 
@@ -739,9 +713,6 @@ pub async fn run(
          enter send · shift+enter newline · esc interrupt (x2) · /help",
         info.agent_info.title, info.agent_info.version, info.protocol_version, model
     );
-    if let Some(sid) = &resume {
-        notice.push_str(&format!("\nresumed session {sid}"));
-    }
     app.push(UiMsg::Info(notice));
 
     ratatui::init();

@@ -156,7 +156,7 @@ function M.build_system_prompt(session_id, project_ns, project_root)
     -- Current task
     local task_json = opencode.cache_get(proj_prefix .. "task/current")
     local task = task_json and parse_json(task_json)
-    if task and task.c then
+    if type(task) == "table" and task.c then
         push("\n## Current Task\n%s", task.c)
     end
 
@@ -164,15 +164,23 @@ function M.build_system_prompt(session_id, project_ns, project_root)
     local facts = opencode.cache_search_prefix(proj_prefix .. "facts/", M.MAX_FACTS)
     if facts and #facts > 0 then
         table.sort(facts, function(a, b)
-            local ia = (a.value and parse_json(a.value).i) or 0
-            local ib = (b.value and parse_json(b.value).i) or 0
+            local va = a.value and parse_json(a.value)
+            local vb = b.value and parse_json(b.value)
+            local ia = (type(va) == "table" and va.i) or 0
+            local ib = (type(vb) == "table" and vb.i) or 0
             return ia > ib
         end)
         push("\n## Key Facts")
         for i = 1, math.min(#facts, M.MAX_FACTS) do
             local f = parse_json(facts[i].value)
-            if f and f.c then
+            -- Facts may be structured ({c, i, tags}) from auto-summary or a
+            -- bare scalar written via kv_set. Guard against non-tables.
+            if type(f) == "table" and f.c then
                 push("- %s", f.c)
+            elseif type(f) == "string" and f ~= "" then
+                push("- %s", f)
+            elseif type(f) == "number" or type(f) == "boolean" then
+                push("- %s", tostring(f))
             end
         end
     end
@@ -183,8 +191,10 @@ function M.build_system_prompt(session_id, project_ns, project_root)
         push("\n## Recent Conversation Summary")
         for i = math.max(1, #summaries - M.MAX_SUMMARIES + 1), #summaries do
             local sm = parse_json(summaries[i].value)
-            if sm and sm.c then
+            if type(sm) == "table" and sm.c then
                 push("- %s", sm.c)
+            elseif type(sm) == "string" and sm ~= "" then
+                push("- %s", sm)
             end
         end
     end
