@@ -22,8 +22,9 @@ libaicoding_agent.a: $(OBJS)
 aicoding: cli.c libaicoding_agent.a
 	$(CC) $(CFLAGS) $< -o $@ -L. -laicoding_agent $(LDFLAGS) $(shell pkg-config --libs libcurl) -Wl,--export-dynamic
 
-test: test/test_session libaicoding_agent.a
+test: all test/test_session
 	LD_LIBRARY_PATH=/opt/my_db:/usr/local/luajit/lib:./ ./test/test_session
+	LD_LIBRARY_PATH=/opt/my_db:/usr/local/luajit/lib:./ ./aicoding --test
 
 regression: all
 	./tests/run_regression.sh .

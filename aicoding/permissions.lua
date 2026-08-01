@@ -20,6 +20,9 @@ local M = {}
 M.rules = {}
 
 local function expand_home(path)
+    if path == "~" then
+        return os.getenv("HOME") or os.getenv("USERPROFILE") or "~"
+    end
     if path:sub(1, 2) == "~/" then
         local home = os.getenv("HOME") or os.getenv("USERPROFILE") or "."
         return home .. path:sub(2)
@@ -162,25 +165,30 @@ function M.load(project_root)
         table.insert(M.rules, r)
     end
 
-    -- Defaults if no rules configured
-    if #M.rules == 0 then
+    -- Defaults when no user/project rules are configured. The built-in deny
+    -- rules above must not count: they always exist, so the presence of a
+    -- default catch-all is decided by user configuration alone.
+    if #M.rules <= #builtins then
         local non_interactive = os.getenv("OPENCODE_NON_INTERACTIVE") == "1"
         local allow_all = os.getenv("OPENCODE_ALLOW_ALL") == "1"
         local default = allow_all and "allow" or (non_interactive and "deny" or "ask")
-        M.rules = {
-            { action = "edit", resource = "*", effect = default },
-            { action = "write", resource = "*", effect = default },
-            { action = "delete", resource = "*", effect = default },
-            { action = "bash", resource = "*", effect = default },
-            { action = "git", resource = "*", effect = default },
-            { action = "file_create", resource = "*", effect = default },
-            { action = "file_delete", resource = "*", effect = default },
-            { action = "apply_edit", resource = "*", effect = default },
+        local catchall = {
             { action = "read", resource = "*", effect = "allow" },
-            { action = "*", resource = "*", effect = allow_all and "allow" or "ask" }
+            { action = "*", resource = "*", effect = default }
         }
+        for _, r in ipairs(catchall) do
+            table.insert(M.rules, r)
+        end
         return
     end
+
+    -- User rules are present: still append a sensible catch-all so the
+    -- default behavior is explicit instead of falling through to "ask".
+    local non_interactive = os.getenv("OPENCODE_NON_INTERACTIVE") == "1"
+    local allow_all = os.getenv("OPENCODE_ALLOW_ALL") == "1"
+    local default = allow_all and "allow" or (non_interactive and "deny" or "ask")
+    table.insert(M.rules, { action = "read", resource = "*", effect = "allow" })
+    table.insert(M.rules, { action = "*", resource = "*", effect = default })
 
     -- If OPENCODE_ALLOW_ALL is set but user/project rules are present, prepend
     -- a permissive catch-all so the built-in deny rules do not block tests.
@@ -210,6 +218,10 @@ function M.check(action, resource)
     for _, rule in ipairs(M.rules) do
         local rule_action = rule.action or "*"
         local rule_resource = rule.resource or "*"
+        -- Expand ~ in rule resources so user configs work regardless of shape.
+        if rule_resource:sub(1, 2) == "~/" then
+            rule_resource = expand_home(rule_resource)
+        end
         if (rule_action == "*" or match_wildcard(rule_action, action)) and
            match_wildcard(rule_resource, resource) then
             return rule.effect or "ask"

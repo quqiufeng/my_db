@@ -451,7 +451,7 @@ M.tools = {
             key = { type = "string", required = true }
         },
         handler = function(args)
-            local val = memory.read(args.key)
+            local val = memory.read(memory.key(args.key, args.namespace))
             return { ok = val ~= nil, value = val }
         end
     },

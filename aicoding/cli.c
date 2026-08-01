@@ -4,6 +4,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#include <dirent.h>
 #include <pwd.h>
 #include <time.h>
 #include "cache.h"
@@ -26,6 +27,66 @@ static const char* get_home_dir(void) {
     struct passwd* pw = getpwuid(getuid());
     if (pw) return pw->pw_dir;
     return ".";
+}
+
+/* Run Lua unit tests from tests/unit/test_*.lua via the testkit module.
+ * Returns number of failures (exit code). */
+static int run_lua_tests(lua_engine_t* L, const char* dir, const char* filter) {
+    DIR* d = opendir(dir);
+    if (!d) {
+        fprintf(stderr, "[test] cannot open test dir %s\n", dir);
+        return 2;
+    }
+    char names[256][2048];
+    int n = 0;
+    struct dirent* ent;
+    while ((ent = readdir(d)) && n < 256) {
+        if (strncmp(ent->d_name, "test_", 5) != 0) continue;
+        const char* dot = strrchr(ent->d_name, '.');
+        if (!dot || strcmp(dot, ".lua") != 0) continue;
+        if (filter && filter[0] && strstr(ent->d_name, filter) == NULL) continue;
+        snprintf(names[n++], sizeof(names[0]), "%s/%s", dir, ent->d_name);
+    }
+    closedir(d);
+
+    /* sort names */
+    for (int i = 0; i < n - 1; i++) {
+        for (int j = i + 1; j < n; j++) {
+            if (strcmp(names[j], names[i]) < 0) {
+                char tmp[2048];
+                strcpy(tmp, names[i]);
+                strcpy(names[i], names[j]);
+                strcpy(names[j], tmp);
+            }
+        }
+    }
+
+    int total_passed = 0, total_failed = 0;
+    for (int i = 0; i < n; i++) {
+        const char* base = strrchr(names[i], '/');
+        base = base ? base + 1 : names[i];
+        fprintf(stderr, "[test] %s ... ", base);
+        if (lua_engine_dofile(L, names[i]) != 0) {
+            fprintf(stderr, "LOAD ERROR: %s\n", lua_tostring(lua_engine_state(L), -1));
+            lua_pop(lua_engine_state(L), 1);
+            total_failed++;
+            continue;
+        }
+        lua_engine_dostring(L, "return _testkit.result()");
+        lua_State* ls = lua_engine_state(L);
+        /* result() returns (passed, failed, failures): pushed in that order,
+         * so -3 is passed, -2 is failed, -1 is the failures table. */
+        int passed = (int)lua_tonumber(ls, -3);
+        int failed = (int)lua_tonumber(ls, -2);
+        lua_pop(ls, 3);
+        total_passed += passed;
+        total_failed += failed;
+        fprintf(stderr, "%d passed, %d failed\n", passed, failed);
+        lua_engine_dostring(L, "_testkit.reset()");
+    }
+    fprintf(stderr, "[test] TOTAL: %d passed, %d failed across %d files\n",
+            total_passed, total_failed, n);
+    return total_failed > 0 ? 1 : 0;
 }
 
 // Model selection moved to Lua: select_model(name_or_nil) in main.lua
@@ -111,6 +172,9 @@ int main(int argc, char** argv) {
     int test_compress = 0;
 
     int acp_mode = 0;
+    const char* test_filter = NULL;
+    int test_mode = 0;
+    int test_exit_code = 0;
     cache_t* cache = NULL;
     session_t* s = NULL;
 
@@ -120,6 +184,10 @@ int main(int argc, char** argv) {
             /* serve: standalone TCP bridge; delegates to serve_main(). */
             extern int serve_main(int argc, char** argv);
             return serve_main(argc, argv);
+        }
+        else if (strcmp(argv[i], "--test") == 0) {
+            test_mode = 1;
+            if (i + 1 < argc && argv[i + 1][0] != '-') test_filter = argv[++i];
         }
         else if (strcmp(argv[i], "--session") == 0 && i + 1 < argc) session_id = argv[++i];
         else if (strcmp(argv[i], "--project") == 0 && i + 1 < argc) project_ns = argv[++i];
@@ -174,6 +242,12 @@ int main(int argc, char** argv) {
         snprintf(default_cache_dir, sizeof(default_cache_dir), "%s/.opencode", root);
         ensure_dir(default_cache_dir);
         cache_dir = default_cache_dir;
+        if (test_mode) {
+            /* unit tests must not touch the project cache */
+            snprintf(default_cache_dir, sizeof(default_cache_dir), "/tmp/aicoding_test_cache");
+            ensure_dir(default_cache_dir);
+            cache_dir = default_cache_dir;
+        }
     }
 
     cache = cache_open(cache_dir, 100 * 1024 * 1024);
@@ -199,6 +273,23 @@ int main(int argc, char** argv) {
 
     if (lua_engine_dofile(L, "/opt/my_db/aicoding/main.lua") != 0) {
         fprintf(stderr, "failed to load main.lua\n");
+        goto cleanup;
+    }
+
+    /* Unit test mode: run tests/unit/test_*.lua and exit. */
+    if (test_mode) {
+        /* Isolate tests from the user's real config (permissions read
+         * ~/.config/opencode/config.json via $HOME). */
+        setenv("HOME", "/tmp/aicoding_test_home", 1);
+        /* Like ACP mode: select_model() picks the first model without an
+         * interactive picker, while permissions keep their default "ask"
+         * semantics (NON_INTERACTIVE would flip the catch-all to deny). */
+        setenv("OPENCODE_ACP", "1", 1);
+        char test_path[2048];
+        snprintf(test_path, sizeof(test_path),
+            "package.path = '/opt/my_db/aicoding/tests/unit/?.lua;' .. package.path");
+        lua_engine_dostring(L, test_path);
+        test_exit_code = run_lua_tests(L, "/opt/my_db/aicoding/tests/unit", test_filter);
         goto cleanup;
     }
 
@@ -360,5 +451,5 @@ cleanup:
     lua_engine_free(L);  /* frees llm client internally */
     if (s) session_free(s);
     if (cache) cache_close(cache);
-    return 0;
+    return test_exit_code;
 }
