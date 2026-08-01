@@ -28,9 +28,36 @@ local tools  = require("tools.default")
 local context = require("context")
 local async_http = require("async_http")
 local trace = require("trace")
+local memory = require("memory")
 
 -- Register tools into KV Cache so C kernel/prompt builder can discover them.
 tools.register_tools("/agent/default")
+
+-- Session persistence: conversation history lives in the KV Cache under
+-- /agent/{session_id}/messages so `--continue` can resume across processes.
+local function session_messages_key(session_id)
+    return string.format("/agent/%s/messages", session_id or "default")
+end
+
+function persist_session(session_id)
+    local messages = _G.session_messages and _G.session_messages[session_id]
+    if not messages then return end
+    local ok, enc = pcall(json.encode, messages)
+    if ok and enc then
+        memory.write(session_messages_key(session_id), enc, 0)
+    end
+end
+
+function restore_session(session_id)
+    local raw = memory.read(session_messages_key(session_id))
+    if not raw then return false end
+    local ok, v = pcall(json.decode, raw)
+    if ok and type(v) == "table" then
+        _G.session_messages[session_id] = v
+        return true
+    end
+    return false
+end
 
 function set_project_root(path)
     tools.set_project_root(path)
@@ -298,8 +325,12 @@ function acp_chat(session_id, project_ns, user_query)
 
     local messages = _G.session_messages[session_id]
     if not messages then
-        messages = {}
-        _G.session_messages[session_id] = messages
+        if not restore_session(session_id) then
+            messages = {}
+            _G.session_messages[session_id] = messages
+        else
+            messages = _G.session_messages[session_id]
+        end
     end
     table.insert(messages, { role = "user", content = user_query })
 
@@ -308,6 +339,7 @@ function acp_chat(session_id, project_ns, user_query)
 
     for i = 1, max_iterations do
         local request_messages, archived = context.build_messages(session_id, system, messages)
+        persist_session(session_id)
 
         local request_body = {}
         request_body.model = opencode.get_model and opencode.get_model() or "kimi-latest"
@@ -348,6 +380,7 @@ function acp_chat(session_id, project_ns, user_query)
         end
 
         if not tool_calls or #tool_calls == 0 then
+            persist_session(session_id)
             pcall(generate_summary, session_id, "end_turn")
             return ""
         end
@@ -435,9 +468,51 @@ function acp_dispatch(request_json)
             authMethods = {}
         })
 
+    elseif method == "session/list" then
+        local out = {}
+        local entries = memory.list("/agent")
+        local seen = {}
+        for _, r in ipairs(entries) do
+            local key = r.key or ""
+            local suffix = key:match("^/agent/([^/]+)/messages$")
+            if suffix and not seen[suffix] then
+                seen[suffix] = true
+                local raw = memory.read(key)
+                local title = ""
+                if raw then
+                    local ok, msgs = pcall(json.decode, raw)
+                    if ok and type(msgs) == "table" then
+                        for _, m in ipairs(msgs) do
+                            if m.role == "user" and type(m.content) == "string" and m.content ~= "" then
+                                title = m.content:sub(1, 120)
+                                break
+                            end
+                        end
+                    end
+                end
+                local sess = acp_sessions[suffix]
+                table.insert(out, {
+                    sessionId = suffix,
+                    cwd = (sess and sess.cwd) or "",
+                    title = title,
+                    updatedAt = (sess and sess.updated_at) or 0
+                })
+            end
+        end
+        table.sort(out, function(a, b) return (a.updatedAt or 0) > (b.updatedAt or 0) end)
+        return respond({ sessions = out })
+
     elseif method == "session/new" then
-        local new_sid = "sess_" .. tostring(math.floor(os.time() * 1000)) .. "_" .. tostring(math.random(0, 99999))
+        local new_sid = params.sessionId or ""
+        if new_sid == "" then
+            new_sid = "sess_" .. tostring(math.floor(os.time() * 1000)) .. "_" .. tostring(math.random(0, 99999))
+        end
         local cwd = params.cwd or project_root
+        -- Resuming an existing session: restore its message history so the
+        -- conversation continues in place (used by agent-tui --continue).
+        if restore_session(new_sid) then
+            log.info("resumed session %s (%d messages)", new_sid, #(_G.session_messages[new_sid] or {}))
+        end
         acp_sessions[new_sid] = {
             cwd = cwd,
             created_at = os.time(),

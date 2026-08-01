@@ -12,6 +12,8 @@ use agent_acp::ClientConfig;
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().skip(1).collect();
     let mut project = PathBuf::from(".");
+    let mut continue_mode = false;
+    let mut resume_session: Option<String> = None;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -19,6 +21,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 i += 1;
                 if i < args.len() {
                     project = PathBuf::from(&args[i]);
+                }
+            }
+            "--continue" | "-c" => continue_mode = true,
+            "--session" | "-s" => {
+                i += 1;
+                if i < args.len() {
+                    resume_session = Some(args[i].clone());
                 }
             }
             other => {
@@ -35,5 +44,5 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("[agent-tui] engine: {}", cfg.bin_path);
     eprintln!("[agent-tui] project: {project_str}");
 
-    app::run(cfg, project_str).await
+    app::run(cfg, project_str, continue_mode, resume_session).await
 }

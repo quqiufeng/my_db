@@ -224,8 +224,21 @@ impl Client {
     }
 
     pub async fn session_new(&self, cwd: &str) -> Result<SessionNewResult, AcpError> {
-        self.request("session/new", Some(SessionNewParams { cwd: cwd.into() }))
+        self.request("session/new", Some(SessionNewParams { cwd: cwd.into(), session_id: None }))
             .await
+    }
+
+    /// Open a session, optionally resuming an existing one by id
+    /// (used by --continue / --session).
+    pub async fn session_new_with_id(&self, cwd: &str, session_id: &str) -> Result<SessionNewResult, AcpError> {
+        self.request(
+            "session/new",
+            Some(SessionNewParams {
+                cwd: cwd.into(),
+                session_id: Some(session_id.into()),
+            }),
+        )
+        .await
     }
 
     pub async fn session_prompt(

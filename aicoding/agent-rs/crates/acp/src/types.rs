@@ -84,6 +84,8 @@ pub struct SessionCapabilities {
 #[serde(rename_all = "camelCase")]
 pub struct SessionNewParams {
     pub cwd: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -147,9 +149,14 @@ pub struct SessionListResult {
 pub struct SessionInfo {
     pub session_id: String,
     pub cwd: String,
+    #[serde(default)]
     pub created_at: u64,
+    #[serde(default)]
     pub updated_at: u64,
+    #[serde(default)]
     pub mode: String,
+    #[serde(default)]
+    pub title: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
