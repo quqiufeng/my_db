@@ -129,6 +129,57 @@ local function parse_anthropic_response(resp_json)
     return table.concat(content_parts, ""), table.concat(reasoning_parts, ""), nil, tool_calls
 end
 
+-- Stream an OpenAI-compatible (deepseek) turn. Emits agent_message_chunk
+-- updates as text arrives, so the UI types out the reply. Returns the same
+-- shape as parse_openai_response: content, reasoning, err, tool_calls.
+-- When the model requests tools, the stream is abandoned in favour of a full
+-- non-streaming response so tool_calls arguments parse reliably.
+local function stream_openai_turn(session_id, body_json)
+    local full_text = {}
+    local reasoning_parts = {}
+    local want_tools = false
+    local last_err = nil
+    local function acp(method, params) opencode.acp_send(method, cjson.encode(params)) end
+
+    local ok = opencode.llm_complete_raw_stream(body_json, function(payload)
+        local ok_dec, chunk = pcall(cjson.decode, payload)
+        if not ok_dec or type(chunk) ~= "table" then return 0 end
+        local choice = chunk.choices and chunk.choices[1]
+        if not choice then return 0 end
+        local delta = choice.delta or {}
+        if delta.reasoning_content and delta.reasoning_content ~= "" then
+            reasoning_parts[#reasoning_parts + 1] = delta.reasoning_content
+        end
+        if delta.content and delta.content ~= "" then
+            full_text[#full_text + 1] = delta.content
+            acp("session/update", {
+                sessionId = session_id,
+                update = { sessionUpdate = "agent_message_chunk",
+                           content = { type = "text", text = delta.content } }
+            })
+        end
+        if delta.tool_calls and #delta.tool_calls > 0 then
+            want_tools = true
+        end
+        return 0
+    end)
+
+    if not ok then
+        last_err = "llm stream failed"
+        return nil, nil, last_err, {}, false
+    end
+
+    if want_tools then
+        -- Tool call requested: re-fetch non-streaming for reliable parsing.
+        local response = opencode.llm_complete_raw(body_json)
+        if not response then return nil, nil, "(no response)", {}, false end
+        local c, r, e, tc = parse_openai_response(response)
+        return c, r, e, tc, false
+    end
+
+    return table.concat(full_text, ""), table.concat(reasoning_parts, ""), nil, {}, true
+end
+
 -- Global entry points called from C ------------------------------------------
 
 function build_prompt(session_id, project_ns, user_query)
@@ -361,18 +412,23 @@ function acp_chat(session_id, project_ns, user_query)
         local body_json = cjson.encode(request_body)
         if not body_json then return "(encode error)" end
 
-        local response = opencode.llm_complete_raw(body_json)
-        if not response then return "(no response)" end
-
-        local content, reasoning, err, tool_calls
+        local content, reasoning, err, tool_calls, streamed
         if protocol == "anthropic" then
+            -- Anthropic: non-streaming (streaming format differs).
+            local response = opencode.llm_complete_raw(body_json)
+            if not response then return "(no response)" end
             content, reasoning, err, tool_calls = parse_anthropic_response(response)
+            streamed = false
+            if err then return content or "(parse error)" end
         else
-            content, reasoning, err, tool_calls = parse_openai_response(response)
+            -- OpenAI-compatible (deepseek): stream text chunks to the UI in
+            -- real time. If tool calls are requested, fall back to a full
+            -- non-streaming call so tool_calls parse reliably.
+            content, reasoning, err, tool_calls, streamed = stream_openai_turn(session_id, body_json)
         end
         if err then return content or "(parse error)" end
 
-        if content and content ~= "" then
+        if not streamed and content and content ~= "" then
             acp("session/update", {
                 sessionId = session_id,
                 update = { sessionUpdate = "agent_message_chunk", content = { type = "text", text = content } }

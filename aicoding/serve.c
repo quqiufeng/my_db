@@ -281,6 +281,8 @@ static void pump(int idx, int fd, int is_engine, int emit_lines) {
     if (n <= 0) {
         if (is_engine) {
             /* engine exited: shutdown */
+            if (getenv("SERVE_DEBUG"))
+                fprintf(stderr, "[serve] engine EOF, shutting down\n");
             for (int i = 0; i < MAX_CONNS; i++) {
                 if (conns[i].fd >= 0) close(conns[i].fd);
             }
@@ -396,6 +398,7 @@ int serve_main(int argc, char** argv) {
     atexit(kill_engine);
 
     struct pollfd fds[MAX_CONNS + 2];
+    if (getenv("SERVE_DEBUG")) fprintf(stderr, "[serve] entering poll loop\n");
     for (;;) {
         int nfds = 0;
         fds[nfds].fd = listener; fds[nfds].events = POLLIN; nfds++;

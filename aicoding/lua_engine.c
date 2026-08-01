@@ -410,8 +410,50 @@ static int l_llm_complete_raw(lua_State* L) {
     return 2;
 }
 
-static int l_get_model(lua_State* L) {
+/* Streaming LLM call: llm_complete_raw_stream(body_json, callback).
+ * callback(delta_text) is invoked for each SSE text chunk. Returns
+ * true on success, false + error on failure. */
+static int g_stream_ref = LUA_NOREF;
+
+static int stream_lua_cb(const char* delta, void* userdata) {
+    lua_State* L = (lua_State*)userdata;
+    if (g_stream_ref == LUA_NOREF) return 1;
+    lua_rawgeti(L, LUA_REGISTRYINDEX, g_stream_ref);
+    lua_pushstring(L, delta);
+    if (lua_pcall(L, 1, 0, 0) != 0) {
+        fprintf(stderr, "[lua] stream callback error: %s\n", lua_tostring(L, -1));
+        lua_pop(L, 1);
+    }
+    return 0;
+}
+
+static int l_llm_complete_raw_stream(lua_State* L) {
     llm_client_t* llm = get_llm(L);
+    if (!llm) {
+        lua_pushboolean(L, 0);
+        lua_pushstring(L, "llm not configured");
+        return 2;
+    }
+    const char* body = luaL_checkstring(L, 1);
+    if (!lua_isfunction(L, 2)) {
+        lua_pushboolean(L, 0);
+        lua_pushstring(L, "callback required");
+        return 2;
+    }
+    g_stream_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+    int rc = llm_complete_raw_stream(llm, body, stream_lua_cb, L);
+    luaL_unref(L, LUA_REGISTRYINDEX, g_stream_ref);
+    g_stream_ref = LUA_NOREF;
+    if (rc == 0) {
+        lua_pushboolean(L, 1);
+        return 1;
+    }
+    lua_pushboolean(L, 0);
+    lua_pushstring(L, "llm request failed");
+    return 2;
+}
+
+static int l_get_model(lua_State* L) {    llm_client_t* llm = get_llm(L);
     if (llm && llm_client_model(llm)) {
         lua_pushstring(L, llm_client_model(llm));
     } else {
@@ -473,6 +515,7 @@ static const luaL_Reg opencode_lib[] = {
     {"llm_complete",       l_llm_complete},
     {"llm_complete_messages", l_llm_complete_messages},
     {"llm_complete_raw",   l_llm_complete_raw},
+    {"llm_complete_raw_stream", l_llm_complete_raw_stream},
     {"llm_protocol",       l_llm_protocol},
     {"get_model",          l_get_model},
     {"http_request",        l_http_request},

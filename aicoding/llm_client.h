@@ -64,6 +64,14 @@ int llm_complete_stream(llm_client_t* c,
                         llm_stream_cb_t cb,
                         void* userdata);
 
+/* Streaming variant of llm_complete_raw: takes a full request-body JSON
+ * (already containing messages/tools) and injects "stream":true. Each SSE
+ * text delta is delivered to cb. Returns 0 on success, negative on error. */
+int llm_complete_raw_stream(llm_client_t* c,
+                            const char* request_body_json,
+                            llm_stream_cb_t cb,
+                            void* userdata);
+
 #ifdef __cplusplus
 }
 #endif

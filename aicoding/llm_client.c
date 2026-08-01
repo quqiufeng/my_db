@@ -53,28 +53,12 @@ static int flush_line(struct stream_ctx* ctx, char* line, size_t len) {
     if (len > 6 && memcmp(line, "data: ", 6) == 0) {
         const char* payload = line + 6;
         if (strcmp(payload, "[DONE]") == 0) return 0;
-
-        /* Very minimal JSON extraction: look for "content":"..." */
-        const char* p = strstr(payload, "\"content\":");
-        if (p) {
-            p += strlen("\"content\":");
-            while (*p == ' ' || *p == '\t') p++;
-            if (*p == '\"') {
-                p++;
-                const char* end = p;
-                while (*end && !(*end == '\"' && *(end-1) != '\\')) end++;
-                if (ctx->cb) {
-                    /* unescape simplified: just pass as-is for skeleton */
-                    char* tmp = malloc(end - p + 1);
-                    if (tmp) {
-                        memcpy(tmp, p, end - p);
-                        tmp[end - p] = '\0';
-                        int rc = ctx->cb(tmp, ctx->userdata);
-                        free(tmp);
-                        if (rc != 0) return 1; /* abort */
-                    }
-                }
-            }
+        if (getenv("OPENCODE_DEBUG"))
+            fprintf(stderr, "[STREAM CHUNK] %.500s\n", payload);
+        if (ctx->cb) {
+            /* Deliver the raw chunk payload; the caller parses it. */
+            int rc = ctx->cb(payload, ctx->userdata);
+            if (rc != 0) return 1; /* abort */
         }
     }
     return 0;
@@ -536,6 +520,63 @@ int llm_complete_stream(llm_client_t* c,
 
     if (res != CURLE_OK) {
         fprintf(stderr, "llm_complete_stream curl error: %s\n", curl_easy_strerror(res));
+        return -1;
+    }
+    return 0;
+}
+
+int llm_complete_raw_stream(llm_client_t* c,
+                            const char* request_body_json,
+                            llm_stream_cb_t cb,
+                            void* userdata) {
+    if (!c || !request_body_json) return -1;
+
+    char url[2048];
+    if (c->config.protocol == LLM_PROTOCOL_ANTHROPIC) {
+        snprintf(url, sizeof(url), "%s/v1/messages", c->config.base_url);
+    } else {
+        snprintf(url, sizeof(url), "%s/chat/completions", c->config.base_url);
+    }
+
+    struct curl_slist* headers = NULL;
+    CURL* curl = setup_post(c, url, &headers);
+    if (!curl) return -1;
+
+    /* Inject "stream":true before the final '}' of the request body. */
+    size_t blen = strlen(request_body_json);
+    char* body = malloc(blen + 32);
+    if (!body) {
+        curl_easy_cleanup(curl);
+        curl_slist_free_all(headers);
+        return -1;
+    }
+    if (blen > 0 && request_body_json[blen - 1] == '}') {
+        memcpy(body, request_body_json, blen - 1);
+        strcpy(body + blen - 1, ",\"stream\":true}");
+    } else {
+        strcpy(body, request_body_json);
+    }
+
+    if (getenv("OPENCODE_DEBUG")) {
+        fprintf(stderr, "[LLM RAW STREAM REQ] %s\n", body);
+    }
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body);
+
+    struct stream_ctx ctx = {0};
+    ctx.cb = cb;
+    ctx.userdata = userdata;
+
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, stream_write_cb);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &ctx);
+
+    CURLcode res = curl_easy_perform(curl);
+    curl_easy_cleanup(curl);
+    curl_slist_free_all(headers);
+    free(body);
+    free(ctx.chunk);
+
+    if (res != CURLE_OK) {
+        fprintf(stderr, "llm_complete_raw_stream curl error: %s\n", curl_easy_strerror(res));
         return -1;
     }
     return 0;
