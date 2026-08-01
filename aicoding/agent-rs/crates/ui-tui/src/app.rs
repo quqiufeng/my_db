@@ -351,15 +351,24 @@ impl AppState {
                 title,
                 kind,
                 status,
+                raw_input,
                 ..
             } => {
+                // Show tool invocations expanded by default so the process of
+                // implementing code (arguments + output) is visible without
+                // pressing Enter on each one.
+                let input_text = match raw_input {
+                    Some(Value::String(s)) => s,
+                    Some(other) => other.to_string(),
+                    None => String::new(),
+                };
                 self.messages.push(UiMsg::ToolCall(ToolItem {
                     id: tool_call_id,
                     title,
                     kind,
                     status,
-                    output: String::new(),
-                    expanded: false,
+                    output: input_text,
+                    expanded: true,
                 }));
             }
             Update::ToolCallUpdate {
@@ -1125,10 +1134,10 @@ mod tests {
             "update": {
                 "sessionUpdate": "tool_call",
                 "toolCallId": "t1",
-                "title": "bash",
-                "kind": "bash",
+                "title": "write",
+                "kind": "other",
                 "status": "in_progress",
-                "rawInput": null
+                "rawInput": { "path": "a.txt", "content": "hi" }
             }
         })));
         assert_eq!(s.messages.len(), 1);
@@ -1136,6 +1145,8 @@ mod tests {
             UiMsg::ToolCall(item) => {
                 assert_eq!(item.id, "t1");
                 assert_eq!(item.status, "in_progress");
+                assert!(item.expanded, "tool calls are expanded by default");
+                assert!(item.output.contains("a.txt"), "raw input shown: {}", item.output);
             }
             other => panic!("expected toolcall, got {other:?}"),
         }
@@ -1145,13 +1156,13 @@ mod tests {
                 "sessionUpdate": "tool_call_update",
                 "toolCallId": "t1",
                 "status": "completed",
-                "rawOutput": { "output": "done" }
+                "rawOutput": { "output": "wrote a.txt" }
             }
         })));
         match &s.messages[0] {
             UiMsg::ToolCall(item) => {
                 assert_eq!(item.status, "completed");
-                assert_eq!(item.output, "done");
+                assert_eq!(item.output, "wrote a.txt");
             }
             other => panic!("expected toolcall, got {other:?}"),
         }

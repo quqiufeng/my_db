@@ -289,6 +289,7 @@ static void pump(int idx, int fd, int is_engine, int emit_lines) {
             exit(0);
         }
         conns[idx].alive = 0;
+        close(fd);
         conns[idx].fd = -1;
         return;
     }

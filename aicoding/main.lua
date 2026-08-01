@@ -146,7 +146,7 @@ local function stream_openai_turn(session_id, body_json)
         local choice = chunk.choices and chunk.choices[1]
         if not choice then return 0 end
         local delta = choice.delta or {}
-        if delta.reasoning_content and delta.reasoning_content ~= "" then
+        if type(delta.reasoning_content) == "string" and delta.reasoning_content ~= "" then
             reasoning_parts[#reasoning_parts + 1] = delta.reasoning_content
             acp("session/update", {
                 sessionId = session_id,
@@ -154,7 +154,7 @@ local function stream_openai_turn(session_id, body_json)
                            content = { type = "thinking", text = delta.reasoning_content } }
             })
         end
-        if delta.content and delta.content ~= "" then
+        if type(delta.content) == "string" and delta.content ~= "" then
             full_text[#full_text + 1] = delta.content
             acp("session/update", {
                 sessionId = session_id,
