@@ -1,6 +1,6 @@
-# aicoding — AI Coding Agent for Zed Editor
+# aicoding — AI Coding Agent
 
-一个面向开发者的 AI Coding Agent，**UI 使用 Zed 编辑器**，所有的 AI 能力（无限上下文、代码搜索、Plan/Build Agent、权限系统）基于 C + LuaJIT + my_db KV Cache 实现。
+一个面向开发者的 AI Coding Agent，**UI 使用 Rust 客户端 agent-rs**（终端 REPL，后续演进为 TUI/Web），核心 AI 能力（无限上下文、代码搜索、Plan/Build Agent、权限系统）基于 C + LuaJIT + my_db KV Cache 实现。
 
 > 📚 **相关基础设施文档**：
 > - [`/opt/my_db/coding.md`](../coding.md) — 代码探索记忆系统：语义搜索、调用图、数据流追踪。
@@ -12,9 +12,10 @@
 
 ```
 ┌───────────────────────────────────────────────────────────┐
-│                    Zed Editor                             │
+│  agent-rs (Rust 客户端, agent-rs/)                        │
 │  ┌─────────────────────────────────────────────────────┐  │
-│  │  Agent Panel (聊天界面 / 文件差异 / 工具输出)        │  │
+│  │  crates/cli  终端 REPL (流式文本/工具状态渲染)        │  │
+│  │  crates/acp  ACP 协议客户端 (JSON-RPC over stdio)    │  │
 │  └──────────────────────┬──────────────────────────────┘  │
 │                         │ ACP (stdin/stdout JSON-RPC)     │
 └─────────────────────────┼─────────────────────────────────┘
@@ -63,8 +64,8 @@
 
 | 层 | 技术 | 职责 |
 |----|------|------|
-| **UI** | Zed Agent Panel | 聊天界面、文件差异预览、工具调用可视化、线程管理 |
-| **协议** | ACP (Agent Client Protocol) | JSON-RPC over stdio，Zed ↔ aicoding 通信 |
+| **UI** | agent-rs (Rust) | 终端 REPL（流式文本、工具调用可视化），后续演进为 TUI/Web |
+| **协议** | ACP (Agent Client Protocol) | JSON-RPC over stdio，agent-rs ↔ aicoding 通信 |
 | **AI 引擎** | C + LuaJIT | LLM 调用、工具执行、上下文管理、Agent 逻辑 |
 | **持久化** | my_db (C) | mmap 零拷贝 KV Cache，向量索引，代码搜索 |
 
@@ -73,7 +74,7 @@
 | 传统方案 | 本方案 |
 |----------|--------|
 | Electron + Node.js 运行时 | C + LuaJIT 单二进制 |
-| 自己实现 UI (TUI/GUI) | **直接用 Zed 的 Agent Panel**，零 UI 工作量 |
+| 自建完整前端（编辑器+UI 全栈） | **引擎/UI 分离：C 引擎 + Rust 客户端，通过 ACP 协议解耦** |
 | 上下文靠 messages 数组无限增长 | 有界窗口 + LRU 归档 + KV Cache 按需召回 |
 | 工具硬编码在 TypeScript 里 | Lua 脚本定义，热更新 |
 | 依赖 npm 生态 | 只依赖系统已有的 `libmydb.so` / `cjson.so` |
@@ -84,7 +85,7 @@
 
 | 特性 | 说明 |
 |------|------|
-| **Zed 原生集成** | `--acp` 模式通过 ACP 协议接入 Zed Agent Panel，无需额外 UI |
+| **Rust 客户端** | agent-rs 通过 ACP 协议连接引擎，终端流式渲染，引擎/UI 完全解耦 |
 | **独立二进制** | 编译成单个 `aicoding`，无 Node.js / Bun / Electron 依赖 |
 | **无限上下文** | 滑动窗口 + KV Cache 归档，默认 64K 窗口永不膨胀 |
 | **代码语义搜索** | 基于 Jina embeddings + HNSW，自然语言搜索已索引代码库 |
@@ -151,92 +152,31 @@ EOF
 
 支持的所有提供商见 `.env.example`。
 
-### 3. 接入 Zed
+### 3. 使用 agent-rs（Rust 客户端）
 
-#### 3.1 配置 Zed
+#### 3.1 编译客户端
 
-编辑 `~/.config/zed/settings.json`（Zed 中可用 `cmd-,` / `ctrl-,` 打开设置），添加 `agent_servers`：
-
-```json
-{
-  "agent_servers": {
-    "aicoding": {
-      "command": "/opt/my_db/aicoding/aicoding.sh",
-      "args": ["--acp", "--project", ".", "--model", "deepseek-v4-flash"],
-      "env": {
-        "DEEPSEEK_API_KEY": "sk-your-key-here",
-        "DEEPSEEK_BASE_URL": "https://api.deepseek.com",
-        "LLM_PROTOCOL": "openai",
-        "LLM_TEMPERATURE": "1.0"
-      }
-    }
-  }
-}
+```bash
+cd /opt/my_db/aicoding/agent-rs
+cargo build --release
 ```
 
-所有配置统一在 Zed 的 `settings.json` 中管理，无需额外的 `.env` 文件。`--project .` 表示以当前项目目录为工作目录。`--model` 指定模型，aicoding 会根据模型名自动设置对应的 provider 环境变量。
+#### 3.2 启动
 
-其他提供商配置示例：
-
-<details>
-<summary>Kimi</summary>
-
-```json
-{
-  "args": ["--acp", "--project", ".", "--model", "kimi-latest"],
-  "env": {
-    "OPENAI_API_KEY": "sk-kimi-...",
-    "OPENAI_BASE_URL": "https://api.kimi.com/coding/v1",
-    "LLM_USER_AGENT": "KimiCLI/1.0.0",
-    "LLM_PROTOCOL": "openai"
-  }
-}
+```bash
+AICODING_ENV_FILE=~/.aicoding/deepseek.env AICODING_MODEL=deepseek-v4-flash \
+  ./agent-rs/target/release/agent-cli --project <项目路径>
 ```
-</details>
 
-<details>
-<summary>OpenAI</summary>
+agent-rs 启动引擎进程（`--acp` 模式），握手后进入交互 REPL：
 
-```json
-{
-  "args": ["--acp", "--project", ".", "--model", "gpt-4o"],
-  "env": {
-    "OPENAI_API_KEY": "sk-...",
-    "OPENAI_BASE_URL": "https://api.openai.com/v1",
-    "LLM_PROTOCOL": "openai"
-  }
-}
-```
-</details>
+- 输入消息回车发送，assistant 回复流式渲染
+- 工具调用显示为 `tool[id] name (kind) ...` → `tool[id] -> completed`
+- `Ctrl-C` 取消当前回合（再按一次强制退出），`/quit` 退出
 
-<details>
-<summary>Anthropic Claude</summary>
-
-```json
-{
-  "args": ["--acp", "--project", "."],
-  "env": {
-    "ANTHROPIC_API_KEY": "sk-ant-...",
-    "ANTHROPIC_BASE_URL": "https://api.anthropic.com",
-    "LLM_PROTOCOL": "anthropic"
-  }
-}
-```
-</details>
-
-#### 3.2 使用 aicoding
-
-1. 打开 Zed
-2. 按 `Ctrl+Shift+P`（或 `Cmd+Shift+P`）打开命令面板
-3. 输入 `agent: new thread` 并回车
-4. 在 Agent Panel 顶部的下拉菜单中选择 **aicoding**
-5. 在输入框中输入你的问题，回车发送
-
-aicoding 是**按需启动**的——你第一次发消息时 Zed 会自动启动 aicoding 进程，关闭面板时 Zed 自动终止它。
+`AICODING_ENV_FILE` 指定引擎的 LLM 配置文件（`--env` 参数），`AICODING_MODEL` 指定模型（必须存在于 `models.json`）。
 
 #### 3.3 常用命令
-
-在 Agent Panel 中可以直接输入：
 
 | 输入 | 效果 |
 |------|------|
@@ -245,7 +185,7 @@ aicoding 是**按需启动**的——你第一次发消息时 Zed 会自动启�
 | `/build 修复所有编译警告` | 运行 Build Agent，编译-诊断-修复循环 |
 | `用 kv_search 搜索 memory pool 相关的函数` | 在已索引的代码库中做语义搜索 |
 
-### 4. 快速验证（终端测试）
+### 4. 快速验证（直接测试引擎协议）
 
 ```bash
 echo '{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":1}}' \
@@ -256,7 +196,7 @@ echo '{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":
 
 ### 5. 多模型切换
 
-aicoding 内置 4 个模型（`/opt/my_db/aicoding/models.json`），可在 `~/.aicoding/models.json` 中添加自定义模型：
+aicoding 内置 5 个模型（`/opt/my_db/aicoding/models.json`），可在 `~/.aicoding/models.json` 中添加自定义模型：
 
 ```json
 [
@@ -264,16 +204,10 @@ aicoding 内置 4 个模型（`/opt/my_db/aicoding/models.json`），可在 `~/.
 ]
 ```
 
-启动时通过 `--model` 指定：
+启动时通过 `--model` 指定（agent-rs 用 `AICODING_MODEL` 环境变量传入）：
 
 ```bash
 ./aicoding.sh --acp --project . --model deepseek-v4-flash
-```
-
-或在 Zed 的 settings.json 中追加 args：
-
-```json
-"args": ["--acp", "--project", ".", "--model", "deepseek-v4-flash"]
 ```
 
 ---
@@ -474,12 +408,12 @@ local ok, out = mem.context("schedule", "/code/local/linux", { depth = 2 })
 
 | 维度 | 原生 opencode | aicoding |
 |------|--------------|----------|
-| 运行时 | Bun/Node.js + Electron + TUI | C + LuaJIT 单二进制 |
-| UI | 自建 TUI (SolidJS) | **Zed Agent Panel (零 UI 工作量)** |
+| 运行时 | Bun/Node.js + Electron + TUI | C + LuaJIT 单二进制引擎 + Rust 客户端 |
+| UI | 自建 TUI (SolidJS) | **agent-rs (Rust)：终端 REPL → TUI/Web** |
 | 上下文 | 不断增长，依赖 compaction | **有界窗口 + KV Cache 按需召回** |
 | 持久化 | SQLite | mmap KV Cache |
 | 工具定义 | TypeScript 硬编码 | Lua 脚本，热更新 |
-| 协议 | 内部 | **ACP 标准协议，接入任何 ACP 编辑器** |
+| 协议 | 内部 | **ACP 标准协议，引擎/UI 解耦** |
 | Agent 扩展 | 改主程序 | Lua 插件，热加载 |
 
 ---
@@ -513,6 +447,11 @@ aicoding/
 ├── conventions.lua    # 项目类型自动检测
 ├── trace.lua          # 结构化执行轨迹
 ├── aicoding.sh        # 启动 wrapper (设 LD_LIBRARY_PATH)
+├── models.json        # 内置模型列表
+├── agent-rs/          # Rust 客户端
+│   ├── crates/
+│   │   ├── acp/       # ACP 协议类型 + 进程客户端 (JSON-RPC / 事件流)
+│   │   └── cli/       # 终端 REPL (流式渲染、工具状态、取消)
 └── design.md          # 详细设计文档
 ```
 
@@ -520,18 +459,9 @@ aicoding/
 
 ## 参考文档
 
-### Zed 集成相关
-
-aicoding 通过 **Custom External Agent** 方式接入 Zed，无需开发 Rust/WASM 扩展：
-
-- [Zed External Agents 文档](https://zed.dev/docs/ai/external-agents) — 如何在 Zed 中注册外部 ACP agent
-- [Zed Agent Settings](https://zed.dev/docs/ai/agent-settings) — `agent_servers` 配置详解
-- [Zed Agent Panel](https://zed.dev/docs/ai/agent-panel) — Agent Panel 使用方法
-- [Zed Extensions 开发文档](https://zed.dev/docs/extensions/developing-extensions) — 如需发布为 Zed 扩展，参考此文档
-
 ### ACP 协议 (Agent Client Protocol)
 
-aicoding 的 `--acp` 模式实现了 ACP 协议的服务端，通信基于 **JSON-RPC 2.0 over stdio**：
+aicoding 的 `--acp` 模式实现了 ACP 协议的服务端，通信基于 **JSON-RPC 2.0 over stdio**，agent-rs 是参考该协议实现的客户端：
 
 - [ACP 协议概述](https://agentclientprotocol.com/get-started/introduction) — ACP 是什么、为什么这么设计
 - [ACP 协议规范](https://agentclientprotocol.com/protocol/v1/overview) — 协议详细说明
@@ -550,4 +480,4 @@ aicoding 的 `--acp` 模式实现了 ACP 协议的服务端，通信基于 **JSO
 
 ---
 
-*基于 my_db KV Cache + Zed Agent Panel + ACP 协议构建。*
+*基于 my_db KV Cache + C/LuaJIT 引擎 + agent-rs Rust 客户端 + ACP 协议构建。*

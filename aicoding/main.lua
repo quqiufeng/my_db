@@ -36,7 +36,7 @@ function set_project_root(path)
     tools.set_project_root(path)
 end
 
--- (GUI coroutine scheduler removed — UI handled by Zed Agent Panel via ACP)
+-- (GUI coroutine scheduler removed — UI is provided by agent-rs via ACP)
 
 -- Convert messages table to JSON array string for C API.
 local function messages_to_json(messages)
@@ -285,13 +285,13 @@ function save_facts(session_id, facts_json)
 end
 
 function run_gui(session_id, project_ns)
-    -- GUI mode removed: UI is now handled by Zed's Agent Panel via ACP.
-    -- Use `aicoding --acp` for Zed integration, or REPL mode (no --acp) for CLI.
-    return "GUI mode removed. Use --acp for Zed integration."
+    -- GUI mode removed: UI is provided by agent-rs via ACP (--acp mode).
+    -- Use `aicoding --acp` for agent-rs integration, or REPL mode (no --acp) for CLI.
+    return "GUI mode removed. Use --acp for agent-rs integration."
 end
 
 -- ACP chat loop: streams ACP JSON-RPC notifications, accumulates history, persists memory
--- Called from C when --acp flag is used (Zed integration)
+-- Called from C when --acp flag is used (agent-rs integration)
 function acp_chat(session_id, project_ns, user_query)
     local protocol = opencode.llm_protocol()
     local system = prompt.build_system_prompt(session_id, project_ns, tools.get_project_root())
