@@ -420,7 +420,7 @@ int serve_main(int argc, char** argv) {
         }
         int pos = 2;
         if (fds[0].revents & POLLIN) accept_conn();
-        if (fds[1].revents & POLLIN) pump(-1, engine_out, 1, 1);
+        if (fds[1].revents & (POLLIN | POLLHUP | POLLERR)) pump(-1, engine_out, 1, 1);
         for (int i = 2; i < nfds; i++) {
             if (fds[i].revents & (POLLIN | POLLHUP | POLLERR)) {
                 int idx = find_conn(fds[i].fd);
