@@ -360,7 +360,7 @@ impl ClientConfig {
             bin_path: std::env::var("AICODING_BIN")
                 .unwrap_or_else(|_| "/opt/my_db/aicoding/aicoding".into()),
             project_root: project_root.display().to_string(),
-            model: std::env::var("AICODING_MODEL").unwrap_or_else(|_| "kimi-latest".into()),
+            model: std::env::var("AICODING_MODEL").unwrap_or_else(|_| default_model()),
             session: None,
             env_file: std::env::var("AICODING_ENV_FILE").ok(),
             extra_env: vec![],
@@ -377,4 +377,27 @@ impl ClientConfig {
                 }),
         }
     }
+}
+
+/// Default model: the first entry of models.json, matching the engine's own
+/// select_model fallback. Tries the standard search paths.
+fn default_model() -> String {
+    let paths = [
+        "/opt/my_db/aicoding/models.json",
+        "/etc/aicoding/models.json",
+    ];
+    for path in paths {
+        let Ok(text) = std::fs::read_to_string(path) else { continue };
+        let Ok(list) = serde_json::from_str::<Vec<serde_json::Value>>(&text) else {
+            continue;
+        };
+        if let Some(first) = list.first() {
+            if let Some(name) = first.get("name").and_then(|v| v.as_str()) {
+                if !name.is_empty() {
+                    return name.to_string();
+                }
+            }
+        }
+    }
+    "kimi-latest".to_string()
 }
