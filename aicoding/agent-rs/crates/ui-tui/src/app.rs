@@ -744,6 +744,10 @@ pub async fn run(
 
     let mut action_fut: Option<ActionFut> = None;
 
+    // Draw the initial frame immediately so the UI isn't blank until the
+    // first keypress.
+    let _ = terminal.draw(|frame| crate::render::draw(frame, &app));
+
     let result: Result<(), Box<dyn std::error::Error>> = loop {
         tokio::select! {
             input = input_rx.recv() => {

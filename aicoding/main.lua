@@ -6,15 +6,6 @@ local project_root = "."
 -- Keep conversation history per session for end-of-turn summarization.
 _G.session_messages = {}
 
-function set_project_root(path)
-    tools.set_project_root(path)
-    project_root = tools.get_project_root()
-    -- Sync memory session root if OPENCODE_SESSION was provided
-    if os.getenv("OPENCODE_SESSION") then
-        tools.set_session_id(os.getenv("OPENCODE_SESSION"))
-    end
-end
-
 function get_project_root()
     project_root = tools.get_project_root()
     return project_root
@@ -61,6 +52,14 @@ end
 
 function set_project_root(path)
     tools.set_project_root(path)
+    -- Memory is project-scoped: all sessions in the same directory share facts.
+    if memory and type(memory.set_project) == "function" then
+        memory.set_project(tools.get_project_root())
+    end
+    -- Sync memory session root if OPENCODE_SESSION was provided
+    if os.getenv("OPENCODE_SESSION") then
+        tools.set_session_id(os.getenv("OPENCODE_SESSION"))
+    end
 end
 
 -- (GUI coroutine scheduler removed — UI is provided by agent-rs via ACP)

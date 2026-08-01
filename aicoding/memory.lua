@@ -4,9 +4,10 @@
 --   1. 所有底层 C 绑定（opencode.cache_get / cache_set / vector_search）都封装在这里。
 --   2. 对外暴露高级 API：read / write / search / context / facts / recall。
 --   3. 命名空间默认隔离：
---        /agent/{session}/facts    会话事实
---        /agent/{session}/history  历史动作
---        /code/local/{repo}        代码库语义记忆（只读，由 analyze_repo.sh 导入）
+--        /project/{root}/facts   项目事实（同一目录的会话共享，记忆基于目录）
+--        /project/{root}/history 项目历史动作
+--        /agent/{session}/...    会话级数据（消息历史等，保持会话隔离）
+--        /code/local/{repo}      代码库语义记忆（只读，由 analyze_repo.sh 导入）
 
 local rerank = require("rerank")
 local shell = require("shell")
@@ -15,6 +16,34 @@ local M = {}
 
 -- 默认会话命名空间，可由外部设置
 M.session = os.getenv("OPENCODE_SESSION") or "default"
+
+-- 项目根（由 set_project 设置）：同一目录的所有会话共享一套 facts/history。
+-- 未设置时退回会话级命名空间。
+M.project = nil
+
+-- 把项目根路径编码成稳定的命名空间片段（确定性、跨进程一致）。
+function M.encode_project(root)
+    if not root or root == "" or root == "." then return nil end
+    local s = root:gsub("^/+", "")
+    s = s:gsub("/+", "_")
+    s = s:gsub("[^%w_%-%.]", "_")
+    if s == "" then return nil end
+    return s
+end
+
+-- 设置项目根；返回项目命名空间（无则 nil）。
+function M.set_project(root)
+    M.project = M.encode_project(root)
+    return M.project
+end
+
+-- 项目级命名空间前缀（facts）。
+function M.project_ns(kind)
+    if M.project then
+        return "/project/" .. M.project .. (kind and ("/" .. kind) or "/facts")
+    end
+    return "/agent/" .. M.session .. (kind and ("/" .. kind) or "/facts")
+end
 
 -- 代码库分析缓存根目录
 M.CODE_CACHE_ROOT = "/opt/code_caches"
@@ -30,9 +59,9 @@ function M.namespace_to_cache_dir(ns)
     return nil
 end
 
--- 在当前 session 下构造完整 key
+-- 在当前 session / project 下构造完整 key
 function M.key(name, namespace)
-    local ns = namespace or ("/agent/" .. M.session .. "/facts")
+    local ns = namespace or M.project_ns("facts")
     if ns:sub(-1) ~= "/" then ns = ns .. "/" end
     return ns .. name
 end
@@ -48,19 +77,19 @@ function M.write(key, value, ttl_seconds)
     return opencode.cache_set(key, value, ttl_ms)
 end
 
--- 写入一个会话事实
+-- 写入一个项目事实（同一目录的会话共享）
 function M.fact(name, value, ttl_seconds)
-    return M.write(M.key(name, "/agent/" .. M.session .. "/facts"), value, ttl_seconds)
+    return M.write(M.key(name, M.project_ns("facts")), value, ttl_seconds)
 end
 
 -- 写入一个历史动作
 function M.history(name, value, ttl_seconds)
-    return M.write(M.key(name, "/agent/" .. M.session .. "/history"), value, ttl_seconds)
+    return M.write(M.key(name, M.project_ns("history")), value, ttl_seconds)
 end
 
--- 召回一个会话事实
+-- 召回一个项目事实
 function M.recall(name)
-    return M.read(M.key(name, "/agent/" .. M.session .. "/facts"))
+    return M.read(M.key(name, M.project_ns("facts")))
 end
 
 -- 通用搜索：
@@ -147,7 +176,7 @@ end
 
 -- 列出某个命名空间下的所有 key（用于调试 / 自省）
 function M.list(namespace)
-    local prefix = namespace or ("/agent/" .. M.session .. "/facts")
+    local prefix = namespace or M.project_ns("facts")
     if prefix:sub(-1) ~= "/" then prefix = prefix .. "/" end
     local raw = opencode.cache_search_prefix(prefix, 1000)
     local out = {}

@@ -47,7 +47,12 @@ end
 -- Build just the system/instruction part of the prompt (no user query).
 function M.build_system_prompt(session_id, project_ns, project_root)
     project_root = project_root or "."
-    local session_prefix = "/agent/" .. session_id .. "/"
+    local memory = require("memory")
+    -- Memory is scoped to the project directory (all sessions share facts).
+    local proj = memory.encode_project(project_root)
+    local facts_ns = proj and ("/project/" .. proj .. "/facts")
+                   or ("/agent/" .. session_id .. "/facts")
+    local proj_prefix = proj and ("/project/" .. proj .. "/") or ("/agent/" .. session_id .. "/")
     local parts = {}
 
     local function push(fmt, ...)
@@ -61,8 +66,8 @@ function M.build_system_prompt(session_id, project_ns, project_root)
     push("## Memory-first context (IMPORTANT)")
     push("This agent has a FIXED-SIZE context window. Old messages are archived to KV Cache; nothing is lost.")
     push("You MUST use KV Cache as your long-term memory. Do not rely on the prompt for anything beyond the current few turns.")
-    push("- WRITE facts/plans/errors with `kv_set(key, value, namespace='/agent/{session}/facts')`.")
-    push("- RECALL them with `kv_search(query, namespace='/agent/{session}/facts')` or `kv_get(key)`.")
+    push("- WRITE facts/plans/errors with `kv_set(key, value, namespace='%s')`.", facts_ns)
+    push("- RECALL them with `kv_search(query, namespace='%s')` or `kv_get(key)`.", facts_ns)
     push("- Search code with `kv_search(query, namespace='/code/local/{repo}', search_type='semantic')`.")
     push("- Get symbol context with `kv_context(symbol, repo)`.")
     push("- Read exact source with `read(path, offset, limit)`.")
@@ -94,7 +99,7 @@ function M.build_system_prompt(session_id, project_ns, project_root)
     push("3. Index unknown repos with `code_index(source, namespace)` before searching.")
     push("4. Edit with exact `old_string`; verify with `diff` or `git status`.")
     push("5. After editing, run `build` (or the project-specific test command) to verify.")
-    push("6. Summarize progress periodically into `/agent/{session}/facts` and project knowledge with `knowledge_write`.")
+    push("6. Summarize progress periodically into `%s` and project knowledge with `knowledge_write`.", facts_ns)
     push("7. Be concise. Only load information relevant to the current task.")
     push("")
     push("## Editing rules")
@@ -149,14 +154,14 @@ function M.build_system_prompt(session_id, project_ns, project_root)
     end
 
     -- Current task
-    local task_json = opencode.cache_get(session_prefix .. "task/current")
+    local task_json = opencode.cache_get(proj_prefix .. "task/current")
     local task = task_json and parse_json(task_json)
     if task and task.c then
         push("\n## Current Task\n%s", task.c)
     end
 
     -- Key facts
-    local facts = opencode.cache_search_prefix(session_prefix .. "facts/", M.MAX_FACTS)
+    local facts = opencode.cache_search_prefix(proj_prefix .. "facts/", M.MAX_FACTS)
     if facts and #facts > 0 then
         table.sort(facts, function(a, b)
             local ia = (a.value and parse_json(a.value).i) or 0
@@ -173,7 +178,7 @@ function M.build_system_prompt(session_id, project_ns, project_root)
     end
 
     -- Recent summaries
-    local summaries = opencode.cache_search_prefix(session_prefix .. "summaries/", M.MAX_SUMMARIES)
+    local summaries = opencode.cache_search_prefix(proj_prefix .. "summaries/", M.MAX_SUMMARIES)
     if summaries and #summaries > 0 then
         push("\n## Recent Conversation Summary")
         for i = math.max(1, #summaries - M.MAX_SUMMARIES + 1), #summaries do
@@ -199,12 +204,14 @@ function M.build_system_prompt(session_id, project_ns, project_root)
     return wrapped
 end
 
--- Extract key facts from a turn and store them.
+-- Extract key facts from a turn and store them (project-scoped).
 function M.save_facts(session_id, facts_array)
-    local session_prefix = "/agent/" .. session_id .. "/"
+    local memory = require("memory")
+    local proj = memory.project
+    local prefix = proj and ("/project/" .. proj .. "/facts/") or ("/agent/" .. session_id .. "/facts/")
     local ts = tostring(os.time() * 1000)
     for i, f in ipairs(facts_array) do
-        local key = session_prefix .. "facts/" .. ts .. "_" .. tostring(i)
+        local key = prefix .. ts .. "_" .. tostring(i)
         local value = {
             t = "fact",
             c = f.fact,
@@ -216,9 +223,13 @@ function M.save_facts(session_id, facts_array)
     end
 end
 
--- Store a turn summary.
+-- Store a turn summary (project-scoped).
 function M.save_summary(session_id, turn_id, summary)
-    local key = string.format("/agent/%s/summaries/%08d", session_id, turn_id)
+    local memory = require("memory")
+    local proj = memory.project
+    local key = proj
+        and string.format("/project/%s/summaries/%08d", proj, turn_id)
+        or string.format("/agent/%s/summaries/%08d", session_id, turn_id)
     local value = {
         t = "summary",
         c = summary,
