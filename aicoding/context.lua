@@ -157,6 +157,9 @@ function M.build_messages(session, system_prompt, messages)
         if m.tool_calls then
             m2.tool_calls = m.tool_calls
         end
+        if m.tool_call_id then
+            m2.tool_call_id = m.tool_call_id
+        end
         table.insert(out, m2)
     end
 
