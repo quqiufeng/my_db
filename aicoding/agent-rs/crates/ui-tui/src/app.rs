@@ -37,6 +37,13 @@ pub struct PendingPermission {
     pub resource: String,
 }
 
+#[derive(Clone)]
+pub struct TodoItem {
+    pub id: String,
+    pub content: String,
+    pub status: String,
+}
+
 pub struct App {
     pub client: Arc<Client>,
     pub session_id: String,
@@ -52,6 +59,7 @@ pub struct App {
     pub status: String,
     pub focus: Option<usize>,
     pub pending_permission: Option<PendingPermission>,
+    pub todos: Vec<TodoItem>,
 }
 
 type PromptFut = Pin<Box<dyn Future<Output = Result<agent_acp::SessionPromptResult, AcpError>>>>;
@@ -98,6 +106,7 @@ impl App {
             status: String::new(),
             focus: None,
             pending_permission: None,
+            todos: Vec::new(),
         }
     }
 
@@ -242,6 +251,20 @@ impl App {
                             break;
                         }
                     }
+                }
+            }
+            Update::Todo {
+                id, content, status, ..
+            } => {
+                if let Some(t) = self.todos.iter_mut().find(|t| t.id == id) {
+                    t.content = content;
+                    t.status = status;
+                } else {
+                    self.todos.push(TodoItem {
+                        id,
+                        content,
+                        status,
+                    });
                 }
             }
         }

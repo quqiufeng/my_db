@@ -195,6 +195,14 @@ pub enum Update {
         status: String,
         raw_output: Option<Value>,
     },
+    #[serde(rename = "todo", rename_all = "camelCase")]
+    Todo {
+        #[serde(rename = "type")]
+        todo_type: String,
+        id: String,
+        content: String,
+        status: String,
+    },
 }
 
 #[derive(Debug, Clone, Deserialize)]

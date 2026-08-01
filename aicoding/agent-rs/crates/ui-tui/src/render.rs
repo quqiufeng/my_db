@@ -1,4 +1,4 @@
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::layout::{Constraint, Layout, Margin, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
@@ -16,12 +16,52 @@ pub fn draw(frame: &mut Frame, app: &App) {
     ])
     .split(area);
 
-    draw_messages(frame, app, chunks[0]);
+    let mut msgs_area = chunks[0];
+    if !app.todos.is_empty() {
+        let row = Layout::horizontal([
+            Constraint::Min(20),
+            Constraint::Length(36.min(area.width.saturating_div(3))),
+        ])
+        .split(msgs_area);
+        msgs_area = row[0];
+        draw_todos(frame, app, row[1]);
+    }
+
+    draw_messages(frame, app, msgs_area);
     draw_input(frame, app, chunks[1]);
     draw_status(frame, app, chunks[2]);
     if let Some(p) = &app.pending_permission {
         draw_permission(frame, app, p);
     }
+}
+
+fn draw_todos(frame: &mut Frame, app: &App, area: Rect) {
+    let mut lines = Vec::new();
+    for t in &app.todos {
+        let (mark, color) = match t.status.as_str() {
+            "completed" => ("✓", Color::Green),
+            "cancelled" => ("✗", Color::Red),
+            "in_progress" => ("◐", Color::Yellow),
+            _ => ("·", Color::Cyan),
+        };
+        lines.push(Line::from(vec![
+            Span::styled(format!("{mark} "), Style::default().fg(color).add_modifier(Modifier::BOLD)),
+            Span::styled(&t.content, Style::default().fg(Color::Gray)),
+        ]));
+    }
+    let block = Block::default()
+        .title(" todo ")
+        .title_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan));
+    let inner = area.inner(Margin { horizontal: 1, vertical: 0 });
+    let _ = app;
+    if area.width < 8 || area.height < 2 {
+        return;
+    }
+    frame.render_widget(block, area);
+    let text = ratatui::text::Text::from(lines);
+    frame.render_widget(Paragraph::new(text).wrap(ratatui::widgets::Wrap { trim: false }), inner);
 }
 
 fn draw_permission(frame: &mut Frame, app: &App, p: &crate::app::PendingPermission) {

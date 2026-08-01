@@ -302,6 +302,69 @@ end
 
 M.tools = {
     {
+        name = "todo_write",
+        description = "Add or update an item in the task todo list shown in the UI panel. Use status='todo' to add a pending task, 'in_progress' to mark the task being worked on, 'completed' when finished, and 'cancelled' to drop it. Omit id to create a new todo.",
+        parameters = {
+            content = { type = "string", required = true, description = "Task description" },
+            status = { type = "string", enum = {"todo", "in_progress", "completed", "cancelled"}, required = false, description = "Target status (default 'todo')" },
+            id = { type = "string", required = false, description = "Id of an existing todo to update (omitting it creates a new todo)" }
+        },
+        handler = function(args)
+            local status = args.status or "todo"
+            if status ~= "todo" and status ~= "in_progress" and status ~= "completed" and status ~= "cancelled" then
+                return { ok = false, error = "invalid status: " .. tostring(status) }
+            end
+            local key = string.format("/agent/%s/todo", session_id)
+            local todos = {}
+            local raw = memory.read(key)
+            if raw then
+                local ok, v = pcall(json.decode, raw)
+                if ok and type(v) == "table" then todos = v end
+            end
+            local entry
+            if args.id then
+                for _, t in ipairs(todos) do
+                    if t.id == args.id then entry = t break end
+                end
+            end
+            if not entry then
+                local new_id = args.id or string.format("t%d", (os.time() % 1000000))
+                entry = { id = new_id, content = args.content, status = status }
+                table.insert(todos, entry)
+            else
+                entry.content = args.content or entry.content
+                entry.status = status
+            end
+            memory.write(key, json.encode(todos), 3600)
+            if opencode and opencode.acp_send then
+                opencode.acp_send("session/update", cjson.encode({
+                    sessionId = session_id,
+                    update = {
+                        sessionUpdate = "todo",
+                        type = "upsert",
+                        id = entry.id,
+                        content = entry.content,
+                        status = entry.status
+                    }
+                }))
+            end
+            return { ok = true, id = entry.id, status = entry.status, todos = todos }
+        end
+    },
+    {
+        name = "todo_read",
+        description = "Read the current todo list.",
+        parameters = {},
+        handler = function(args)
+            local key = string.format("/agent/%s/todo", session_id)
+            local raw = memory.read(key)
+            if not raw then return { ok = true, todos = {} } end
+            local ok, v = pcall(json.decode, raw)
+            if ok and type(v) == "table" then return { ok = true, todos = v } end
+            return { ok = true, todos = {} }
+        end
+    },
+    {
         name = "kv_search",
         description = "Search the KV Cache for relevant code, facts, or history. Use search_type='semantic' for natural language code search over indexed repos. Results are reranked locally; use min_score to filter noise.",
         parameters = {
