@@ -8,10 +8,11 @@
 
 系统特点：
 - **完全本地运行**：数据不离开本地机器，隐私安全
-- **GPU 加速**：使用 TensorRT + cuDNN 加速向量生成和搜索
+- **GPU 加速**：使用 TensorRT + cuDNN 加速向量生成和搜索，CUDA 加速 Kokoro 语音合成
 - **多格式支持**：EPUB、MOBI、AZW、AZW3、PDF
 - **中文优化**：正确处理中文内容，支持 Unicode 章节名
 - **语义搜索**：基于向量相似度，支持同义词和概念匹配
+- **有声书输出**：`book2audio` 将 Markdown 章节合成为带章节导航的 .m4b 有声书（Kokoro-82M TTS）
 
 ---
 
@@ -400,7 +401,87 @@ gcc -std=c11 -D_GLIBCXX_USE_CXX11_ABI=0 \
 
 **性能参考**：613 页数字 PDF（DDIA），150 DPI 渲染 + OCR，约 5-10 分钟（取决于 GPU 性能和页面复杂度）。第 1 页结果在 ~30 秒内即可输出（流式），剩余页陆续产出。
 
-### 4. cache_query (底层查询工具)
+### 4. book2audio (Markdown 章节 → 有声书)
+
+**路径**：`tools/book2audio`
+
+**功能**：将 `import_book` 输出的 Markdown 章节合成为语音，生成每章 WAV 并打包成带章节导航的 `.m4b` 有声书。纯 C 实现（约 1000 行），使用 **Kokoro-82M** ONNX 模型（ONNX Runtime C API + CUDA），音素转换调用系统 `espeak-ng` CLI（单次进程批量处理，复刻 phonemizer 的 preserve_punctuation 行为）。
+
+**用法**：
+```bash
+# 单文件一键转（推荐）：自动完成 导入→合成 两步
+./tools/book2audio.sh ~/book.epub                    # → /opt/audio/book/book.m4b
+./tools/book2audio.sh ~/book.mobi -v af_sky -s 1.2   # 指定音色和语速
+./tools/book2audio.sh ~/book.pdf -o /data/audio/xx   # 指定输出目录
+
+# 手动分步（书籍已导入过时只跑第二步）
+./tools/book2audio book -i /opt/books/my_book -o /opt/audio/my_book
+
+# 单个文本文件
+./tools/book2audio file -i chapter.txt -o chapter.wav -v af_sky -s 1.2
+
+# 一句话测试
+./tools/book2audio synth -t "Hello world" -o hello.wav
+```
+
+**`book2audio.sh` 包装脚本行为**：自动检查格式（epub/mobi/azw/azw3/pdf）和依赖 → 若 `/opt/books/{书名}` 已有章节则跳过导入（`--force` 强制重新导入）→ 调用 import_book（`--skip-vectors`，纯转音频不需要向量索引）→ 调用 book2audio 合成。中间产物目录可用环境变量覆盖：`BOOK_CACHE_DIR`、`BOOK_MD_ROOT`、`BOOK_OUT_ROOT`。
+
+**选项**：
+| 参数 | 说明 | 默认值 |
+|------|------|--------|
+| `-v NAME` | 音色（54 种，如 af_sky/am_michael/zf_xiaoyi） | af_sky |
+| `-l LANG` | espeak 语言 | en-us |
+| `-s SPEED` | 语速 0.5–2.0 | 1.0 |
+| `--phonemes` | 输入已是 IPA 音素（跳过 espeak，供中文 misaki 等前端使用） | 关 |
+| `--cpu` | 强制 CPU（默认 CUDA，失败自动回退） | 关 |
+| `--no-m4b` | 只生成 WAV，不调用 ffmpeg 打包 | 关 |
+
+**输出结构**：
+```
+/opt/audio/my_book/
+├── 01-Chapter_Title.wav     # 每章 24kHz 16bit WAV
+├── 02-Next_Chapter.wav
+├── _concat.txt              # ffmpeg concat 列表
+├── _ffmeta.txt              # ffmetadata（章节时间戳 + 书名）
+└── my_book.m4b              # AAC 64k，带章节导航（VLC 等可直接播放）
+```
+
+**工作原理**：
+```
+book2audio
+  ├── 1. 读取章节 md → 清洗（去 front matter/HTML 注释/图片行/标题 # 号）
+  ├── 2. 按标点切分段落 → popen 调 espeak-ng --ipa（每段一行，一次调用）
+  │      → 重新拼回标点 → 过滤到 Kokoro 词表（114 字符）
+  ├── 3. 音素串按 kokoro-onnx chunker 算法分块（句/从句/词边界，≤510 音素，
+  │      二分查找平衡块长避免最后一块过短导致语速突变）
+  ├── 4. 每块：音素→token id（两端补 0）→ style = voice[len(tokens)-1]
+  │      → ONNX 推理（tokens int64 + style f32[1,256] + speed f32[1]）
+  │      → librosa 式静音裁剪（RMS 帧 + 60dB 阈值）→ 句间 0.25s / 从句间 0.1s 停顿
+  ├── 5. 拼接写 WAV → 全部章节完成后 ffmpeg concat + ffmetadata 打包 m4b
+```
+
+**模型文件**（不随仓库分发，位于 `/data/models/kokoro/`）：
+| 文件 | 大小 | 说明 |
+|------|------|------|
+| `kokoro-v1.0.fp16.onnx` | 169 MB | Kokoro-82M fp16（IO 保持 float32，来自 thewh1teagle/kokoro-onnx release） |
+| `voices-v1.0.bin` | 28 MB | 原始 npz 音色包（54 音色，备份） |
+| `voices/{name}.bin` | 510 KB/个 | 预提取的 raw float32（510×256，C 直接 fread，按音素数取行） |
+| `vocab.tsv` | 2 KB | 音素→token id 映射（从 hexgrad/Kokoro-82M config.json 提取） |
+
+**编译**：
+```bash
+make tools/book2audio
+```
+
+**验证**：与 Python 参考实现（kokoro-onnx + phonemizer）对比，音素串完全一致，梅尔频谱逐帧相关 0.78（残余差异来自 100ms 级裁剪边界和 ORT 版本数值差），时长/段落结构一致。
+
+**性能**：RTX 3080 上 RTF ≈ 0.1（31 分钟音频约 3 分钟合成）；单句冷启动 ~8s（含模型加载）。
+
+**已知限制**：
+- 系统 espeak-ng 1.51 的 `cmn`（中文）音素输出损坏（逐字拼读英文），中文书需先用 misaki[zh] 等前端转成 IPA 音素再走 `--phonemes` 模式
+- `import_book` 导入的个别书籍（如 ddia）页面只有注释无正文，是导入侧问题，与 TTS 无关
+
+### 5. cache_query (底层查询工具)
 
 **路径**：`tools/cache_query`
 
@@ -886,6 +967,10 @@ ls -la libmydb.so
 |------|------|
 | `tools/import_book` | 电子书导入程序（C） |
 | `tools/import_book.c` | 导入程序源码 |
+| `tools/book2audio` | Markdown 章节 → 有声书（Kokoro TTS，C） |
+| `tools/book2audio.c` | TTS 程序源码 |
+| `tools/book2audio.sh` | 单文件一键转有声书包装脚本（自动 导入→合成） |
+| `/data/models/kokoro/` | Kokoro ONNX 模型、音色、词表 |
 | `explore_book.sh` | AI Agent 电子书探索脚本 |
 | `tools/cache_query` | 底层查询工具（C） |
 | `src/importer/wrappers/epub_wrapper.cpp` | EPUB 解析库 |

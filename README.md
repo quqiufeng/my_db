@@ -13,6 +13,7 @@
 │  │                  │  │                  │                │
 │  │  analyze_repo.sh │  │  import_book     │                │
 │  │  explore_repo.sh │  │  explore_book.sh │                │
+│  │                  │  │  book2audio(.sh) │                │
 │  └────────┬─────────┘  └────────┬─────────┘                │
 │           │                     │                          │
 │           └──────────┬──────────┘                          │
@@ -121,13 +122,14 @@ const char* json = db_select_by_pk_json(users, id);
 
 ### 4. 电子书记忆系统 [ebook.md](ebook.md)
 
-将 EPUB/MOBI/AZW3/PDF 导入记忆系统，支持语义搜索和标准化探索。
+将 EPUB/MOBI/AZW3/PDF 导入记忆系统，支持语义搜索、标准化探索和**有声书生成**。
 
 **核心能力：**
 - 多格式支持：EPUB / MOBI / AZW / AZW3 / PDF
 - 章节切分：自动提取目录结构，按章节存储
 - 语义搜索：自然语言查询书中内容
 - 标准化接口：`explore_book.sh` 提供 overview/search/read/toc 四命令
+- 有声书输出：`book2audio` 基于 Kokoro-82M TTS（纯 C + ONNX Runtime CUDA），生成带章节导航的 .m4b
 
 ```bash
 # 导入电子书
@@ -141,6 +143,9 @@ const char* json = db_select_by_pk_json(users, id);
 
 # 查看目录
 ./explore_book.sh /books/my_book toc
+
+# 一键转有声书（单文件 → m4b，RTX 3080 上 RTF≈0.1）
+./tools/book2audio.sh ~/book.epub -v af_sky
 ```
 
 ### 5. 文本处理集成 [tokenizers-cpp.md](tokenizers-cpp.md)
@@ -249,6 +254,8 @@ my_db/
 │
 ├── tools/                   # 用户工具
 │   ├── import_book          # 电子书导入
+│   ├── book2audio           # Markdown 章节 → 有声书（Kokoro TTS）
+│   ├── book2audio.sh        # 单文件一键转有声书包装脚本
 │   ├── cache_query          # KV Cache 查询
 │   ├── code_indexer         # 代码索引器
 │   ├── batch_embedder       # 批量向量生成
@@ -259,6 +266,8 @@ my_db/
 ├── ai_code_search.sh        # 代码分析脚本（磁盘版）
 ├── ai_code_search_large.sh  # 超大项目分治脚本
 ├── explore_book.sh          # 电子书探索脚本
+│
+├── /data/models/kokoro/     # Kokoro TTS 模型（onnx + 音色 + 词表）
 │
 ├── tests/                   # 测试用例
 │   ├── test_basic.c         # 基础 CRUD 测试
@@ -277,7 +286,7 @@ my_db/
 | **[database.md](database.md)** | 存储引擎设计：mmap、WAL、索引、JOIN、事务 | 想了解底层存储原理的开发者 |
 | **[kvCache.md](kvCache.md)** | KV Cache 设计：8 种搜索、HNSW、TTL/LRU | 想了解 AI Agent 记忆系统的开发者 |
 | **[coding.md](coding.md)** | 代码探索系统：语义搜索、调用图、数据流 | 想用 AI 探索代码库的开发者 |
-| **[ebook.md](ebook.md)** | 电子书系统：导入、搜索、阅读 | 想用 AI 阅读电子书的用户 |
+| **[ebook.md](ebook.md)** | 电子书系统：导入、搜索、阅读、有声书生成 | 想用 AI 阅读/收听电子书的用户 |
 | **[tokenizers-cpp.md](tokenizers-cpp.md)** | 文本处理：Jina v2、ONNX、TensorRT | 想了解嵌入推理实现的开发者 |
 
 ## 技术栈
@@ -285,6 +294,7 @@ my_db/
 - **核心引擎**：100% C11，零拷贝 mmap
 - **嵌入推理**：ONNX Runtime C API + TensorRT
 - **向量模型**：Jina v2（768 维）/ all-MiniLM-L6-v2（384 维）
+- **语音合成**：Kokoro-82M（ONNX Runtime C API + CUDA）+ espeak-ng 音素化
 - **分词器**：tokenizers-cpp（HuggingFace 官方）
 - **GPU 加速**：TensorRT + cuDNN + CUDA
 - **构建系统**：GNU Make
