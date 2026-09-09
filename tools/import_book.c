@@ -149,7 +149,9 @@ static int move_dir(const char* src, const char* dst) {
 #define MIN_PARA_LEN        50      // 最小段落长度（过滤碎片）
 #define TARGET_CHUNK_SIZE   8000     // 目标段落长度（字符）
 #define MAX_CHUNK_SIZE      16000    // 最大段落长度（超过则强制切分）
-#define MERGE_THRESHOLD     300     // 短页合并阈值（小于此值尝试合并）
+#define MERGE_TARGET        3000    // 目标页大小：PDF/MOBI 提取的文本块普遍只有几百
+                                    // 字节，连续段落贪心合并到接近此值才开新页。
+                                    // 取 ~3KB 是阅读体验与 Jina 512 token 嵌入窗口的折中
 #define PREVIEW_LEN         200     // KV Cache 中保存的预览长度
 
 // 章节信息结构（与 wrapper 兼容）
@@ -264,8 +266,9 @@ static void chapter_dirname(char* dst, size_t dst_size, int idx, const char* tit
 }
 
 // 检查是否是 CSS 内容
+// 注意：不能只看 { } —— 数学/算法书中的集合记号（如 {8,6,7,5,3,10,9}）、
+// 代码书中的代码块都含大括号，会导致整章正文被误判丢弃
 static int is_css_content(const char* text) {
-    if (strstr(text, "{") && strstr(text, "}")) return 1;
     if (strstr(text, "@media")) return 1;
     if (strstr(text, "@font-face")) return 1;
     if (strstr(text, ".calibre")) return 1;
@@ -541,7 +544,9 @@ static int split_paragraphs(const char* text, size_t text_len,
     for (int i = 0; i < count; i++) free(raw[i]);
     free(raw);
     
-    // ===== 阶段 4: 合并相邻短页 =====
+    // ===== 阶段 4: 贪心合并相邻段落，凑足目标页大小 =====
+    // （旧逻辑只合并 <300 字节的页，PDF/MOBI 的文本块普遍 100-800 字节，
+    //   导致全书都是几百字节的碎片页：DDIA 1994 页中位数仅 753 字节）
     int final_count = 0;
     char** final = malloc(sizeof(char*) * capacity * 2);
     if (!final) {
@@ -553,11 +558,10 @@ static int split_paragraphs(const char* text, size_t text_len,
     for (int i = 0; i < stage3_count; i++) {
         size_t len = strlen(stage3[i]);
         
-        // 当前页太短，尝试与上一页或下一页合并
-        if (len < MERGE_THRESHOLD && final_count > 0) {
+        // 上一页还没凑够目标大小，且放得下当前段落 → 并入上一页
+        if (final_count > 0) {
             size_t prev_len = strlen(final[final_count - 1]);
-            // 如果上一页也不长，合并到上一页
-            if (prev_len < MAX_CHUNK_SIZE - len - 10) {
+            if (prev_len < MERGE_TARGET && prev_len + len + 1 <= MAX_CHUNK_SIZE) {
                 size_t new_len = prev_len + len + 2;
                 char* merged = malloc(new_len + 1);
                 if (merged) {
@@ -1292,7 +1296,12 @@ static int import_book(cache_t* cache, const char* namespace,
             }
             
             results[i] = process_chapter(md_dir, bounds[i].ch_dir, title,
-                                         bounds[i].chapter_text, bounds[i].chapter_len);
+                                          bounds[i].chapter_text, bounds[i].chapter_len);
+            if (getenv("IMPORT_DEBUG")) {
+                fprintf(stderr, "[dbg] i=%d dir=%s len=%zu items=%d\n",
+                        i, bounds[i].ch_dir, bounds[i].chapter_len,
+                        results[i] ? results[i]->item_count : -1);
+            }
         }
         
         // ====== 阶段三：串行写入所有结果（磁盘 + KV Cache）======
@@ -2045,6 +2054,13 @@ int main(int argc, char* argv[]) {
     printf("Namespace: %s\n", namespace);
     printf("Markdown output: %s/\n", md_dir);
     printf("\n");
+    
+    // 重新导入同一命名空间前，清除旧 key（页面数量/结构可能变化，
+    // 旧 key 会残留在 cache 中并被 export_vectors 一并导出，污染语义搜索）
+    int stale_removed = cache_del_namespace(cache, namespace);
+    if (stale_removed > 0) {
+        printf("  Removed %d stale cache entries under %s\n", stale_removed, namespace);
+    }
     
     // 解析并导入
     int total_pages = 0;
