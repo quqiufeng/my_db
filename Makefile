@@ -158,6 +158,10 @@ BOOK2AUDIO = $(TOOLS_DIR)/book2audio
 $(BOOK2AUDIO): $(TOOLS_DIR)/book2audio.c
 	$(CC) $(CFLAGS) $(ONNX_CFLAGS) -o $@ $< $(ONNX_LDFLAGS) -lm
 
+.PHONY: test-ebooks
+test-ebooks: $(IMPORT_BOOK)
+	./tests/test_ebooks.sh
+
 $(CACHE_SERVER): $(TOOLS_DIR)/cache_server.c $(LIB)
 	$(CC) $(CFLAGS) -o $@ $< -L. -lmydb -Wl,-rpath,.
 

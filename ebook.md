@@ -1992,6 +1992,24 @@ if (!flag_skip_vectors) {
 
 **效果**：Algorithms 142/142 章节齐全（335→382 页）；全部藏书重导后代码/数学内容恢复（Django 544→848 页，ddia 419→438 页，C 编程代码块完整保留，MOBI 覆盖率 97.2%）。
 
+### 问题 31: EPUB 章节标题为空/错乱
+
+**现象**：Django EPUB 导入后章节目录是 `05-`、`06-`（空标题）、`Chapter_4` 重复三次、`Chapter_3` 排在 `Chapter_4` 后面。
+
+**根因**：`epub_wrapper` 从每个 spine XHTML 的 `<title>`/`<h1>` 提取章节名，但 Packt 等出版商的模板里这两个标签经常为空或是泛型文本；且 `xml_node_text` 只取直接文本子节点，`<h1>Chapter 4<br/>Django Views...</h1>` 被截断成 "Chapter 4"。
+
+**修复**：优先从**权威目录**提取标题——解析 `toc.ncx`（EPUB2 navLabel/navPoint）或 `nav.xhtml`（EPUB3），建立 文件路径→章节名 映射；`<title>`/`<h1>` 降级为兜底，并改用 `xmlNodeGetContent`（嵌套标签不截断）。
+
+**效果**：22 章全部获得正确标题（"Chapter 1: Introduction to Django" ~ "Chapter 15: Deploying a Django Project"）。
+
+### 问题 32: 书名含空格时 HNSW 索引静默构建失败
+
+**现象**：`A01075. Linux内核API完全参考手册.B009WMAZ02.azw3` 导入后语义搜索无结果——`.jina.bin`/`.jina.idx` 都在，唯独缺 `.jina.bin.hnsw`。
+
+**根因**：`export_vectors` 用 `system("./tools/build_hnsw_index %s")` 构建索引，路径含空格未加引号被 shell 分词。与问题 26 同类（system() + 无引号路径）。
+
+**修复**：命令中路径加引号。已对全库 7 本书验证 `.hnsw` 齐全。
+
 ### 修复后四格式回归测试
 
 | 格式 | 测试书 | 章节 | 页数 | 结果 |
@@ -2005,6 +2023,48 @@ if (!flag_skip_vectors) {
 
 ---
 
+## 架构简化：统一章节接口（2026-09-09 v6）
+
+在修复问题 22-32 后复盘发现：大部分 bug 源于同一个设计选择——**先把全书拼成一大段文本，再用偏移/标题匹配"找回"章节边界**。三种格式对章节位置的记录方式完全不同（EPUB=spine 偏移、MOBI=filepos/posfid、PDF=页码），导致 import_book.c 里需要三套启发式匹配策略（约 400 行），且每种都会引入特异性 bug。
+
+### 重构内容
+
+**1. wrapper 统一输出 `{title, level, text}` 章节列表**
+
+三个 wrapper 各自新增 `get_book()` / `free_book()`，章节定位逻辑全部下沉到格式层：
+
+| Wrapper | get_book() 实现 |
+|---------|----------------|
+| `epub_wrapper` | spine 逐文件提取，标题：NCX/nav 权威目录 → `<h1>`/`<title>` → "untitled-N" 兜底（不丢内容） |
+| `mobi_wrapper` | NCX 逐章提取；多数失败时回退单个 "full" 全文伪章节（保持原兜底行为） |
+| `pdf_wrapper` | 逐页提取 + outline 页码分组（原 import_book 的 remap 逻辑移入库内）；无 outline 时单章 |
+
+**2. import_book.c 删除约 400 行启发式代码**
+
+删除：策略0（wrapper 偏移切片）、策略1（行首标题匹配）、策略2（中文章节前缀）、策略3（英文 Chapter 前缀）、`remap_page_offsets_to_bytes`、MOBI 双重路径。main() 的四个格式分支统一为 ~30 行：`open → get_metadata → get_book → import_book_chapters → free/close`。OCR 路径用 `build_page_grouped_chapters()` 做同样的 `<PAGE>` 分组。
+
+**3. 消灭 system()**
+
+`build_hnsw_index` 构建和 `make` 调用改为 fork/exec（`run_cmd()`），参数不经 shell 分词，路径含空格/中文绝对安全（问题 26/32 同类 bug 的根治）。
+
+**4. 黄金样本回归测试 `make test-ebooks`**
+
+`tests/test_ebooks.sh`：每种格式导入后校验章节目录数、页面数、关键词存在性（防过滤器静默丢内容）。内置 `tests/golden/mini.epub` 保证无真实书籍时也有用例可跑。
+
+### 行为变化（均为改进）
+
+- **章节目录编号连续**：空切片章节（重复页码的 outline 条目）不再产生编号空洞和重复内容
+- **页数变化**：Algorithms 382→348、Software.Design 490→253、Django 843→429——减少的是旧切片逻辑的**重复内容**（同页 outline 条目导致的重叠切片），字节总量不变，已逐书验证
+
+### 重构后代码量
+
+| 文件 | 之前 | 之后 |
+|------|------|------|
+| `tools/import_book.c` | 2,477 行 | 2,049 行（-17%，且删掉的全是易错部分） |
+
+---
+
 *文档版本：2026-06-11 v4（新增问题 16-21、HTML→Markdown 格式保留、性能优化汇总）*
 *v5 (2026-09-09)：问题 22-27（PDF 页码偏移重映射、MOBI 下溢崩溃/越界读、预扫描优化、tmpfs 搬运）；新增 book2audio 有声书组件*
+*v6 (2026-09-09)：问题 28-32（碎片页合并、陈旧 key 清理、CSS 误判、EPUB NCX 标题、HNSW 引号）；统一章节接口重构 + system() 消除 + 黄金样本回归测试*
 *适用于：explore_book.sh + import_book + mobi_wrapper + epub_wrapper 最新版本*

@@ -10,6 +10,7 @@
 #include <vector>
 #include <map>
 #include <string>
+#include <functional>
 
 #include <zip.h>
 #include <libxml/parser.h>
@@ -308,17 +309,244 @@ static std::string resolve_path(const std::string& opf_path, const std::string& 
     return base + href;
 }
 
+// trim 首尾空白
+static std::string trim_str(const std::string& s) {
+    size_t b = s.find_first_not_of(" \n\r\t");
+    if (b == std::string::npos) return "";
+    size_t e = s.find_last_not_of(" \n\r\t");
+    return s.substr(b, e - b + 1);
+}
+
+// 去掉 href 中的 #anchor
+static std::string strip_anchor(const std::string& href) {
+    size_t h = href.find('#');
+    return h == std::string::npos ? href : href.substr(0, h);
+}
+
+// 从 toc.ncx（EPUB2 权威目录）提取 文件路径 -> 章节标题 映射
+// <title>/<h1> 经常为空或只有泛型模板文本，NCX 的 navLabel 才是真实章节名
+static std::map<std::string, std::string> parse_ncx_titles(zip_t* za, const std::string& ncx_path) {
+    std::map<std::string, std::string> titles;
+    size_t len;
+    char* data = zip_read_file(za, ncx_path.c_str(), &len);
+    if (!data) return titles;
+    
+    xmlDocPtr doc = xmlReadMemory(data, (int)len, nullptr, nullptr, 0);
+    free(data);
+    if (!doc) return titles;
+    
+    std::string base = ncx_path.substr(0, ncx_path.find_last_of('/') + 1);
+    xmlNodePtr root = xmlDocGetRootElement(doc);
+    // 遍历所有 navPoint：navLabel>text 是标题，content@src 是目标文件
+    std::function<void(xmlNodePtr)> walk = [&](xmlNodePtr node) {
+        for (; node; node = node->next) {
+            if (node->type == XML_ELEMENT_NODE &&
+                strcasecmp((const char*)node->name, "navPoint") == 0) {
+                std::string label, src;
+                for (xmlNodePtr c = node->children; c; c = c->next) {
+                    if (c->type != XML_ELEMENT_NODE) continue;
+                    if (strcasecmp((const char*)c->name, "navLabel") == 0) {
+                        for (xmlNodePtr t = c->children; t; t = t->next) {
+                            if (t->type == XML_ELEMENT_NODE &&
+                                strcasecmp((const char*)t->name, "text") == 0) {
+                                xmlChar* content = xmlNodeGetContent(t);
+                                if (content) { label = (const char*)content; xmlFree(content); }
+                            }
+                        }
+                    } else if (strcasecmp((const char*)c->name, "content") == 0) {
+                        xmlChar* s = xmlGetProp(c, BAD_CAST "src");
+                        if (s) { src = (const char*)s; xmlFree(s); }
+                    }
+                }
+                label = trim_str(label);
+                if (!label.empty() && !src.empty()) {
+                    std::string path = base + strip_anchor(src);
+                    // 同一文件的第一个 navPoint 是章节标题，其余是小节
+                    if (titles.find(path) == titles.end()) {
+                        titles[path] = label;
+                    }
+                }
+            }
+            if (node->children) walk(node->children);
+        }
+    };
+    if (root) walk(root->children);
+    xmlFreeDoc(doc);
+    return titles;
+}
+
+// 从 nav.xhtml（EPUB3 目录）提取 文件路径 -> 章节标题 映射
+static std::map<std::string, std::string> parse_nav_titles(zip_t* za, const std::string& nav_path) {
+    std::map<std::string, std::string> titles;
+    size_t len;
+    char* data = zip_read_file(za, nav_path.c_str(), &len);
+    if (!data) return titles;
+    
+    htmlDocPtr doc = htmlReadMemory(data, (int)len, nullptr, "UTF-8",
+                                    HTML_PARSE_RECOVER | HTML_PARSE_NOERROR | HTML_PARSE_NOWARNING);
+    free(data);
+    if (!doc) return titles;
+    
+    std::string base = nav_path.substr(0, nav_path.find_last_of('/') + 1);
+    xmlNodePtr root = xmlDocGetRootElement(doc);
+    std::function<void(xmlNodePtr)> walk = [&](xmlNodePtr node) {
+        for (; node; node = node->next) {
+            if (node->type == XML_ELEMENT_NODE &&
+                strcasecmp((const char*)node->name, "a") == 0) {
+                xmlChar* href = xmlGetProp(node, BAD_CAST "href");
+                xmlChar* content = xmlNodeGetContent(node);
+                if (href && content) {
+                    std::string label = trim_str((const char*)content);
+                    std::string path = base + strip_anchor((const char*)href);
+                    if (!label.empty() && titles.find(path) == titles.end()) {
+                        titles[path] = label;
+                    }
+                }
+                if (href) xmlFree(href);
+                if (content) xmlFree(content);
+            }
+            if (node->children) walk(node->children);
+        }
+    };
+    if (root) walk(root->children);
+    xmlFreeDoc(doc);
+    return titles;
+}
+
+
 // =============================================================================
-// API 实现
+// 共享解析助手（epub_extract_text 与 epub_get_book 共用）
 // =============================================================================
+
+struct OpfInfo {
+    std::map<std::string, std::string> manifest;  // id -> href
+    std::vector<std::string> spine_ids;           // idref 顺序
+};
+
+// 解析 OPF：metadata（书名/作者）+ manifest + spine
+static bool parse_opf(EpubHandle* h, const std::string& opf_path, OpfInfo& info) {
+    size_t opf_len;
+    char* opf_data = zip_read_file(h->za, opf_path.c_str(), &opf_len);
+    if (!opf_data) return false;
+    
+    xmlDocPtr opf_doc = xmlReadMemory(opf_data, (int)opf_len, nullptr, nullptr, 0);
+    free(opf_data);
+    if (!opf_doc) return false;
+    
+    xmlNodePtr opf_root = xmlDocGetRootElement(opf_doc);
+    if (!opf_root) { xmlFreeDoc(opf_doc); return false; }
+    
+    for (xmlNodePtr child = opf_root->children; child; child = child->next) {
+        if (child->type != XML_ELEMENT_NODE) continue;
+        const char* name = (const char*)child->name;
+        
+        if (strcasecmp(name, "metadata") == 0) {
+            for (xmlNodePtr m = child->children; m; m = m->next) {
+                if (m->type != XML_ELEMENT_NODE) continue;
+                const char* mname = (const char*)m->name;
+                if (strcasecmp(mname, "title") == 0 || strcasecmp(mname, "dc:title") == 0) {
+                    std::string t = xml_node_text(m);
+                    if (!t.empty() && h->title[0] == '\0') {
+                        strncpy(h->title, t.c_str(), sizeof(h->title) - 1);
+                    }
+                } else if (strcasecmp(mname, "creator") == 0 || strcasecmp(mname, "dc:creator") == 0) {
+                    std::string a = xml_node_text(m);
+                    if (!a.empty() && h->author[0] == '\0') {
+                        strncpy(h->author, a.c_str(), sizeof(h->author) - 1);
+                    }
+                }
+            }
+        }
+        else if (strcasecmp(name, "manifest") == 0) {
+            for (xmlNodePtr item = child->children; item; item = item->next) {
+                if (item->type != XML_ELEMENT_NODE) continue;
+                if (strcasecmp((const char*)item->name, "item") != 0) continue;
+                xmlChar* id = xmlGetProp(item, BAD_CAST "id");
+                xmlChar* href = xmlGetProp(item, BAD_CAST "href");
+                if (id && href) info.manifest[(const char*)id] = (const char*)href;
+                if (id) xmlFree(id);
+                if (href) xmlFree(href);
+            }
+        }
+        else if (strcasecmp(name, "spine") == 0) {
+            for (xmlNodePtr itemref = child->children; itemref; itemref = itemref->next) {
+                if (itemref->type != XML_ELEMENT_NODE) continue;
+                if (strcasecmp((const char*)itemref->name, "itemref") != 0) continue;
+                xmlChar* idref = xmlGetProp(itemref, BAD_CAST "idref");
+                if (idref) {
+                    info.spine_ids.push_back((const char*)idref);
+                    xmlFree(idref);
+                }
+            }
+        }
+    }
+    xmlFreeDoc(opf_doc);
+    return true;
+}
+
+// 从权威目录（NCX/nav）加载 文件路径 -> 章节标题 映射
+static std::map<std::string, std::string> load_toc_titles(zip_t* za, const std::string& opf_path,
+                                                          const std::map<std::string, std::string>& manifest) {
+    std::string ncx_href, nav_href;
+    for (const auto& kv : manifest) {
+        const std::string& href = kv.second;
+        if (href.size() > 4 && href.compare(href.size() - 4, 4, ".ncx") == 0) {
+            ncx_href = href;
+        }
+        if (href.find("nav") != std::string::npos &&
+            (href.find(".xhtml") != std::string::npos || href.find(".html") != std::string::npos)) {
+            nav_href = href;
+        }
+    }
+    std::map<std::string, std::string> toc;
+    if (!ncx_href.empty()) {
+        toc = parse_ncx_titles(za, resolve_path(opf_path, ncx_href));
+    }
+    if (toc.empty() && !nav_href.empty()) {
+        toc = parse_nav_titles(za, resolve_path(opf_path, nav_href));
+    }
+    return toc;
+}
+
+// 解析单个 spine XHTML 的章节标题：权威目录优先，<h1>/<title> 兜底
+static std::string resolve_chapter_title(htmlDocPtr html_doc,
+                                         const std::map<std::string, std::string>& toc_titles,
+                                         const std::string& file_path) {
+    std::string ch_title;
+    auto toc_it = toc_titles.find(file_path);
+    if (toc_it != toc_titles.end()) {
+        ch_title = toc_it->second;
+    }
+    if (ch_title.empty()) {
+        xmlXPathContextPtr ctx = xmlXPathNewContext(html_doc);
+        if (ctx) {
+            xmlXPathObjectPtr title_obj = xmlXPathEvalExpression(BAD_CAST "//h1", ctx);
+            if (title_obj && title_obj->nodesetval && title_obj->nodesetval->nodeNr > 0) {
+                xmlChar* content = xmlNodeGetContent(title_obj->nodesetval->nodeTab[0]);
+                if (content) { ch_title = (const char*)content; xmlFree(content); }
+            }
+            if (trim_str(ch_title).empty()) {
+                if (title_obj) xmlXPathFreeObject(title_obj);
+                title_obj = xmlXPathEvalExpression(BAD_CAST "//title", ctx);
+                if (title_obj && title_obj->nodesetval && title_obj->nodesetval->nodeNr > 0) {
+                    xmlChar* content = xmlNodeGetContent(title_obj->nodesetval->nodeTab[0]);
+                    if (content) { ch_title = (const char*)content; xmlFree(content); }
+                }
+            }
+            if (title_obj) xmlXPathFreeObject(title_obj);
+            xmlXPathFreeContext(ctx);
+        }
+    }
+    return trim_str(ch_title);
+}
+
 
 extern "C" {
 
 /**
  * 打开 EPUB 文件
  */
-API void* epub_open(const char* path) {
-    int err;
+API void* epub_open(const char* path) {    int err;
     zip_t* za = zip_open(path, 0, &err);
     if (!za) {
         fprintf(stderr, "[EPUB] 无法打开文件: %s (err=%d)\n", path, err);
@@ -358,85 +586,22 @@ API int epub_extract_text(void* handle, char** out_text, size_t* out_len) {
         return -1;
     }
     
-    // 2. 读取并解析 OPF
-    size_t opf_len;
-    char* opf_data = zip_read_file(h->za, opf_path.c_str(), &opf_len);
-    if (!opf_data) return -1;
+    // 2. 解析 OPF（metadata + manifest + spine）
+    OpfInfo opf;
+    if (!parse_opf(h, opf_path, opf)) return -1;
     
-    xmlDocPtr opf_doc = xmlReadMemory(opf_data, (int)opf_len, nullptr, nullptr, 0);
-    free(opf_data);
-    if (!opf_doc) return -1;
-    
-    xmlNodePtr opf_root = xmlDocGetRootElement(opf_doc);
-    if (!opf_root) {
-        xmlFreeDoc(opf_doc);
-        return -1;
-    }
-    
-    // 收集 manifest 和 spine
-    std::map<std::string, std::string> manifest;  // id -> href
-    std::vector<std::string> spine_ids;            // idref 顺序
     std::vector<EpubChapter> temp_chapters;
-    
-    for (xmlNodePtr child = opf_root->children; child; child = child->next) {
-        if (child->type != XML_ELEMENT_NODE) continue;
-        const char* name = (const char*)child->name;
-        
-        // 解析 metadata
-        if (strcasecmp(name, "metadata") == 0) {
-            for (xmlNodePtr m = child->children; m; m = m->next) {
-                if (m->type != XML_ELEMENT_NODE) continue;
-                const char* mname = (const char*)m->name;
-                if (strcasecmp(mname, "title") == 0 || strcasecmp(mname, "dc:title") == 0) {
-                    std::string t = xml_node_text(m);
-                    if (!t.empty() && h->title[0] == '\0') {
-                        strncpy(h->title, t.c_str(), sizeof(h->title) - 1);
-                    }
-                } else if (strcasecmp(mname, "creator") == 0 || strcasecmp(mname, "dc:creator") == 0) {
-                    std::string a = xml_node_text(m);
-                    if (!a.empty() && h->author[0] == '\0') {
-                        strncpy(h->author, a.c_str(), sizeof(h->author) - 1);
-                    }
-                }
-            }
-        }
-        // 解析 manifest
-        else if (strcasecmp(name, "manifest") == 0) {
-            for (xmlNodePtr item = child->children; item; item = item->next) {
-                if (item->type != XML_ELEMENT_NODE) continue;
-                if (strcasecmp((const char*)item->name, "item") != 0) continue;
-                
-                xmlChar* id = xmlGetProp(item, BAD_CAST "id");
-                xmlChar* href = xmlGetProp(item, BAD_CAST "href");
-                if (id && href) {
-                    manifest[(const char*)id] = (const char*)href;
-                }
-                if (id) xmlFree(id);
-                if (href) xmlFree(href);
-            }
-        }
-        // 解析 spine
-        else if (strcasecmp(name, "spine") == 0) {
-            for (xmlNodePtr itemref = child->children; itemref; itemref = itemref->next) {
-                if (itemref->type != XML_ELEMENT_NODE) continue;
-                if (strcasecmp((const char*)itemref->name, "itemref") != 0) continue;
-                
-                xmlChar* idref = xmlGetProp(itemref, BAD_CAST "idref");
-                if (idref) {
-                    spine_ids.push_back((const char*)idref);
-                    xmlFree(idref);
-                }
-            }
-        }
-    }
     
     // 3. 按 spine 顺序读取各章节
     std::string full_text;
     size_t current_offset = 0;
     
-    for (const auto& idref : spine_ids) {
-        auto it = manifest.find(idref);
-        if (it == manifest.end()) continue;
+    // 从权威目录提取章节标题映射（NCX 优先，EPUB3 nav 兜底）
+    std::map<std::string, std::string> toc_titles = load_toc_titles(h->za, opf_path, opf.manifest);
+    
+    for (const auto& idref : opf.spine_ids) {
+        auto it = opf.manifest.find(idref);
+        if (it == opf.manifest.end()) continue;
         
         std::string file_path = resolve_path(opf_path, it->second);
         
@@ -455,25 +620,7 @@ API int epub_extract_text(void* handle, char** out_text, size_t* out_len) {
             std::string chapter_text;
             extract_text_from_html(html_root, chapter_text);
             
-            // 记录章节信息（如果有标题）
-            // 尝试从 HTML <title> 或 <h1> 获取章节标题
-            std::string ch_title;
-            xmlXPathContextPtr ctx = xmlXPathNewContext(html_doc);
-            if (ctx) {
-                xmlXPathObjectPtr title_obj = xmlXPathEvalExpression(BAD_CAST "//title", ctx);
-                if (title_obj && title_obj->nodesetval && title_obj->nodesetval->nodeNr > 0) {
-                    ch_title = xml_node_text(title_obj->nodesetval->nodeTab[0]);
-                }
-                if (ch_title.empty()) {
-                    xmlXPathFreeObject(title_obj);
-                    title_obj = xmlXPathEvalExpression(BAD_CAST "//h1", ctx);
-                    if (title_obj && title_obj->nodesetval && title_obj->nodesetval->nodeNr > 0) {
-                        ch_title = xml_node_text(title_obj->nodesetval->nodeTab[0]);
-                    }
-                }
-                if (title_obj) xmlXPathFreeObject(title_obj);
-                xmlXPathFreeContext(ctx);
-            }
+            std::string ch_title = resolve_chapter_title(html_doc, toc_titles, file_path);
             
             if (!ch_title.empty()) {
                 EpubChapter ch;
@@ -506,8 +653,6 @@ API int epub_extract_text(void* handle, char** out_text, size_t* out_len) {
         
         xmlFreeDoc(html_doc);
     }
-    
-    xmlFreeDoc(opf_doc);
     
     // 3.5 从 XHTML 内容中提取真实章节标题
     // 对于标题是纯数字的章节，从章节文本中提取 "Chapter X:" 开头的行作为标题
@@ -558,6 +703,106 @@ API int epub_extract_text(void* handle, char** out_text, size_t* out_len) {
     *out_text = h->text_cache;
     *out_len = h->text_cache_len;
     return 0;
+}
+
+// =============================================================================
+// 统一章节接口：直接输出 {title, level, text}，调用者无需关心 spine/偏移
+// =============================================================================
+
+struct EpubBookChapter {
+    char* title;
+    int level;
+    char* text;
+    size_t text_len;
+};
+
+/**
+ * 获取整本书的章节列表（含正文）
+ * 每个 spine XHTML 一章；无标题文件给 "untitled" 兜底名（不丢内容）
+ * @return 0 成功；调用者用 epub_free_book 释放
+ */
+API int epub_get_book(void* handle, EpubBookChapter** out_chapters, int* out_count) {
+    EpubHandle* h = (EpubHandle*)handle;
+    if (!h || !h->za) return -1;
+    
+    std::string opf_path = get_opf_path(h->za);
+    if (opf_path.empty()) return -1;
+    
+    OpfInfo opf;
+    if (!parse_opf(h, opf_path, opf)) return -1;
+    
+    std::map<std::string, std::string> toc_titles = load_toc_titles(h->za, opf_path, opf.manifest);
+    
+    std::vector<EpubBookChapter> result;
+    std::string full_text;
+    int untitled_idx = 0;
+    
+    for (const auto& idref : opf.spine_ids) {
+        auto it = opf.manifest.find(idref);
+        if (it == opf.manifest.end()) continue;
+        
+        std::string file_path = resolve_path(opf_path, it->second);
+        
+        size_t html_len;
+        char* html_data = zip_read_file(h->za, file_path.c_str(), &html_len);
+        if (!html_data) continue;
+        
+        htmlDocPtr html_doc = htmlReadMemory(html_data, (int)html_len, nullptr, "UTF-8",
+                                              HTML_PARSE_RECOVER | HTML_PARSE_NOERROR | HTML_PARSE_NOWARNING);
+        free(html_data);
+        if (!html_doc) continue;
+        
+        xmlNodePtr html_root = xmlDocGetRootElement(html_doc);
+        if (html_root) {
+            std::string chapter_text;
+            extract_text_from_html(html_root, chapter_text);
+            chapter_text = trim_str(chapter_text);
+            if (!chapter_text.empty()) {
+                std::string ch_title = resolve_chapter_title(html_doc, toc_titles, file_path);
+                if (ch_title.empty()) {
+                    char buf[32];
+                    snprintf(buf, sizeof(buf), "untitled-%d", ++untitled_idx);
+                    ch_title = buf;
+                }
+                EpubBookChapter ch;
+                ch.title = strdup(ch_title.c_str());
+                ch.level = 1;
+                ch.text_len = chapter_text.length();
+                ch.text = (char*)malloc(ch.text_len + 1);
+                if (ch.text) memcpy(ch.text, chapter_text.c_str(), ch.text_len + 1);
+                result.push_back(ch);
+                full_text += chapter_text;
+                full_text += "\n\n";
+            }
+        }
+        xmlFreeDoc(html_doc);
+    }
+    
+    // 极端情况：spine 全部为空，返回单个全文伪章节
+    if (result.empty() && !full_text.empty()) {
+        EpubBookChapter ch;
+        ch.title = strdup("full");
+        ch.level = 0;
+        ch.text_len = full_text.length();
+        ch.text = (char*)malloc(ch.text_len + 1);
+        if (ch.text) memcpy(ch.text, full_text.c_str(), ch.text_len + 1);
+        result.push_back(ch);
+    }
+    
+    EpubBookChapter* arr = (EpubBookChapter*)malloc(sizeof(EpubBookChapter) * (result.size() ? result.size() : 1));
+    for (size_t i = 0; i < result.size(); i++) arr[i] = result[i];
+    *out_chapters = arr;
+    *out_count = (int)result.size();
+    return 0;
+}
+
+API void epub_free_book(EpubBookChapter* chapters, int count) {
+    if (!chapters) return;
+    for (int i = 0; i < count; i++) {
+        free(chapters[i].title);
+        free(chapters[i].text);
+    }
+    free(chapters);
 }
 
 /**

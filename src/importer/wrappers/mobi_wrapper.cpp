@@ -629,6 +629,86 @@ API void mobi_free_chapter_text(char* text) {
     free(text);
 }
 
+// =============================================================================
+// 统一章节接口：直接输出 {title, level, text}，调用者无需关心 posfid/posoff
+// =============================================================================
+
+struct MobiBookChapter {
+    char* title;
+    int level;
+    char* text;
+    size_t text_len;
+};
+
+/**
+ * 获取整本书的章节列表（含正文）
+ * 逐章提取；若多数章节提取失败（格式差异），回退为单个 "full" 全文伪章节
+ * @return 0 成功；调用者用 mobi_free_book 释放
+ */
+API int mobi_get_book(void* handle, MobiBookChapter** out_chapters, int* out_count) {
+    MobiHandle* h = static_cast<MobiHandle*>(handle);
+    if (!h || !h->rawml) return -1;
+
+    MobiChapter* chapters = nullptr;
+    int chapter_count = 0;
+    mobi_get_chapters(handle, &chapters, &chapter_count);
+
+    std::vector<MobiBookChapter> result;
+    int ok_count = 0;
+
+    if (chapter_count > 0) {
+        for (int i = 0; i < chapter_count; i++) {
+            if (chapters[i].level >= 2) continue;
+            char* text = nullptr;
+            size_t len = 0;
+            if (mobi_get_chapter_text(handle, i, &text, &len) == 0 && text && len > 0) {
+                MobiBookChapter ch;
+                ch.title = strdup(chapters[i].title ? chapters[i].title : "");
+                ch.level = chapters[i].level;
+                ch.text = text;
+                ch.text_len = len;
+                result.push_back(ch);
+                ok_count++;
+            }
+        }
+    }
+
+    // 回退：逐章提取大面积失败时，输出全文单章节（保持与原 import_book 兜底行为一致）
+    int eligible = 0;
+    for (int i = 0; i < chapter_count; i++) if (chapters[i].level < 2) eligible++;
+    if (ok_count < (eligible > 0 ? (eligible + 1) / 2 : 1)) {
+        for (auto& ch : result) { free(ch.title); free(ch.text); }
+        result.clear();
+        char* full = nullptr;
+        size_t full_len = 0;
+        if (mobi_extract_text(handle, &full, &full_len) == 0 && full && full_len > 0) {
+            MobiBookChapter ch;
+            ch.title = strdup("full");
+            ch.level = 0;
+            ch.text_len = full_len;
+            ch.text = (char*)malloc(full_len + 1);
+            if (ch.text) memcpy(ch.text, full, full_len + 1);
+            result.push_back(ch);
+        }
+    }
+
+    MobiBookChapter* arr = (MobiBookChapter*)malloc(sizeof(MobiBookChapter) * (result.size() ? result.size() : 1));
+    for (size_t i = 0; i < result.size(); i++) arr[i] = result[i];
+    *out_chapters = arr;
+    *out_count = (int)result.size();
+    return 0;
+}
+
+API void mobi_free_book(MobiBookChapter* chapters, int count) {
+    if (!chapters) return;
+    for (int i = 0; i < count; i++) {
+        free(chapters[i].title);
+        free(chapters[i].text);
+    }
+    free(chapters);
+}
+
+
 /**
  * 释放章节数组
  * @param chapters mobi_get_chapters 返回的数组

@@ -7,6 +7,7 @@
 #include <cstring>
 #include <cstdlib>
 #include <string>
+#include <vector>
 
 extern "C" {
 #include "mupdf/fitz.h"
@@ -259,6 +260,139 @@ API void pdf_free_text(char* text) {
     // 实际释放由 pdf_close 统一处理缓存
     (void)text;
 }
+
+// =============================================================================
+// 统一章节接口：直接输出 {title, level, text}，调用者无需关心页码/偏移换算
+// =============================================================================
+
+struct PdfBookChapter {
+    char* title;
+    int level;
+    char* text;
+    size_t text_len;
+};
+
+// 逐页提取文本（内部使用，不输出分页标记）
+static std::vector<std::string> pdf_extract_pages_vec(PdfHandle* h) {
+    std::vector<std::string> pages;
+    int page_count = pdf_get_page_count(h);
+    if (page_count < 0) return pages;
+
+    for (int i = 0; i < page_count; i++) {
+        std::string page_text;
+        fz_page* page = nullptr;
+        fz_try(h->ctx) {
+            page = fz_load_page(h->ctx, h->doc, i);
+        }
+        fz_catch(h->ctx) {
+            pages.push_back(page_text);
+            continue;
+        }
+        if (!page) { pages.push_back(page_text); continue; }
+
+        fz_stext_page* text_page = nullptr;
+        fz_try(h->ctx) {
+            text_page = fz_new_stext_page_from_page(h->ctx, page, nullptr);
+        }
+        fz_catch(h->ctx) {
+            fz_drop_page(h->ctx, page);
+            pages.push_back(page_text);
+            continue;
+        }
+        if (text_page) {
+            for (fz_stext_block* block = text_page->first_block; block; block = block->next) {
+                if (block->type == FZ_STEXT_BLOCK_TEXT) {
+                    for (fz_stext_line* line = block->u.t.first_line; line; line = line->next) {
+                        for (fz_stext_char* ch = line->first_char; ch; ch = ch->next) {
+                            char buf[8];
+                            int len = fz_runetochar(buf, ch->c);
+                            page_text.append(buf, len);
+                        }
+                        page_text += "\n";
+                    }
+                    page_text += "\n";
+                }
+            }
+            fz_drop_stext_page(h->ctx, text_page);
+        }
+        fz_drop_page(h->ctx, page);
+        pages.push_back(page_text);
+    }
+    return pages;
+}
+
+/**
+ * 获取整本书的章节列表（含正文）
+ * 章节范围 = 本 outline 页码 → 下一个 level<2 outline 页码
+ * 无 outline 时返回单个 "full" 伪章节
+ * @return 章节数，-1 失败；调用者用 pdf_free_book 释放
+ */
+API int pdf_get_book(void* handle, PdfBookChapter** out_chapters, int* out_count) {
+    PdfHandle* h = static_cast<PdfHandle*>(handle);
+    if (!h || !h->doc) return -1;
+
+    std::vector<std::string> pages = pdf_extract_pages_vec(h);
+
+    PdfChapter* outlines = nullptr;
+    int outline_count = 0;
+    pdf_get_chapters(h, &outlines, &outline_count);
+
+    std::vector<PdfBookChapter> result;
+    auto concat_pages = [&](size_t from, size_t to) -> std::string {
+        std::string s;
+        if (from >= pages.size()) return s;
+        if (to > pages.size()) to = pages.size();
+        for (size_t i = from; i < to; i++) {
+            s += pages[i];
+            s += "\n";
+        }
+        return s;
+    };
+
+    if (outline_count > 0) {
+        for (int i = 0; i < outline_count; i++) {
+            if (outlines[i].level >= 2) continue;
+            size_t start = outlines[i].page;
+            size_t end = pages.size();
+            for (int j = i + 1; j < outline_count; j++) {
+                if (outlines[j].level < 2) { end = outlines[j].page; break; }
+            }
+            std::string text = concat_pages(start, end);
+            PdfBookChapter ch;
+            ch.title = strdup(outlines[i].title ? outlines[i].title : "");
+            ch.level = outlines[i].level;
+            ch.text_len = text.length();
+            ch.text = (char*)malloc(ch.text_len + 1);
+            if (ch.text) memcpy(ch.text, text.c_str(), ch.text_len + 1);
+            result.push_back(ch);
+        }
+    } else {
+        std::string text = concat_pages(0, pages.size());
+        PdfBookChapter ch;
+        ch.title = strdup("full");
+        ch.level = 0;
+        ch.text_len = text.length();
+        ch.text = (char*)malloc(ch.text_len + 1);
+        if (ch.text) memcpy(ch.text, text.c_str(), ch.text_len + 1);
+        result.push_back(ch);
+    }
+
+    PdfBookChapter* arr = (PdfBookChapter*)malloc(sizeof(PdfBookChapter) * result.size());
+    for (size_t i = 0; i < result.size(); i++) arr[i] = result[i];
+    *out_chapters = arr;
+    *out_count = (int)result.size();
+    return 0;
+}
+
+API void pdf_free_book(PdfBookChapter* chapters, int count) {
+    if (!chapters) return;
+    for (int i = 0; i < count; i++) {
+        free(chapters[i].title);
+        free(chapters[i].text);
+    }
+    free(chapters);
+}
+
 
 /**
  * 关闭 PDF 文件并释放资源

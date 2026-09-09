@@ -34,6 +34,7 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <errno.h>
 #include <math.h>
@@ -608,62 +609,6 @@ static void free_paragraphs(char** paragraphs, int count) {
 static int flush_tmp_md(const char* tmp_md_dir, const char* md_dir);
 
 /*
- * 将章节表中的"页码"偏移重写为文本字节偏移。
- *
- * 背景：PDF/OCR 的章节 offset 是页码（pdf outline 的 page / OCR 的 <PAGE> 序号），
- * 而 import_book() 策略0 把 offset 当作合并文本的字节偏移使用。语义不一致会导致
- * 章节切分完全错乱（实测 DDIA：每章都包含整本书开头，全部超 200KB 被截断）。
- *
- * 本函数扫描文本中的分页标记（MuPDF: "--- Page Break ---"，OCR: "<PAGE>"），
- * 建立 页码→字节偏移 映射后原地重写 chapters[].offset。
- * 标记 i 结束第 i 页，第 i+1 页从标记之后开始。
- */
-static void remap_page_offsets_to_bytes(const char* text, size_t text_len,
-                                        const char* marker,
-                                        ChapterInfo* chapters, int chapter_count) {
-    if (!text || !chapters || chapter_count <= 0) return;
-    size_t marker_len = strlen(marker);
-
-    // 章节引用的最大页码决定映射表大小
-    size_t max_page = 0;
-    for (int i = 0; i < chapter_count; i++) {
-        if (chapters[i].offset > max_page) max_page = chapters[i].offset;
-    }
-    size_t table_cap = max_page + 2;
-    size_t* page_start = calloc(table_cap, sizeof(size_t));
-    if (!page_start) return;
-
-    size_t page = 0;
-    page_start[0] = 0;
-    const char* p = text;
-    const char* end = text + text_len;
-    while (page < table_cap - 1) {
-        const char* m = strstr(p, marker);
-        if (!m || m >= end) break;
-        const char* next = m + marker_len;
-        while (next < end && (*next == '\r' || *next == '\n')) next++;
-        page++;
-        page_start[page] = (size_t)(next - text);
-        p = next;
-    }
-
-    size_t total_pages = page + 1;
-    int remapped = 0;
-    for (int i = 0; i < chapter_count; i++) {
-        if (chapters[i].offset < total_pages) {
-            chapters[i].offset = page_start[chapters[i].offset];
-            remapped++;
-        } else {
-            // 越界页码：置 0 标记为不可用，走标题匹配兜底
-            chapters[i].offset = 0;
-        }
-    }
-    printf("  Remapped %d chapter offsets (page# -> byte offset, %zu pages)\n",
-           remapped, total_pages);
-    free(page_start);
-}
-
-/*
  * 处理单个章节（CPU/GPU 密集阶段，可并行）
  * 
  * 流程：
@@ -968,34 +913,30 @@ static void free_chapter_result(chapter_result_t* result) {
     free(result);
 }
 
-/*
- * 导入单个章节（兼容旧接口，内部使用两阶段处理）
- */
-static int import_chapter(cache_t* cache, const char* namespace,
-                          const char* md_dir, const char* chapter_dirname,
-                          const char* chapter_title,
-                          const char* text, size_t text_len) {
-    chapter_result_t* result = process_chapter(md_dir, chapter_dirname, chapter_title, text, text_len);
-    if (!result) return 0;
-    
-    int pages = write_chapter_results(cache, namespace, result, NULL);
-    free_chapter_result(result);
-    
-    printf("  Chapter '%s': %d valid pages\n", chapter_title, pages);
-    return pages;
-}
+// =============================================================================
+// 统一章节导入：wrapper 的 get_book() 直接输出 {title, level, text}，
+// 不再需要"拼接全文 + 偏移/标题匹配找回章节"的旧路径（问题 22 的根源）
+// =============================================================================
+
+typedef struct {
+    char* title;
+    int level;
+    char* text;
+    size_t text_len;
+} UnifiedChapter;
 
 /*
- * 导入整本书
+ * 导入整本书（统一路径）
+ * 只做：level/Part 过滤 → 目录命名 → 分块/向量 → 写盘/缓存
  */
-static int import_book(cache_t* cache, const char* namespace,
-                       const char* md_dir,
-                       const char* title, const char* author,
-                       const char* text, size_t text_len,
-                       ChapterInfo* chapters, int chapter_count) {
+static int import_book_chapters(cache_t* cache, const char* namespace,
+                                const char* md_dir,
+                                const char* title, const char* author,
+                                const UnifiedChapter* chapters, int chapter_count) {
     metric_timer_ctx_t import_timer = metric_timer_start("mydb_import_duration_seconds", "format=text");
     char key[1024];
     char value[4096];
+    int debug = getenv("IMPORT_DEBUG") != NULL;
     
     // 创建书籍输出目录
     mkdir_p(md_dir);
@@ -1007,7 +948,6 @@ static int import_book(cache_t* cache, const char* namespace,
              title, author, chapter_count);
     cache_set(cache, key, value, 0);
     
-    // 保存元数据到磁盘（方便直接读取）
     char meta_file[1024];
     snprintf(meta_file, sizeof(meta_file), "%s/_meta.json", md_dir);
     FILE* meta_fp = fopen(meta_file, "w");
@@ -1015,9 +955,7 @@ static int import_book(cache_t* cache, const char* namespace,
         fprintf(meta_fp, "{\n");
         fprintf(meta_fp, "  \"title\": \"%s\",\n", title);
         fprintf(meta_fp, "  \"author\": \"%s\",\n", author);
-        fprintf(meta_fp, "  \"chapters\": %d,\n", chapter_count);
-        fprintf(meta_fp, "  \"total_paragraphs\": 0,\n");
-        fprintf(meta_fp, "  \"imported_at\": \"%s\"\n", "2026-01-01");
+        fprintf(meta_fp, "  \"chapters\": %d\n", chapter_count);
         fprintf(meta_fp, "}\n");
         fclose(meta_fp);
     }
@@ -1025,310 +963,53 @@ static int import_book(cache_t* cache, const char* namespace,
     printf("Importing book: %s by %s\n", title, author);
     printf("Output directory: %s\n", md_dir);
     printf("Namespace: %s\n", namespace);
-    printf("Chapters: %d\n", chapter_count);
-    printf("\n");
+    printf("Chapters: %d\n\n", chapter_count);
     
-    int total_pages = 0;
+    chapter_result_t** results = calloc(chapter_count > 0 ? chapter_count : 1,
+                                        sizeof(chapter_result_t*));
+    if (!results) return 0;
     
-    if (chapter_count <= 0 || chapters == NULL) {
-        // 没有章节信息，整本书作为一个章节
-        char chapter_ns[256];
-        snprintf(chapter_ns, sizeof(chapter_ns), "full");
+    // 处理所有章节（分块、过滤、向量）
+    int valid = 0;
+    for (int i = 0; i < chapter_count; i++) {
+        if (chapters[i].level >= 2) continue;
+        const char* p = chapters[i].title;
+        while (*p == ' ' || *p == '\t') p++;
+        if (strncasecmp(p, "Part", 4) == 0 && chapters[i].level == 0) continue;
+        if (!chapters[i].text || chapters[i].text_len == 0) continue;
         
-        total_pages = import_chapter(cache, namespace, md_dir, chapter_ns,
-                                     title, text, text_len);
-    } else {
-        // 按章节导入
-        // 过滤深层级小节，避免空章节和重复内容
-        int main_chapter_count = 0;
-        for (int i = 0; i < chapter_count; i++) {
-            if (chapters[i].level < 2) main_chapter_count++;
+        char ch_dir[256];
+        chapter_dirname(ch_dir, sizeof(ch_dir), valid, chapters[i].title);
+        results[valid] = process_chapter(md_dir, ch_dir, chapters[i].title,
+                                         chapters[i].text, chapters[i].text_len);
+        if (debug) {
+            fprintf(stderr, "[dbg] i=%d dir=%s len=%zu items=%d\n",
+                    valid, ch_dir, chapters[i].text_len,
+                    results[valid] ? results[valid]->item_count : -1);
         }
-        printf("Main chapter count: %d\n", main_chapter_count);
-        
-        // ====== 阶段一：串行收集所有章节边界和目录名 ======
-        typedef struct {
-            char ch_dir[256];
-            const char* chapter_text;
-            size_t chapter_len;
-            int valid;
-        } chapter_bound_t;
-        
-        chapter_bound_t* bounds = calloc(chapter_count, sizeof(chapter_bound_t));
-        if (!bounds) {
-            fprintf(stderr, "Failed to allocate chapter bounds\n");
-            return 0;
-        }
-        
-        int chapter_idx = 0;
-        int valid_chapter_count = 0;
-        for (int i = 0; i < chapter_count; i++) {
-            // 跳过深层级小节（level >= 2）
-            if (chapters[i].level >= 2) continue;
-            
-            // 跳过 Part 级别章节
-            const char* p = chapters[i].title;
-            while (*p && (*p == ' ' || *p == '\t')) p++;
-            if (strncasecmp(p, "Part", 4) == 0 && chapters[i].level == 0) continue;
-            
-            chapter_dirname(bounds[valid_chapter_count].ch_dir, 
-                           sizeof(bounds[valid_chapter_count].ch_dir), chapter_idx, chapters[i].title);
-            chapter_idx++;
-            
-            // 定位章节文本范围（串行，因为涉及全局 text 指针运算）
-            const char* chapter_text = text;
-            size_t chapter_len = text_len;
-            const char* best_pos = NULL;
-            size_t best_len = 0;
-            
-            if (main_chapter_count > 1) {
-                // 策略0: 优先使用MOBI wrapper提供的offset信息
-                if (chapters[i].offset > 0 && chapters[i].offset < text_len) {
-                    chapter_text = text + chapters[i].offset;
-                    size_t next_offset = text_len;
-                    for (int j = i + 1; j < chapter_count; j++) {
-                        if (chapters[j].level < 2 && chapters[j].offset > chapters[i].offset 
-                            && chapters[j].offset < text_len) {
-                            next_offset = chapters[j].offset;
-                            break;
-                        }
-                    }
-                    chapter_len = next_offset - chapters[i].offset;
-                    // 偏移来自 wrapper（EPUB=字节偏移，PDF/OCR=已重映射的页偏移），
-                    // 只排除"整本书"级别的错误区间即可
-                    if (chapter_len > 100 && chapter_len < text_len * 9 / 10) {
-                        goto store_bound;
-                    }
-                }
-                
-                // 策略1: 行首标题匹配
-                best_pos = NULL;
-                best_len = 0;
-                const char* search = text;
-                size_t max_chapter_len = text_len / 3;
-                
-                while (search < text + text_len) {
-                    const char* found = strstr(search, chapters[i].title);
-                    if (!found) break;
-                    int is_line_start = (found == text) || 
-                                        (found[-1] == '\n') || (found[-1] == '\r') ||
-                                        (found[-1] == ' ') || (found[-1] == '\t');
-                    size_t body_len = text_len - (found - text);
-                    if (i < chapter_count - 1) {
-                        const char* next_title = strstr(found + 1, chapters[i+1].title);
-                        if (next_title) body_len = next_title - found;
-                    }
-                    if (!is_line_start && body_len > max_chapter_len) {
-                        search = found + 1; continue;
-                    }
-                    if (body_len < 1000) {
-                        search = found + 1; continue;
-                    }
-                    if (body_len > best_len) {
-                        best_len = body_len;
-                        best_pos = found;
-                    }
-                    search = found + 1;
-                }
-                
-                // 策略2: 章节号前缀匹配
-                if (!best_pos) {
-                    char chapter_prefix[64] = {0};
-                    const char* p = chapters[i].title;
-                    while (*p && (*p == ' ' || *p == '\t')) p++;
-                    if (strncmp(p, "第", 3) == 0 || strncmp(p, "推荐序", 9) == 0 ||
-                        strncmp(p, "附录", 6) == 0 || strncmp(p, "后记", 6) == 0) {
-                        const char* end = p;
-                        while (*end && *end != ' ' && *end != '\t') end++;
-                        size_t prefix_len = end - p;
-                        if (prefix_len < sizeof(chapter_prefix)) {
-                            memcpy(chapter_prefix, p, prefix_len);
-                            chapter_prefix[prefix_len] = '\0';
-                        }
-                    }
-                    if (chapter_prefix[0]) {
-                        search = text;
-                        while (search < text + text_len) {
-                            const char* found = strstr(search, chapter_prefix);
-                            if (!found) break;
-                            size_t body_len = text_len - (found - text);
-                            if (i < chapter_count - 1) {
-                                char next_prefix[64] = {0};
-                                const char* np = chapters[i+1].title;
-                                while (*np && (*np == ' ' || *np == '\t')) np++;
-                                if (strncmp(np, "第", 3) == 0 || strncmp(np, "推荐序", 9) == 0 ||
-                                    strncmp(np, "附录", 6) == 0 || strncmp(np, "后记", 6) == 0) {
-                                    const char* end = np;
-                                    while (*end && *end != ' ' && *end != '\t') end++;
-                                    size_t prefix_len = end - np;
-                                    if (prefix_len < sizeof(next_prefix)) {
-                                        memcpy(next_prefix, np, prefix_len);
-                                        next_prefix[prefix_len] = '\0';
-                                    }
-                                }
-                                if (next_prefix[0]) {
-                                    const char* next_found = strstr(found + strlen(chapter_prefix), next_prefix);
-                                    if (next_found) body_len = next_found - found;
-                                }
-                            }
-                            if (body_len > max_chapter_len) {
-                                search = found + 1; continue;
-                            }
-                            if (body_len > best_len) {
-                                best_len = body_len;
-                                best_pos = found;
-                            }
-                            search = found + 1;
-                        }
-                    }
-                }
-                
-                // 策略3: 英文书章节前缀匹配
-                if (!best_pos) {
-                    char chapter_prefix[64] = {0};
-                    const char* p = chapters[i].title;
-                    while (*p && (*p == ' ' || *p == '\t')) p++;
-                    if (isdigit((unsigned char)*p)) {
-                        int chapter_num = atoi(p);
-                        if (chapter_num > 0) {
-                            snprintf(chapter_prefix, sizeof(chapter_prefix), "Chapter %d:", chapter_num);
-                        }
-                    } else if (strncasecmp(p, "chapter", 7) == 0) {
-                        const char* end = p + 7;
-                        while (*end && (*end == ' ' || isdigit((unsigned char)*end))) end++;
-                        size_t prefix_len = end - p;
-                        if (prefix_len > 7 && prefix_len < sizeof(chapter_prefix)) {
-                            memcpy(chapter_prefix, p, prefix_len);
-                            chapter_prefix[prefix_len] = '\0';
-                        }
-                    }
-                    if (chapter_prefix[0]) {
-                        search = text;
-                        while (search < text + text_len) {
-                            const char* found = strstr(search, chapter_prefix);
-                            if (!found) break;
-                            int is_line_start = (found == text) || 
-                                                (found[-1] == '\n') || (found[-1] == '\r') ||
-                                                (found[-1] == ' ') || (found[-1] == '\t');
-                            size_t body_len = text_len - (found - text);
-                            if (i < chapter_count - 1) {
-                                char next_prefix[64] = {0};
-                                const char* np = chapters[i+1].title;
-                                while (*np && (*np == ' ' || *np == '\t')) np++;
-                                if (isdigit((unsigned char)*np)) {
-                                    int next_num = atoi(np);
-                                    if (next_num > 0) {
-                                        snprintf(next_prefix, sizeof(next_prefix), "Chapter %d", next_num);
-                                    }
-                                } else if (strncasecmp(np, "chapter", 7) == 0) {
-                                    const char* end = np + 7;
-                                    while (*end && (*end == ' ' || isdigit((unsigned char)*end))) end++;
-                                    size_t prefix_len = end - np;
-                                    if (prefix_len > 7 && prefix_len < sizeof(next_prefix)) {
-                                        memcpy(next_prefix, np, prefix_len);
-                                        next_prefix[prefix_len] = '\0';
-                                    }
-                                }
-                                if (next_prefix[0]) {
-                                    const char* next_found = strstr(found + strlen(chapter_prefix), next_prefix);
-                                    if (next_found) body_len = next_found - found;
-                                }
-                            }
-                            if (!is_line_start && body_len > max_chapter_len) {
-                                search = found + 1; continue;
-                            }
-                            if (body_len > best_len) {
-                                best_len = body_len;
-                                best_pos = found;
-                            }
-                            search = found + 1;
-                        }
-                    }
-                }
-                
-                if (best_pos) {
-                    chapter_text = best_pos;
-                    chapter_len = best_len;
-                }
-            }
-            
-            store_bound:
-            // 单章上限 2MB（约 60 万字），超出说明边界检测失败而非正常章节
-            if (chapter_len > 2000000) {
-                fprintf(stderr, "  Warning: Chapter '%s' too long (%zu bytes), truncating to 2MB\n", 
-                        chapters[i].title, chapter_len);
-                chapter_len = 2000000;
-            }
-            
-            bounds[valid_chapter_count].chapter_text = chapter_text;
-            bounds[valid_chapter_count].chapter_len = chapter_len;
-            bounds[valid_chapter_count].valid = 1;
-            valid_chapter_count++;
-        }
-        
-        // ====== 阶段二：并行处理所有章节（CPU/GPU 密集）======
-        printf("  Processing chapters (serial for vector safety)...\n", valid_chapter_count);
-        
-        chapter_result_t** results = calloc(valid_chapter_count, sizeof(chapter_result_t*));
-        if (!results) {
-            fprintf(stderr, "Failed to allocate results array\n");
-            free(bounds);
-            return 0;
-        }
-        
-        // serial (vector safety)
-        for (int i = 0; i < valid_chapter_count; i++) {
-            if (!bounds[i].valid) continue;
-            
-            // 找到对应的 chapter 标题
-            int ch_idx = 0;
-            const char* title = "Unknown";
-            for (int j = 0; j < chapter_count; j++) {
-                if (chapters[j].level >= 2) continue;
-                const char* p = chapters[j].title;
-                while (*p && (*p == ' ' || *p == '\t')) p++;
-                if (strncasecmp(p, "Part", 4) == 0 && chapters[j].level == 0) continue;
-                if (ch_idx == i) {
-                    title = chapters[j].title;
-                    break;
-                }
-                ch_idx++;
-            }
-            
-            results[i] = process_chapter(md_dir, bounds[i].ch_dir, title,
-                                          bounds[i].chapter_text, bounds[i].chapter_len);
-            if (getenv("IMPORT_DEBUG")) {
-                fprintf(stderr, "[dbg] i=%d dir=%s len=%zu items=%d\n",
-                        i, bounds[i].ch_dir, bounds[i].chapter_len,
-                        results[i] ? results[i]->item_count : -1);
-            }
-        }
-        
-        // ====== 阶段三：串行写入所有结果（磁盘 + KV Cache）======
-            // 创建 tmpfs 临时目录用于高速写入
-            const char* book_name_ptr = strrchr(namespace, '/');
-            if (!book_name_ptr) book_name_ptr = namespace;
-            else book_name_ptr++;
-            char tmp_md_dir[1024];
-            snprintf(tmp_md_dir, sizeof(tmp_md_dir), "/dev/shm/import_book_%s_%d", book_name_ptr, getpid());
-            mkdir_p(tmp_md_dir);
-            
-            printf("  Writing %d chapters to disk and cache (tmpfs)...\n", valid_chapter_count);
-            for (int i = 0; i < valid_chapter_count; i++) {
-                if (results[i]) {
-                    int pages = write_chapter_results(cache, namespace, results[i], tmp_md_dir);
-                    total_pages += pages;
-                    free_chapter_result(results[i]);
-                }
-            }
-            
-            // 将 tmpfs 中的文件批量移动到最终目录
-            printf("  Moving files from tmpfs to %s...\n", md_dir);
-            flush_tmp_md(tmp_md_dir, md_dir);
-            
-            free(results);
-            free(bounds);
+        valid++;
     }
+    
+    // 串行写入所有结果（tmpfs 加速）
+    const char* book_name_ptr = strrchr(namespace, '/');
+    book_name_ptr = book_name_ptr ? book_name_ptr + 1 : namespace;
+    char tmp_md_dir[1024];
+    snprintf(tmp_md_dir, sizeof(tmp_md_dir), "/dev/shm/import_book_%s_%d",
+             book_name_ptr, getpid());
+    mkdir_p(tmp_md_dir);
+    
+    printf("  Writing %d chapters to disk and cache (tmpfs)...\n", valid);
+    int total_pages = 0;
+    for (int i = 0; i < valid; i++) {
+        if (results[i]) {
+            total_pages += write_chapter_results(cache, namespace, results[i], tmp_md_dir);
+            free_chapter_result(results[i]);
+        }
+    }
+    
+    printf("  Moving files from tmpfs to %s...\n", md_dir);
+    flush_tmp_md(tmp_md_dir, md_dir);
+    free(results);
     
     // 更新元数据中的总页数
     snprintf(key, sizeof(key), "%s/_meta", namespace);
@@ -1345,6 +1026,96 @@ static int import_book(cache_t* cache, const char* namespace,
     return total_pages;
 }
 
+// 释放统一章节数组（wrapper 分配的 title/text 由调用者 free）
+static void free_unified_chapters(UnifiedChapter* chs, int count) {
+    if (!chs) return;
+    for (int i = 0; i < count; i++) {
+        free(chs[i].title);
+        free(chs[i].text);
+    }
+    free(chs);
+}
+
+/*
+ * OCR 路径：把 <PAGE> 分页文本按章节页码分组为统一章节数组
+ * （pdf/mobi/epub wrapper 在库内完成同样的事；OCR 是外部二进制，在这里分组）
+ */
+static UnifiedChapter* build_page_grouped_chapters(const char* text, size_t text_len,
+                                                   ChapterInfo* chapters, int chapter_count,
+                                                   int* out_count) {
+    char** pages = NULL;
+    int npages = 0;
+    if (ocr_split_pages(text, text_len, &pages, &npages) != 0 || npages == 0) {
+        // 无法分页：整篇作为单章
+        UnifiedChapter* one = calloc(1, sizeof(UnifiedChapter));
+        if (one) {
+            one->title = strdup("full");
+            one->level = 0;
+            one->text_len = text_len;
+            one->text = malloc(text_len + 1);
+            if (one->text) memcpy(one->text, text, text_len + 1);
+            *out_count = 1;
+        }
+        return one;
+    }
+    
+    UnifiedChapter* result = NULL;
+    int n = 0;
+    
+    if (chapter_count > 0) {
+        result = calloc(chapter_count, sizeof(UnifiedChapter));
+        for (int i = 0; i < chapter_count; i++) {
+            if (chapters[i].level >= 2) continue;
+            size_t start = chapters[i].offset;
+            size_t end = (size_t)npages;
+            for (int j = i + 1; j < chapter_count; j++) {
+                if (chapters[j].level < 2) { end = chapters[j].offset; break; }
+            }
+            if (start >= (size_t)npages) continue;
+            if (end > (size_t)npages) end = npages;
+            
+            size_t total = 0;
+            for (size_t p = start; p < end; p++) total += strlen(pages[p]) + 1;
+            if (total == 0) continue;
+            
+            char* buf = malloc(total + 1);
+            if (!buf) continue;
+            buf[0] = 0;
+            for (size_t p = start; p < end; p++) {
+                strcat(buf, pages[p]);
+                strcat(buf, "\n");
+            }
+            result[n].title = strdup(chapters[i].title ? chapters[i].title : "");
+            result[n].level = chapters[i].level;
+            result[n].text = buf;
+            result[n].text_len = total;
+            n++;
+        }
+    }
+    
+    // 无章节信息：整篇单章
+    if (n == 0) {
+        free(result);
+        result = calloc(1, sizeof(UnifiedChapter));
+        size_t total = 0;
+        for (int p = 0; p < npages; p++) total += strlen(pages[p]) + 1;
+        char* buf = malloc(total + 1);
+        if (buf) {
+            buf[0] = 0;
+            for (int p = 0; p < npages; p++) { strcat(buf, pages[p]); strcat(buf, "\n"); }
+            result[0].title = strdup("full");
+            result[0].level = 0;
+            result[0].text = buf;
+            result[0].text_len = total;
+            n = 1;
+        }
+    }
+    
+    ocr_free_pages(pages, npages);
+    *out_count = n;
+    return result;
+}
+
 // 将 tmpfs 中的 chapters 目录移动到最终位置（替代 system("rm -rf; mv")：
 // 路径含空格/中文时 system() 未加引号会失败，且 mv 跨文件系统直接报错）
 static int flush_tmp_md(const char* tmp_md_dir, const char* md_dir) {
@@ -1358,6 +1129,19 @@ static int flush_tmp_md(const char* tmp_md_dir, const char* md_dir) {
     }
     rmdir(tmp_md_dir);
     return 0;
+}
+
+// fork/exec 运行命令（替代 system()：参数不经 shell 分词，路径含空格/中文安全）
+static int run_cmd(char* const argv[]) {
+    pid_t pid = fork();
+    if (pid == 0) {
+        execvp(argv[0], argv);
+        _exit(127);
+    }
+    if (pid < 0) return -1;
+    int st = 0;
+    waitpid(pid, &st, 0);
+    return (WIFEXITED(st) && WEXITSTATUS(st) == 0) ? 0 : -1;
 }
 
 // =============================================================================
@@ -1532,17 +1316,16 @@ static int export_vectors(cache_t* cache, const char* cache_dir,
     struct stat st_hnsw;
     if (stat("./tools/build_hnsw_index", &st_hnsw) != 0) {
         printf("  Warning: build_hnsw_index not found. Building...\n");
-        int make_ret = system("make tools/build_hnsw_index >/dev/null 2>&1");
-        if (make_ret != 0) {
+        char* make_argv[] = {"make", "tools/build_hnsw_index", NULL};
+        if (run_cmd(make_argv) != 0) {
             printf("  Warning: Failed to build HNSW index tool (search may not work)\n");
             printf("  Fix: run 'make tools/build_hnsw_index' manually\n");
         }
     }
     
-    char hnsw_cmd[2048];
-    snprintf(hnsw_cmd, sizeof(hnsw_cmd),
-             "./tools/build_hnsw_index %s 2>&1", bin_file);
-    int hnsw_ret = system(hnsw_cmd);
+    // fork/exec 直传参数，路径含空格/中文不会被 shell 分词
+    char* hnsw_argv[] = {"./tools/build_hnsw_index", bin_file, NULL};
+    int hnsw_ret = run_cmd(hnsw_argv);
     if (hnsw_ret == 0) {
         printf("  HNSW index built successfully\n");
     } else {
@@ -2067,206 +1850,41 @@ int main(int argc, char* argv[]) {
     
     if (strcasecmp(ext, ".mobi") == 0 || strcasecmp(ext, ".azw") == 0 || strcasecmp(ext, ".azw3") == 0) {
         void* lib = load_mobi_lib();
-        if (!lib) {
-            cache_close(cache);
-            return 1;
-        }
+        if (!lib) { cache_close(cache); return 1; }
         
         void* (*mobi_open)(const char*) = dlsym(lib, "mobi_open");
-        int (*mobi_extract_text)(void*, char**, size_t*) = dlsym(lib, "mobi_extract_text");
         int (*mobi_get_metadata)(void*, char*, size_t, char*, size_t) = dlsym(lib, "mobi_get_metadata");
-        int (*mobi_get_chapters)(void*, void**, int*) = dlsym(lib, "mobi_get_chapters");
-        int (*mobi_get_chapter_text)(void*, int, char**, size_t*) = dlsym(lib, "mobi_get_chapter_text");
-        void (*mobi_free_chapter_text)(char*) = dlsym(lib, "mobi_free_chapter_text");
+        int (*mobi_get_book)(void*, void**, int*) = dlsym(lib, "mobi_get_book");
+        void (*mobi_free_book)(void*, int) = dlsym(lib, "mobi_free_book");
         void (*mobi_close)(void*) = dlsym(lib, "mobi_close");
         
-        if (!mobi_open || !mobi_extract_text || !mobi_close) {
+        if (!mobi_open || !mobi_get_book || !mobi_close) {
             fprintf(stderr, "Missing required MOBI functions\n");
-            dlclose(lib);
-            cache_close(cache);
-            return 1;
+            dlclose(lib); cache_close(cache); return 1;
         }
         
         void* handle = mobi_open(book_path);
         if (!handle) {
             fprintf(stderr, "Failed to open MOBI: %s\n", book_path);
-            dlclose(lib);
-            cache_close(cache);
-            return 1;
+            dlclose(lib); cache_close(cache); return 1;
         }
         
         char title[512] = {0}, author[512] = {0};
         if (mobi_get_metadata) {
             mobi_get_metadata(handle, title, sizeof(title), author, sizeof(author));
         }
-        if (strlen(title) == 0) {
-            strncpy(title, book_name, sizeof(title) - 1);
+        if (strlen(title) == 0) strncpy(title, book_name, sizeof(title) - 1);
+        if (strlen(author) == 0) strcpy(author, "Unknown");
+        
+        printf("Title: %s\nAuthor: %s\n\n", title, author);
+        
+        UnifiedChapter* chs = NULL;
+        int nch = 0;
+        if (mobi_get_book(handle, (void**)&chs, &nch) == 0 && nch > 0) {
+            total_pages = import_book_chapters(cache, namespace, md_dir,
+                                               title, author, chs, nch);
         }
-        if (strlen(author) == 0) {
-            strcpy(author, "Unknown");
-        }
-        
-        ChapterInfo* chapters = NULL;
-        int chapter_count = 0;
-        if (mobi_get_chapters) {
-            mobi_get_chapters(handle, (void**)&chapters, &chapter_count);
-        }
-        
-        printf("Title: %s\n", title);
-        printf("Author: %s\n", author);
-        printf("Chapters: %d\n", chapter_count);
-        printf("\n");
-        
-        // 创建书籍输出目录
-        mkdir_p(md_dir);
-        
-        // 存储书籍元数据
-        char key[1024];
-        char value[4096];
-        snprintf(key, sizeof(key), "%s/_meta", namespace);
-        snprintf(value, sizeof(value),
-                 "{\"type\":\"book\",\"title\":\"%s\",\"author\":\"%s\",\"chapters\":%d}",
-                 title, author, chapter_count);
-        cache_set(cache, key, value, 0);
-        
-        printf("Importing book: %s by %s\n", title, author);
-        printf("Output directory: %s\n", md_dir);
-        printf("Namespace: %s\n", namespace);
-        printf("Chapters: %d\n", chapter_count);
-        printf("\n");
-        
-        // MOBI: 尝试使用 mobi_get_chapter_text() 逐章提取（比全文切分更精确）
-        // 先统计有效章节数，再只探测前 3 章验证可用性
-        // （旧实现对每章都完整提取一遍做验证，之后正式提取又做一遍，大书浪费一倍工时）
-        int use_per_chapter = (mobi_get_chapter_text != NULL);
-        int chapter_idx = 0;
-        int imported_chapters = 0;
-        
-        for (int i = 0; i < chapter_count; i++) {
-            if (chapters[i].level < 2) imported_chapters++;
-        }
-        
-        if (use_per_chapter && imported_chapters > 0) {
-            int probed = 0;
-            for (int i = 0; i < chapter_count && probed < 3; i++) {
-                if (chapters[i].level >= 2) continue;
-                probed++;
-                
-                char* chapter_text = NULL;
-                size_t chapter_len = 0;
-                mobi_get_chapter_text(handle, i, &chapter_text, &chapter_len);
-                
-                if (!chapter_text || chapter_len < 100) {
-                    use_per_chapter = 0;
-                    if (chapter_text && mobi_free_chapter_text) {
-                        mobi_free_chapter_text(chapter_text);
-                    }
-                    break;
-                }
-                if (mobi_free_chapter_text) {
-                    mobi_free_chapter_text(chapter_text);
-                }
-            }
-        }
-        if (imported_chapters == 0) use_per_chapter = 0;
-        
-        if (use_per_chapter) {
-            printf("Using per-chapter text extraction (%d chapters)\n", imported_chapters);
-            
-            // ====== 并行处理所有 MOBI 章节 ======
-            // 先收集所有章节文本
-            typedef struct {
-                char ch_dir[256];
-                char* chapter_text;
-                size_t chapter_len;
-                const char* title;
-            } mobi_chapter_data_t;
-            
-            mobi_chapter_data_t* mobi_chapters = calloc(imported_chapters, sizeof(mobi_chapter_data_t));
-            if (!mobi_chapters) {
-                fprintf(stderr, "Failed to allocate mobi chapters array\n");
-                use_per_chapter = 0;
-                goto mobi_fallback;
-            }
-            
-            chapter_idx = 0;
-            for (int i = 0; i < chapter_count; i++) {
-                if (chapters[i].level >= 2) continue;
-                
-                chapter_dirname(mobi_chapters[chapter_idx].ch_dir, 
-                               sizeof(mobi_chapters[chapter_idx].ch_dir), chapter_idx, chapters[i].title);
-                mobi_chapters[chapter_idx].title = chapters[i].title;
-                mobi_get_chapter_text(handle, i, 
-                                     &mobi_chapters[chapter_idx].chapter_text, 
-                                     &mobi_chapters[chapter_idx].chapter_len);
-                chapter_idx++;
-            }
-            
-            // 并行处理所有章节（文本清理、分块、向量生成）
-            printf("  Processing chapters (serial for vector safety)...\n", imported_chapters);
-            chapter_result_t** results = calloc(imported_chapters, sizeof(chapter_result_t*));
-            
-            // serial (vector safety)
-            for (int i = 0; i < imported_chapters; i++) {
-                if (mobi_chapters[i].chapter_text && mobi_chapters[i].chapter_len > 0) {
-                    results[i] = process_chapter(md_dir, mobi_chapters[i].ch_dir, 
-                                                mobi_chapters[i].title,
-                                                mobi_chapters[i].chapter_text, 
-                                                mobi_chapters[i].chapter_len);
-                }
-            }
-            
-            // 串行写入所有结果
-            // 创建 tmpfs 临时目录用于高速写入
-            const char* book_name_ptr2 = strrchr(namespace, '/');
-            if (!book_name_ptr2) book_name_ptr2 = namespace;
-            else book_name_ptr2++;
-            char tmp_md_dir[1024];
-            snprintf(tmp_md_dir, sizeof(tmp_md_dir), "/dev/shm/import_book_%s_%d", book_name_ptr2, getpid());
-            mkdir_p(tmp_md_dir);
-            
-            printf("  Writing %d chapters to disk and cache (tmpfs)...\n", imported_chapters);
-            for (int i = 0; i < imported_chapters; i++) {
-                if (results[i]) {
-                    int pages = write_chapter_results(cache, namespace, results[i], tmp_md_dir);
-                    total_pages += pages;
-                    free_chapter_result(results[i]);
-                }
-                if (mobi_free_chapter_text && mobi_chapters[i].chapter_text) {
-                    mobi_free_chapter_text(mobi_chapters[i].chapter_text);
-                }
-            }
-            
-            // 将 tmpfs 中的文件批量移动到最终目录
-            printf("  Moving files from tmpfs to %s...\n", md_dir);
-            flush_tmp_md(tmp_md_dir, md_dir);
-            
-            free(results);
-            free(mobi_chapters);
-        } else {
-            mobi_fallback:
-            // Fallback: 提取全文后手动切分（兼容旧格式）
-            printf("Using full-text chapter splitting\n");
-            char* text = NULL;
-            size_t text_len = 0;
-            if (mobi_extract_text) {
-                mobi_extract_text(handle, &text, &text_len);
-            }
-            
-            if (text && text_len > 0) {
-                total_pages = import_book(cache, namespace, md_dir,
-                                          title, author, text, text_len,
-                                          chapters, chapter_count);
-            }
-        }
-        
-        // 更新元数据中的总页数
-        snprintf(key, sizeof(key), "%s/_meta", namespace);
-        snprintf(value, sizeof(value),
-                 "{\"type\":\"book\",\"title\":\"%s\",\"author\":\"%s\",\"chapters\":%d,\"pages\":%d}",
-                 title, author, chapter_count, total_pages);
-        cache_set(cache, key, value, 0);
-        
+        if (chs && mobi_free_book) mobi_free_book(chs, nch);
         mobi_close(handle);
         dlclose(lib);
         
@@ -2276,9 +1894,8 @@ int main(int argc, char* argv[]) {
         title[sizeof(title) - 1] = '\0';
         
         if (flag_ocr) {
-            // ---- OCR 模式：使用 ocr_cuda C++ 二进制高精度识别 ----
-            printf("OCR mode: using Unlimited-OCR for PDF recognition\n");
-            printf("\n");
+            // ---- OCR 模式：ocr_cuda 高精度识别 → <PAGE> 分页文本 → 统一章节 ----
+            printf("OCR mode: using Unlimited-OCR for PDF recognition\n\n");
             
             char* text = NULL;
             size_t text_len = 0;
@@ -2288,16 +1905,14 @@ int main(int argc, char* argv[]) {
             if (ocr_extract_pages(book_path, argv[0],
                                   &text, &text_len,
                                   &chapters, &chapter_count) == 0) {
-                // OCR 章节 offset 是页码，先按 <PAGE> 标记重映射为字节偏移
-                if (chapters && chapter_count > 0 && text && text_len > 0) {
-                    remap_page_offsets_to_bytes(text, text_len, "<PAGE>",
-                                                chapters, chapter_count);
+                UnifiedChapter* chs = build_page_grouped_chapters(
+                    text, text_len, chapters, chapter_count, &chapter_count);
+                int nch = chapter_count;
+                if (chs && nch > 0) {
+                    total_pages = import_book_chapters(cache, namespace, md_dir,
+                                                       title, "Unknown", chs, nch);
                 }
-                if (text && text_len > 0) {
-                    total_pages = import_book(cache, namespace, md_dir,
-                                              title, "Unknown", text, text_len,
-                                              chapters, chapter_count);
-                }
+                free_unified_chapters(chs, nch);
             } else {
                 fprintf(stderr, "OCR extraction failed\n");
                 cache_close(cache);
@@ -2311,132 +1926,73 @@ int main(int argc, char* argv[]) {
             }
             
         } else {
-            // ---- 原有模式：使用 MuPDF 文本提取 ----
+            // ---- MuPDF 模式：wrapper 内部完成逐页提取 + outline 分组 ----
             void* lib = load_pdf_lib();
-            if (!lib) {
-                cache_close(cache);
-                return 1;
-            }
+            if (!lib) { cache_close(cache); return 1; }
             
             void* (*pdf_open)(const char*) = dlsym(lib, "pdf_open");
-            int (*pdf_get_page_count)(void*) = dlsym(lib, "pdf_get_page_count");
-            int (*pdf_extract_text)(void*, char**, size_t*) = dlsym(lib, "pdf_extract_text");
-            int (*pdf_get_chapters)(void*, void**, int*) = dlsym(lib, "pdf_get_chapters");
+            int (*pdf_get_book)(void*, void**, int*) = dlsym(lib, "pdf_get_book");
+            void (*pdf_free_book)(void*, int) = dlsym(lib, "pdf_free_book");
             void (*pdf_close)(void*) = dlsym(lib, "pdf_close");
             
-            if (!pdf_open || !pdf_extract_text || !pdf_close) {
+            if (!pdf_open || !pdf_get_book || !pdf_close) {
                 fprintf(stderr, "Missing required PDF functions\n");
-                dlclose(lib);
-                cache_close(cache);
-                return 1;
+                dlclose(lib); cache_close(cache); return 1;
             }
             
             void* handle = pdf_open(book_path);
             if (!handle) {
                 fprintf(stderr, "Failed to open PDF: %s\n", book_path);
-                dlclose(lib);
-                cache_close(cache);
-                return 1;
+                dlclose(lib); cache_close(cache); return 1;
             }
             
-            int pages = 0;
-            if (pdf_get_page_count) {
-                pages = pdf_get_page_count(handle);
+            UnifiedChapter* chs = NULL;
+            int nch = 0;
+            if (pdf_get_book(handle, (void**)&chs, &nch) == 0 && nch > 0) {
+                total_pages = import_book_chapters(cache, namespace, md_dir,
+                                                   title, "Unknown", chs, nch);
             }
-            
-            char* text = NULL;
-            size_t text_len = 0;
-            pdf_extract_text(handle, &text, &text_len);
-            
-            ChapterInfo* chapters = NULL;
-            int chapter_count = 0;
-            if (pdf_get_chapters) {
-                pdf_get_chapters(handle, (void**)&chapters, &chapter_count);
-            }
-            
-            // PDF outline 的 offset 是页码，按分页标记重映射为字节偏移
-            if (chapters && chapter_count > 0 && text && text_len > 0) {
-                remap_page_offsets_to_bytes(text, text_len, "--- Page Break ---",
-                                            chapters, chapter_count);
-            }
-            
-            printf("Pages: %d\n", pages);
-            printf("Text length: %zu bytes\n", text_len);
-            printf("Chapters: %d\n", chapter_count);
-            printf("\n");
-            
-            if (text && text_len > 0) {
-                total_pages = import_book(cache, namespace, md_dir,
-                                          title, "Unknown", text, text_len,
-                                          chapters, chapter_count);
-            }
-            
+            if (chs && pdf_free_book) pdf_free_book(chs, nch);
             pdf_close(handle);
             dlclose(lib);
         }
     } else if (strcasecmp(ext, ".epub") == 0) {
         void* lib = load_epub_lib();
-        if (!lib) {
-            cache_close(cache);
-            return 1;
-        }
+        if (!lib) { cache_close(cache); return 1; }
         
         void* (*epub_open)(const char*) = dlsym(lib, "epub_open");
-        int (*epub_extract_text)(void*, char**, size_t*) = dlsym(lib, "epub_extract_text");
         int (*epub_get_metadata)(void*, char*, size_t, char*, size_t) = dlsym(lib, "epub_get_metadata");
-        int (*epub_get_chapters)(void*, void**, int*) = dlsym(lib, "epub_get_chapters");
+        int (*epub_get_book)(void*, void**, int*) = dlsym(lib, "epub_get_book");
+        void (*epub_free_book)(void*, int) = dlsym(lib, "epub_free_book");
         void (*epub_close)(void*) = dlsym(lib, "epub_close");
         
-        if (!epub_open || !epub_extract_text || !epub_close) {
+        if (!epub_open || !epub_get_book || !epub_close) {
             fprintf(stderr, "Missing required EPUB functions\n");
-            dlclose(lib);
-            cache_close(cache);
-            return 1;
+            dlclose(lib); cache_close(cache); return 1;
         }
         
         void* handle = epub_open(book_path);
         if (!handle) {
             fprintf(stderr, "Failed to open EPUB: %s\n", book_path);
-            dlclose(lib);
-            cache_close(cache);
-            return 1;
+            dlclose(lib); cache_close(cache); return 1;
         }
         
         char title[512] = {0}, author[512] = {0};
         if (epub_get_metadata) {
             epub_get_metadata(handle, title, sizeof(title), author, sizeof(author));
         }
-        if (strlen(title) == 0) {
-            strncpy(title, book_name, sizeof(title) - 1);
-        }
-        if (strlen(author) == 0) {
-            strcpy(author, "Unknown");
-        }
+        if (strlen(title) == 0) strncpy(title, book_name, sizeof(title) - 1);
+        if (strlen(author) == 0) strcpy(author, "Unknown");
         
-        ChapterInfo* chapters = NULL;
-        int chapter_count = 0;
-        if (epub_get_chapters) {
-            epub_get_chapters(handle, (void**)&chapters, &chapter_count);
+        printf("Title: %s\nAuthor: %s\n\n", title, author);
+        
+        UnifiedChapter* chs = NULL;
+        int nch = 0;
+        if (epub_get_book(handle, (void**)&chs, &nch) == 0 && nch > 0) {
+            total_pages = import_book_chapters(cache, namespace, md_dir,
+                                               title, author, chs, nch);
         }
-        
-        char* text = NULL;
-        size_t text_len = 0;
-        if (epub_extract_text) {
-            epub_extract_text(handle, &text, &text_len);
-        }
-        
-        printf("Title: %s\n", title);
-        printf("Author: %s\n", author);
-        printf("Text length: %zu bytes\n", text_len);
-        printf("Chapters: %d\n", chapter_count);
-        printf("\n");
-        
-        if (text && text_len > 0) {
-            total_pages = import_book(cache, namespace, md_dir,
-                                      title, author, text, text_len,
-                                      chapters, chapter_count);
-        }
-        
+        if (chs && epub_free_book) epub_free_book(chs, nch);
         epub_close(handle);
         dlclose(lib);
         
