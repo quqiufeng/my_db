@@ -127,6 +127,7 @@ static void append_vectors(const char* bin_file, const char* idx_file,
 static void update_header(const char* bin_file, int total_count) {
     FILE* fp = fopen(bin_file, "r+b");
     if (fp) {
+        fseek(fp, 0, SEEK_SET);
         fwrite(&total_count, 4, 1, fp);
         fclose(fp);
     }
