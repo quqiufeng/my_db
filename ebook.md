@@ -545,6 +545,12 @@ make tools/book2audio
 
 对于扫描版 PDF（图片格式页面），传统的文本提取方式（MuPDF `fz_stext_page`）无法提取到文字。本项目集成了 **百度 Unlimited-OCR**（DeepSeek-V2 MoE 架构，64 专家，12 层），提供纯 C++ 的高精度 OCR 识别能力。
 
+> **何时该用 `--ocr`（2026-09 实测结论）**：
+> - **数字版 PDF（有文本层）→ 不要用 OCR**。MuPDF 正文逐字节精确、整本秒级完成；OCR 约 38 秒/页（472 页 ≈ 5 小时），且会引入大量幻觉错误（实测：`PULL`→`PUTLS`、`every`→`cvyr`、`DIJKSTRA`→`DUKSTRA`、引号 mojibake、段落重复）。MuPDF 唯一的损失是自定义字体符号（如数学箭头 →）变为 U+FFFD，影响远小于 OCR 的错误。
+> - **扫描版 PDF（无文本层）→ 必须用 OCR**，这是唯一选择。
+>
+> **ocr_cuda 重编译说明**：torch 2.4 升级到 2.6 后 ABI 不兼容（旧二进制 `undefined symbol: torch::jit::Object::find_method`），需**去掉** `-D_GLIBCXX_USE_CXX11_ABI=0` 重新编译（PyPI 官方 torch 2.6 使用新 ABI）。
+
 #### 架构概览
 
 ```
@@ -673,11 +679,12 @@ rm -f weights.pt                                 # 中间产物可删除
 ```bash
 # 依赖
 #   - CUDA 12.6 + GPU (RTX 3080 20GB+)
-#   - LibTorch (来自 /data/venv, Python 3.12.3, torch 2.4.0+cu121)
+#   - LibTorch (来自 /data/venv, Python 3.12.3, torch 2.6.0+cu126)
 #   - MuPDF 静态库 (/opt/mupdf/build/release/libmupdf.a)
-#   - 系统 GCC (需 -D_GLIBCXX_USE_CXX11_ABI=0 匹配 libtorch ABI)
+#   - 系统 GCC（torch 2.6 用新 ABI，不要加 -D_GLIBCXX_USE_CXX11_ABI=0；
+#     torch 2.4 时代才需要该 flag）
 
-g++ -std=c++17 -D_GLIBCXX_USE_CXX11_ABI=0 \
+g++ -std=c++17 \
     -I/data/venv/lib/python3.12/site-packages/torch/include \
     -I/data/venv/lib/python3.12/site-packages/torch/include/torch/csrc/api/include \
     -I/opt/mupdf/include \
