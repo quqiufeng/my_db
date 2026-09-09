@@ -601,6 +601,64 @@ static void free_paragraphs(char** paragraphs, int count) {
 // 核心导入函数
 // =============================================================================
 
+static int flush_tmp_md(const char* tmp_md_dir, const char* md_dir);
+
+/*
+ * 将章节表中的"页码"偏移重写为文本字节偏移。
+ *
+ * 背景：PDF/OCR 的章节 offset 是页码（pdf outline 的 page / OCR 的 <PAGE> 序号），
+ * 而 import_book() 策略0 把 offset 当作合并文本的字节偏移使用。语义不一致会导致
+ * 章节切分完全错乱（实测 DDIA：每章都包含整本书开头，全部超 200KB 被截断）。
+ *
+ * 本函数扫描文本中的分页标记（MuPDF: "--- Page Break ---"，OCR: "<PAGE>"），
+ * 建立 页码→字节偏移 映射后原地重写 chapters[].offset。
+ * 标记 i 结束第 i 页，第 i+1 页从标记之后开始。
+ */
+static void remap_page_offsets_to_bytes(const char* text, size_t text_len,
+                                        const char* marker,
+                                        ChapterInfo* chapters, int chapter_count) {
+    if (!text || !chapters || chapter_count <= 0) return;
+    size_t marker_len = strlen(marker);
+
+    // 章节引用的最大页码决定映射表大小
+    size_t max_page = 0;
+    for (int i = 0; i < chapter_count; i++) {
+        if (chapters[i].offset > max_page) max_page = chapters[i].offset;
+    }
+    size_t table_cap = max_page + 2;
+    size_t* page_start = calloc(table_cap, sizeof(size_t));
+    if (!page_start) return;
+
+    size_t page = 0;
+    page_start[0] = 0;
+    const char* p = text;
+    const char* end = text + text_len;
+    while (page < table_cap - 1) {
+        const char* m = strstr(p, marker);
+        if (!m || m >= end) break;
+        const char* next = m + marker_len;
+        while (next < end && (*next == '\r' || *next == '\n')) next++;
+        page++;
+        page_start[page] = (size_t)(next - text);
+        p = next;
+    }
+
+    size_t total_pages = page + 1;
+    int remapped = 0;
+    for (int i = 0; i < chapter_count; i++) {
+        if (chapters[i].offset < total_pages) {
+            chapters[i].offset = page_start[chapters[i].offset];
+            remapped++;
+        } else {
+            // 越界页码：置 0 标记为不可用，走标题匹配兜底
+            chapters[i].offset = 0;
+        }
+    }
+    printf("  Remapped %d chapter offsets (page# -> byte offset, %zu pages)\n",
+           remapped, total_pages);
+    free(page_start);
+}
+
 /*
  * 处理单个章节（CPU/GPU 密集阶段，可并行）
  * 
@@ -1032,7 +1090,9 @@ static int import_book(cache_t* cache, const char* namespace,
                         }
                     }
                     chapter_len = next_offset - chapters[i].offset;
-                    if (chapter_len > 100 && chapter_len < text_len * 3 / 10) {
+                    // 偏移来自 wrapper（EPUB=字节偏移，PDF/OCR=已重映射的页偏移），
+                    // 只排除"整本书"级别的错误区间即可
+                    if (chapter_len > 100 && chapter_len < text_len * 9 / 10) {
                         goto store_bound;
                     }
                 }
@@ -1189,10 +1249,11 @@ static int import_book(cache_t* cache, const char* namespace,
             }
             
             store_bound:
-            if (chapter_len > 200000) {
-                fprintf(stderr, "  Warning: Chapter '%s' too long (%zu bytes), truncating to 200KB\n", 
+            // 单章上限 2MB（约 60 万字），超出说明边界检测失败而非正常章节
+            if (chapter_len > 2000000) {
+                fprintf(stderr, "  Warning: Chapter '%s' too long (%zu bytes), truncating to 2MB\n", 
                         chapters[i].title, chapter_len);
-                chapter_len = 200000;
+                chapter_len = 2000000;
             }
             
             bounds[valid_chapter_count].chapter_text = chapter_text;
@@ -1253,22 +1314,8 @@ static int import_book(cache_t* cache, const char* namespace,
             }
             
             // 将 tmpfs 中的文件批量移动到最终目录
-            // 先删除可能存在的旧 chapters 目录（来自之前失败的导入或 write_chapter_results 的 mkdir_p）
             printf("  Moving files from tmpfs to %s...\n", md_dir);
-            char src_chapters[1024];
-            char dst_chapters[1024];
-            snprintf(src_chapters, sizeof(src_chapters), "%s/chapters", tmp_md_dir);
-            snprintf(dst_chapters, sizeof(dst_chapters), "%s/chapters", md_dir);
-            // 删除已存在的目标目录，避免 mv 失败
-            char rm_cmd[2048];
-            snprintf(rm_cmd, sizeof(rm_cmd), "rm -rf %s 2>/dev/null; mv %s %s", dst_chapters, src_chapters, dst_chapters);
-            if (system(rm_cmd) != 0) {
-                // fallback: cp + rm
-                snprintf(rm_cmd, sizeof(rm_cmd), "cp -r %s %s && rm -rf %s", src_chapters, md_dir, src_chapters);
-                if (system(rm_cmd) != 0) {
-                    fprintf(stderr, "Warning: Failed to move files from tmpfs\n");
-                }
-            }
+            flush_tmp_md(tmp_md_dir, md_dir);
             
             free(results);
             free(bounds);
@@ -1287,6 +1334,21 @@ static int import_book(cache_t* cache, const char* namespace,
     metric_timer_stop(&import_timer);
     
     return total_pages;
+}
+
+// 将 tmpfs 中的 chapters 目录移动到最终位置（替代 system("rm -rf; mv")：
+// 路径含空格/中文时 system() 未加引号会失败，且 mv 跨文件系统直接报错）
+static int flush_tmp_md(const char* tmp_md_dir, const char* md_dir) {
+    char src[1024], dst[1024];
+    snprintf(src, sizeof(src), "%s/chapters", tmp_md_dir);
+    snprintf(dst, sizeof(dst), "%s/chapters", md_dir);
+    rm_rf(dst);
+    if (move_dir(src, dst) != 0) {
+        fprintf(stderr, "Warning: Failed to move files from tmpfs\n");
+        return -1;
+    }
+    rmdir(tmp_md_dir);
+    return 0;
 }
 
 // =============================================================================
@@ -2058,13 +2120,21 @@ int main(int argc, char* argv[]) {
         printf("\n");
         
         // MOBI: 尝试使用 mobi_get_chapter_text() 逐章提取（比全文切分更精确）
+        // 先统计有效章节数，再只探测前 3 章验证可用性
+        // （旧实现对每章都完整提取一遍做验证，之后正式提取又做一遍，大书浪费一倍工时）
         int use_per_chapter = (mobi_get_chapter_text != NULL);
         int chapter_idx = 0;
         int imported_chapters = 0;
         
-        if (use_per_chapter) {
-            for (int i = 0; i < chapter_count; i++) {
+        for (int i = 0; i < chapter_count; i++) {
+            if (chapters[i].level < 2) imported_chapters++;
+        }
+        
+        if (use_per_chapter && imported_chapters > 0) {
+            int probed = 0;
+            for (int i = 0; i < chapter_count && probed < 3; i++) {
                 if (chapters[i].level >= 2) continue;
+                probed++;
                 
                 char* chapter_text = NULL;
                 size_t chapter_len = 0;
@@ -2072,14 +2142,17 @@ int main(int argc, char* argv[]) {
                 
                 if (!chapter_text || chapter_len < 100) {
                     use_per_chapter = 0;
+                    if (chapter_text && mobi_free_chapter_text) {
+                        mobi_free_chapter_text(chapter_text);
+                    }
                     break;
                 }
-                imported_chapters++;
-                if (mobi_free_chapter_text && chapter_text) {
+                if (mobi_free_chapter_text) {
                     mobi_free_chapter_text(chapter_text);
                 }
             }
         }
+        if (imported_chapters == 0) use_per_chapter = 0;
         
         if (use_per_chapter) {
             printf("Using per-chapter text extraction (%d chapters)\n", imported_chapters);
@@ -2150,21 +2223,7 @@ int main(int argc, char* argv[]) {
             
             // 将 tmpfs 中的文件批量移动到最终目录
             printf("  Moving files from tmpfs to %s...\n", md_dir);
-            char src_chapters2[1024];
-            char dst_chapters2[1024];
-            snprintf(src_chapters2, sizeof(src_chapters2), "%s/chapters", tmp_md_dir);
-            snprintf(dst_chapters2, sizeof(dst_chapters2), "%s/chapters", md_dir);
-            // 先删除已存在的目标目录，避免 mv 跨文件系统失败
-            char rm_cmd2[2048];
-            snprintf(rm_cmd2, sizeof(rm_cmd2), "rm -rf %s 2>/dev/null; mv %s %s", dst_chapters2, src_chapters2, dst_chapters2);
-            if (system(rm_cmd2) != 0) {
-                // fallback: cp + rm
-                snprintf(rm_cmd2, sizeof(rm_cmd2), "cp -r %s %s && rm -rf %s", src_chapters2, md_dir, src_chapters2);
-                if (system(rm_cmd2) != 0) {
-                    fprintf(stderr, "Warning: Failed to move files from tmpfs\n");
-                }
-            }
-            rmdir(tmp_md_dir);
+            flush_tmp_md(tmp_md_dir, md_dir);
             
             free(results);
             free(mobi_chapters);
@@ -2213,6 +2272,11 @@ int main(int argc, char* argv[]) {
             if (ocr_extract_pages(book_path, argv[0],
                                   &text, &text_len,
                                   &chapters, &chapter_count) == 0) {
+                // OCR 章节 offset 是页码，先按 <PAGE> 标记重映射为字节偏移
+                if (chapters && chapter_count > 0 && text && text_len > 0) {
+                    remap_page_offsets_to_bytes(text, text_len, "<PAGE>",
+                                                chapters, chapter_count);
+                }
                 if (text && text_len > 0) {
                     total_pages = import_book(cache, namespace, md_dir,
                                               title, "Unknown", text, text_len,
@@ -2272,6 +2336,12 @@ int main(int argc, char* argv[]) {
             int chapter_count = 0;
             if (pdf_get_chapters) {
                 pdf_get_chapters(handle, (void**)&chapters, &chapter_count);
+            }
+            
+            // PDF outline 的 offset 是页码，按分页标记重映射为字节偏移
+            if (chapters && chapter_count > 0 && text && text_len > 0) {
+                remap_page_offsets_to_bytes(text, text_len, "--- Page Break ---",
+                                            chapters, chapter_count);
             }
             
             printf("Pages: %d\n", pages);

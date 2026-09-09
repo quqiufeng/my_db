@@ -1911,5 +1911,70 @@ if (!flag_skip_vectors) {
 
 ---
 
+## PDF/MOBI 解析修复与优化实录（2026-09-09）
+
+对 ebook 系统涉及代码（import_book.c + epub/mobi/pdf 三个 wrapper）做整体复盘，重点修复了 PDF 和 MOBI 路径的多个严重问题。
+
+### 问题 22: PDF 章节偏移语义错乱（最严重）
+
+**现象**：DDIA（613 页 PDF，210 个 outline 章节）导入时**每一章**都报 `too long (~1.4MB), truncating to 200KB`，产出 4100 页内容全部错误（每章都是全书开头 200KB 的复制品）。
+
+**根因**：`pdf_get_chapters()` 返回的 `offset` 是**页码**（outline 书签的 page number），而 `import_book()` 策略0 把它当作**合并文本的字节偏移**使用（`text + chapters[i].offset`）。语义不一致导致：
+- 页码差（通常 10~50）作为章节长度被 `chapter_len > 100` 拒绝 → 落到标题匹配
+- PDF 正文标题渲染与 outline 标题不一致（换行/空格差异）→ 匹配失败 → 每章退化为"整本书"
+- 个别页码差落在 (100, text_len/10) 区间时会被**静默接受**，产生垃圾章节
+
+**修复**：
+1. `pdf_wrapper.cpp`：每页**无条件**输出 `--- Page Break ---` 分页标记（原来提取失败的页不输出，会导致页码对齐漂移）
+2. `import_book.c` 新增 `remap_page_offsets_to_bytes()`：扫描分页标记建立 页码→字节偏移 映射表，在调用 `import_book()` 前原地重写章节 offset。OCR 路径同样处理（`<PAGE>` 标记）
+3. 策略0 接受条件从 `chapter_len < text_len*3/10` 放宽到 `text_len*9/10`（偏移已可信，只需排除整本书级错误）
+4. 单章截断上限 200KB → 2MB（正常章节不再被误杀）
+
+**修复后**：DDIA 210 个章节偏移全部成功重映射（`Remapped 210 chapter offsets`），无一章截断，产出 1994 页，抽查 Chapter 1/5/10 起始内容与原文完全一致。
+
+### 问题 23: MOBI 逐章提取 size_t 下溢崩溃（SIGSEGV）
+
+**现象**：`一站式学习C编程.mobi`（KF7，158 章）导入时核心转储。
+
+**根因**（ASan 定位）：`mobi_get_chapter_text()` 中，HTML 标签中间位置修复（`posoff = tag_end + 1`）发生在 `end_offset` 边界钳制**之后**。当下一章偏移（end_offset）落在同一标签附近时，修正后的 posoff 可能超过 end_offset，`end_offset - posoff` 作为 `size_t` 下溢成巨大值，`extract_text_from_html` 越界读堆内存直至段错误。
+
+**修复**（`mobi_wrapper.cpp`）：标签/UTF-8 修正之后重新检查 `posoff >= end_offset`，直接返回 -1（该章无独立正文，属正常的目录父节点）。
+
+### 问题 24: MOBI 元数据 EXTH 越界读
+
+**根因**（ASan 定位）：`mobi_get_metadata()` 用 `strncpy` 复制 EXTH_AUTHOR，但 libmobi 的 `exth->data` 是**不保证 NUL 结尾**的原始字节，strncpy 一直读到堆区域外。
+
+**修复**：按 `exth->size` 截断 memcpy，手动补 NUL。
+
+### 问题 25: MOBI 预扫描双重提取（性能）
+
+**根因**：逐章模式启用前，对**每一章**都完整调用 `mobi_get_chapter_text()` 做可用性验证，正式导入时再提取一遍。158 章的书做 316 次完整提取。
+
+**修复**：有效章节数改为纯计数（level<2），可用性探测只抽查**前 3 章**。
+
+### 问题 26: tmpfs 文件搬运用 system("rm -rf; mv")
+
+**根因**：两处调用 `system()` 且路径**未加引号**，书名/命名空间含空格或特殊字符时直接失败；`mv` 跨文件系统也会报错。
+
+**修复**：统一为 `flush_tmp_md()` 辅助函数，用已有的 `rm_rf()` + `move_dir()`（rename 优先，跨文件系统自动 copy+delete）。
+
+### 问题 27: HTML 实体解析越界读隐患
+
+`extract_text_from_html()` 中 `strncmp(data+i, "&quot;", 6)` 等比较只检查了 `size - i > 3`，缓冲区末尾的实体可能越界读。已按实际剩余长度逐项检查。
+
+### 修复后四格式回归测试
+
+| 格式 | 测试书 | 章节 | 页数 | 结果 |
+|------|--------|------|------|------|
+| PDF | DDIA（613页，24MB） | 210 → 全部重映射 | 1,994 | ✅ 章节内容抽查正确 |
+| MOBI | 一站式学习C编程（KF7） | 158 | 570 | ✅ 不再崩溃，中文正确 |
+| AZW3 | Linux内核API参考手册（KF8） | 367 | 854 | ✅ 0.3s |
+| EPUB | Django 6 Web 开发 | 22 | 544 | ✅ |
+
+**注意**：`/opt/books/ddia` 是问题 22 修复前的错误数据（页面只有注释无正文），需要重新导入。
+
+---
+
 *文档版本：2026-06-11 v4（新增问题 16-21、HTML→Markdown 格式保留、性能优化汇总）*
+*v5 (2026-09-09)：问题 22-27（PDF 页码偏移重映射、MOBI 下溢崩溃/越界读、预扫描优化、tmpfs 搬运）；新增 book2audio 有声书组件*
 *适用于：explore_book.sh + import_book + mobi_wrapper + epub_wrapper 最新版本*

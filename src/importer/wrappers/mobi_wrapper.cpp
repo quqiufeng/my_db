@@ -239,12 +239,13 @@ static void extract_text_from_html(const char* data, size_t size, std::string& r
         if (!in_tag && !in_pre) {
             // HTML entities
             if (c == '&' && size - i > 3) {
-                if (strncmp(data + i, "&amp;", 5) == 0) { result += '&'; i += 4; continue; }
-                if (strncmp(data + i, "&lt;", 4) == 0) { result += '<'; i += 3; continue; }
-                if (strncmp(data + i, "&gt;", 4) == 0) { result += '>'; i += 3; continue; }
-                if (strncmp(data + i, "&quot;", 6) == 0) { result += '"'; i += 5; continue; }
-                if (strncmp(data + i, "&nbsp;", 6) == 0) { result += ' '; i += 5; continue; }
-                if (strncmp(data + i, "&apos;", 6) == 0) { result += '\''; i += 5; continue; }
+                size_t r = size - i;
+                if (r >= 5 && strncmp(data + i, "&amp;", 5) == 0) { result += '&'; i += 4; continue; }
+                if (r >= 4 && strncmp(data + i, "&lt;", 4) == 0) { result += '<'; i += 3; continue; }
+                if (r >= 4 && strncmp(data + i, "&gt;", 4) == 0) { result += '>'; i += 3; continue; }
+                if (r >= 6 && strncmp(data + i, "&quot;", 6) == 0) { result += '"'; i += 5; continue; }
+                if (r >= 6 && strncmp(data + i, "&nbsp;", 6) == 0) { result += ' '; i += 5; continue; }
+                if (r >= 6 && strncmp(data + i, "&apos;", 6) == 0) { result += '\''; i += 5; continue; }
                 if (data[i+1] == '#') {
                     char* end = nullptr;
                     long code = strtol(data + i + 2, &end, 10);
@@ -364,10 +365,12 @@ API int mobi_get_metadata(void* handle,
 
     if (author && author_len > 0) {
         // libmobi 的 EXTH 记录中，EXTH_AUTHOR 是作者
+        // 注意：exth->data 是原始字节，不保证 NUL 结尾，必须按 exth->size 截断
         const MOBIExthHeader* exth = mobi_get_exthrecord_by_tag(h->m, EXTH_AUTHOR);
-        if (exth && exth->data) {
-            strncpy(author, (const char*)exth->data, author_len - 1);
-            author[author_len - 1] = '\0';
+        if (exth && exth->data && exth->size > 0) {
+            size_t n = exth->size < author_len - 1 ? exth->size : author_len - 1;
+            memcpy(author, exth->data, n);
+            author[n] = '\0';
         } else {
             author[0] = '\0';
         }
@@ -580,6 +583,14 @@ API int mobi_get_chapter_text(void* handle, int chapter_index, char** out_text, 
         } else {
             break;
         }
+    }
+    
+    // 关键：上面的标签/UTF-8 修复可能把 posoff 推过 end_offset，
+    // 此时 end_offset - posoff 作为 size_t 会下溢成巨大值，导致越界读崩溃
+    if (posoff >= end_offset) {
+        *out_text = nullptr;
+        *out_len = 0;
+        return -1;
     }
     
     size_t text_len = end_offset - posoff;

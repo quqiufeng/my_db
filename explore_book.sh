@@ -404,7 +404,7 @@ cmd_read() {
             local kv_found=$("$CACHE_QUERY" "$search_key" --type exact --cache-dir /book/cache --pretty 2>/dev/null | grep -c '"type":"page"')
             if [[ "$kv_found" -gt 0 ]]; then
                 local kv_val=$("$CACHE_QUERY" "$search_key" --type exact --cache-dir /book/cache --pretty 2>/dev/null)
-                local md_file=$(echo "$kv_val" | grep -oP '"md_file":"[^"]*"' | head -1 | sed 's/"md_file":"//;s/"//g')
+                local md_file=$(echo "$kv_val" | grep -oP '"md_file":\s*"[^"]*"' | head -1 | sed 's/"md_file":\s*"//;s/"//g')
                 if [[ -n "$md_file" ]]; then
                     current_ch=$(basename "$(dirname "$md_file")")
                 fi
@@ -495,11 +495,11 @@ cmd_read() {
     result=$("$CACHE_QUERY" "$full_key" --type exact --cache-dir /book/cache --pretty 2>&1 | extract_json)
     
     local md_file
-    md_file=$(echo "$result" | grep -oP '"md_file":"[^"]*"' | head -1 | sed 's/"md_file":"//;s/"//g')
+    md_file=$(echo "$result" | grep -oP '"md_file":\s*"[^"]*"' | head -1 | sed 's/"md_file":\s*"//;s/"//g')
     
     # 如果上面的方法失败，直接用 grep
     if [[ -z "$md_file" ]]; then
-        md_file=$(echo "$result" | grep -oP '"md_file":"\K[^"]+' || true)
+        md_file=$(echo "$result" | grep -oP '"md_file":\s*"\K[^"]+' || true)
     fi
     
     # 兼容旧格式：相对路径转换为绝对路径

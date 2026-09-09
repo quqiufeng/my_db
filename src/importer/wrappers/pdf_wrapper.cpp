@@ -117,9 +117,14 @@ API int pdf_extract_text(void* handle, char** out_text, size_t* out_len) {
             page = fz_load_page(h->ctx, h->doc, i);
         }
         fz_catch(h->ctx) {
+            // 页加载失败也要输出分页标记，保证 页码 → 字节偏移 映射对齐
+            result += "\n--- Page Break ---\n\n";
             continue;
         }
-        if (!page) continue;
+        if (!page) {
+            result += "\n--- Page Break ---\n\n";
+            continue;
+        }
 
         fz_stext_page* text_page = nullptr;
         fz_try(h->ctx) {
@@ -127,6 +132,7 @@ API int pdf_extract_text(void* handle, char** out_text, size_t* out_len) {
         }
         fz_catch(h->ctx) {
             fz_drop_page(h->ctx, page);
+            result += "\n--- Page Break ---\n\n";
             continue;
         }
 
@@ -147,9 +153,11 @@ API int pdf_extract_text(void* handle, char** out_text, size_t* out_len) {
                     result += "\n";
                 }
             }
-            result += "\n--- Page Break ---\n\n";
             fz_drop_stext_page(h->ctx, text_page);
         }
+        // 每页固定输出分页标记（无论该页是否有文本），import_book 据此将
+        // outline 页码映射为文本字节偏移
+        result += "\n--- Page Break ---\n\n";
         fz_drop_page(h->ctx, page);
     }
 
