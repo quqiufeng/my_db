@@ -543,13 +543,13 @@ make tools/book2audio
 
 ### 5. PDF 高精度 OCR 识别方案
 
-对于扫描版 PDF（图片格式页面），传统的文本提取方式（MuPDF `fz_stext_page`）无法提取到文字。本项目集成了 **百度 Unlimited-OCR**（DeepSeek-V2 MoE 架构，64 专家，12 层），提供纯 C++ 的高精度 OCR 识别能力。
+对于扫描版 PDF（图片格式页面），传统的文本提取方式（MuPDF `fz_stext_page`）无法提取到文字。本项目集成 **百度 Unlimited-OCR**（DeepSeek-V2 MoE 架构，64 专家，12 层）。**推理实现用 StaticPy 重写**（`ocrdec/ocr_kv.py`，与 transformers 参考逐 token 一致，可编译为独立 ELF），`tools/ocr_cuda` 作为 PDF 渲染 + 词表解码外壳调用它。详见 [ocrdec/README.md](ocrdec/README.md)。
 
 > **何时该用 `--ocr`（2026-09 实测结论）**：
-> - **数字版 PDF（有文本层）→ 不要用 OCR**。MuPDF 正文逐字节精确、整本秒级完成；OCR 约 38 秒/页（472 页 ≈ 5 小时），且会引入大量幻觉错误（实测：`PULL`→`PUTLS`、`every`→`cvyr`、`DIJKSTRA`→`DUKSTRA`、引号 mojibake、段落重复）。MuPDF 唯一的损失是自定义字体符号（如数学箭头 →）变为 U+FFFD，影响远小于 OCR 的错误。
+> - **数字版 PDF（有文本层）→ 不要用 OCR**。MuPDF 正文逐字节精确、整本秒级完成；OCR 单页约 10-15 秒（含模型加载 + 解码），且对数学/伪代码书有幻觉错误。MuPDF 唯一的损失是自定义字体符号（如数学箭头 →）变为 U+FFFD，影响远小于 OCR 的错误。
 > - **扫描版 PDF（无文本层）→ 必须用 OCR**，这是唯一选择。
 >
-> **ocr_cuda 重编译说明**：torch 2.4 升级到 2.6 后 ABI 不兼容（旧二进制 `undefined symbol: torch::jit::Object::find_method`），需**去掉** `-D_GLIBCXX_USE_CXX11_ABI=0` 重新编译（PyPI 官方 torch 2.6 使用新 ABI）。
+> **推理实现**：`ocr_kv`（StaticPy ELF）负责 vision + 12 层 MoE 解码器 + KV cache，一次加载权重可处理多页；`ocr_engine.cpp` 只做 MuPDF 渲染 + vocab 解码 + popen 调 `ocr_kv`。不再依赖手写 C++ 推理（旧 `ocr_cuda.cpp` 已删除）。
 
 #### 架构概览
 
@@ -557,56 +557,24 @@ make tools/book2audio
 用户请求 --ocr 标志
       │
       ▼
-  import_book (C)
-      │ popen() 调用
-      ▼
-  tools/ocr_cuda (C++ 独立二进制)
+  import_book (C) ── popen() ──► tools/ocr_cuda（引擎外壳，只链 MuPDF）
+                                    │
+                                    ├─ 1. MuPDF 渲染 PDF 每页 → PPM
+                                    ├─ 2. popen() 调 ocr_kv（一次加载、处理全部页）
+                                    ├─ 3. vocab 解码 → <PAGE> 文本
+                                    ▼
+                              ocr_kv（StaticPy ELF，推理核心）
+                              ┌──────────────────────────────┐
+                              │  每页: load_image → resize640 │
+                              │  → normalize → vision (jit)  │
+                              │  → BOS+111×feats+tail (115t)  │
+                              │  → 12层 MoE decoder (KV cache)│
+                              │  → 贪心解码 → token id 流     │
+                              └──────────────────────────────┘
 
-  流式处理每页（render → vision → OCR → 输出）：
-      ┌─────────────────────────────────────┐
-      │         for each page 0..N          │
-      │                                     │
-      │  ┌──────────┐  ┌──────────┐         │
-      │  │ MuPDF    │  │  Vision  │         │
-      │  │ Render   │─→│ Pipeline │         │
-      │  │ (RGB)    │  │ (SAM+CLIP)│         │
-      │  └──────────┘  └────┬─────┘         │
-      │                     │               │
-      │  ┌──────────────────▼──────────┐    │
-      │  │  Input: BOS + 111×<image>  │    │
-      │  │  + "document parsing."     │    │
-      │  │  (115 tokens)              │    │
-      │  └──────────────────┬──────────┘    │
-      │                     │               │
-      │  ┌──────────────────▼──────────┐    │
-      │  │   Decoder: 12 层 Transformer│    │
-      │  │   (MoE 64 experts, top-6)   │    │
-      │  │   RMSNorm + RoPE + 35-gram  │    │
-      │  │   防重复解码                 │    │
-      │  └──────────────────┬──────────┘    │
-      │                     │               │
-      │  ┌──────────────────▼──────────┐    │
-      │  │   lm_head → 词表 (129280)   │    │
-      │  │   贪心解码 → EOS 停止       │    │
-      │  └──────────────────┬──────────┘    │
-      │                     │               │
-      │  ┌──────────────────▼──────────┐    │
-      │  │  decode 清理:               │    │
-      │  │  · Ċ → 换行                │    │
-      │  │  · <|...|> 标签剥离         │    │
-      │  │  · 坐标 [x,y,w,h] 清除      │    │
-      │  │  · EOS/特殊字符去除          │    │
-      │  └──────────────────┬──────────┘    │
-      │                     │               │
-      │  stdout: <PAGE>\n识别文字\n        │
-      └─────────────────────┼───────────────┘
-                            │
-                    累计所有页输出
-
-  stdout 格式:
+  ocr_cuda stdout 格式:
   ---OCR_CHAPTERS:{"chapters":[{...},...]}---  ＜-- 先输出（立即）
-  <PAGE>                                          ＜-- 逐页流式输出
-  header O'REILLY®
+  <PAGE>                                          ＜-- 逐页
   title Designing Data-Intensive Applications
   text Data is at the center of...
   <PAGE>
@@ -618,10 +586,12 @@ make tools/book2audio
 
 | 文件 | 说明 |
 |------|------|
-| `tools/ocr_cuda.cpp` | 纯 C++ OCR 二进制源码 (735 行) |
-| `tools/ocr_cuda` | 编译后的二进制 (44 MB) |
-| `tools/ocr_pdf.py` | Python OCR 预处理器（早期原型，保留作参考） |
+| `tools/ocr_engine.cpp` | OCR 引擎 C++ 源码（MuPDF 渲染 + vocab 解码，推理调 ocr_kv 子进程） |
+| `tools/ocr_cuda` | 编译后的引擎二进制（协议名不变，ocr_helper 兼容） |
+| `ocrdec/ocr_kv.py` | **推理实现：StaticPy 重写**（vision + 12 层 MoE 解码器 + KV cache），详见 `ocrdec/README.md` |
 | `tools/import_book.c` | 修改：新增 `--ocr` 标志和 `popen()` 调用路径 |
+
+> **架构（2026-09 重构）**：OCR 推理从手写 C++（`ocr_cuda.cpp`）替换为 **StaticPy** 重写。`ocr_kv.py` 是百度 Unlimited-OCR 解码器的 StaticPy 实现（与 transformers 参考逐 token 一致，可编译成独立 ELF）。`tools/ocr_engine.cpp` 只负责 PDF 渲染 + 词表解码 + 调用 `ocr_kv` 子进程，不再包含模型推理。详见 `ocrdec/README.md`。
 
 #### 权重文件存储
 
@@ -676,26 +646,24 @@ rm -f weights.pt                                 # 中间产物可删除
 
 #### 编译方法
 
-```bash
-# 依赖
-#   - CUDA 12.6 + GPU (RTX 3080 20GB+)
-#   - LibTorch (来自 /data/venv, Python 3.12.3, torch 2.6.0+cu126)
-#   - MuPDF 静态库 (/opt/mupdf/build/release/libmupdf.a)
-#   - 系统 GCC（torch 2.6 用新 ABI，不要加 -D_GLIBCXX_USE_CXX11_ABI=0；
-#     torch 2.4 时代才需要该 flag）
+推理实现（StaticPy）先编译为 ELF：
 
-g++ -std=c++17 \
-    -I/data/venv/lib/python3.12/site-packages/torch/include \
-    -I/data/venv/lib/python3.12/site-packages/torch/include/torch/csrc/api/include \
+```bash
+# 1) 编译 ocr_kv（StaticPy → ELF，独立二进制）
+#    产物: /opt/my_db/ocrdec/ocr_kv（详见 ocrdec/README.md）
+cd /opt/my_db/ocrdec && bash build.sh
+
+# 2) 编译 OCR 引擎（只链 MuPDF，推理走 ocr_kv 子进程）
+g++ -std=c++17 -O2 \
     -I/opt/mupdf/include \
     -o tools/ocr_cuda \
-    tools/ocr_cuda.cpp \
-    -L/opt/mupdf/build/release -lmupdf -lmupdf-third \
-    -L/data/venv/lib/python3.12/site-packages/torch/lib \
-    -ltorch -ltorch_cpu -lc10 -ltorch_cuda -lc10_cuda \
-    -Wl,-rpath,/data/venv/lib/python3.12/site-packages/torch/lib \
-    -lpthread -O2
+    tools/ocr_engine.cpp \
+    /opt/mupdf/build/release/libmupdf.a \
+    /opt/mupdf/build/release/libmupdf-third.a \
+    -lz -lm -lpthread -ldl
 ```
+
+> 旧版 `ocr_cuda.cpp`（手写 libtorch 推理，735 行）已删除，被 `ocr_engine.cpp` + `ocrdec/ocr_kv.py`（StaticPy）取代。
 
 #### import_book 集成方式
 

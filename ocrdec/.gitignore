@@ -1,0 +1,3 @@
+# ocrdec 构建产物（build.sh 生成）
+ocr_kv
+ocr_kv.so
