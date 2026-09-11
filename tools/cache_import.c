@@ -25,6 +25,12 @@ extern void cache_close(void* cache);
 extern int cache_sync(void* cache);
 extern int cache_set(void* cache, const char* key, const char* value, uint64_t ttl);
 extern size_t cache_memory_used(void* cache);
+typedef struct {
+    const char* key;
+    const char* value;
+    uint64_t ttl_ms;
+} cache_batch_item_t;
+extern int cache_batch_set(void* cache, const cache_batch_item_t* items, size_t count);
 
 static void* g_cache = NULL;
 static int g_total_keys = 0;
@@ -57,27 +63,54 @@ static void log_progress(const char* phase, int done, int total) {
     log_info(msg);
 }
 
-// Safe cache set with size check and periodic sync
+// Batch buffer: use cache_batch_set (one deferred qsort) instead of
+// per-key cache_set (O(n) sorted insert each -> O(n^2) on large caches).
+#define IMPORT_BATCH_SIZE 8192
+static cache_batch_item_t g_batch[IMPORT_BATCH_SIZE];
+static char* g_batch_keys[IMPORT_BATCH_SIZE];
+static char* g_batch_vals[IMPORT_BATCH_SIZE];
+static int g_batch_n = 0;
+
+static void flush_batch(void) {
+    if (g_batch_n == 0) return;
+    int ret = cache_batch_set(g_cache, g_batch, (size_t)g_batch_n);
+    if (ret != 0) {
+        for (int i = 0; i < g_batch_n; i++) {
+            cache_set(g_cache, g_batch_keys[i], g_batch_vals[i], 0);
+        }
+    }
+    for (int i = 0; i < g_batch_n; i++) {
+        free(g_batch_keys[i]);
+        free(g_batch_vals[i]);
+    }
+    g_batch_n = 0;
+}
+
+// Safe cache set with size check; buffers into batches for speed.
 static int safe_set_json(const char* key, const char* value) {
     size_t len = strlen(value);
     if (len >= MAX_VALUE_LEN) {
         log_warn("Value too large, skipping");
         return 0;
     }
-    int ret = cache_set(g_cache, key, value, 0);
-    if (ret == 0) {
-        g_total_keys++;
-        if (g_total_keys % SYNC_INTERVAL == 0) {
-            cache_sync(g_cache);
-            char msg[128];
-            time_t now = time(NULL);
-            double elapsed = difftime(now, g_start_time);
-            snprintf(msg, sizeof(msg), "Synced at %d keys (elapsed %.0fs, %.0f keys/s)",
-                     g_total_keys, elapsed, elapsed > 0 ? g_total_keys / elapsed : 0);
-            log_info(msg);
-        }
+    char* k = strdup(key);
+    char* v = strdup(value);
+    if (!k || !v) {
+        free(k);
+        free(v);
+        return 0;
     }
-    return ret == 0;
+    g_batch_keys[g_batch_n] = k;
+    g_batch_vals[g_batch_n] = v;
+    g_batch[g_batch_n].key = k;
+    g_batch[g_batch_n].value = v;
+    g_batch[g_batch_n].ttl_ms = 0;
+    g_batch_n++;
+    g_total_keys++;
+    if (g_batch_n >= IMPORT_BATCH_SIZE) {
+        flush_batch();
+    }
+    return 1;
 }
 
 // Import a single chunk into KV Cache (raw JSON, no re-parse)
@@ -476,6 +509,7 @@ int main(int argc, char** argv) {
         store_metadata(namespace, analysis_dir);
     }
     
+    flush_batch();
     cache_sync(g_cache);
     
     char msg[128];

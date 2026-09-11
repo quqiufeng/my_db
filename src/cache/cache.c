@@ -315,13 +315,11 @@ cache_t* cache_open(const char* db_dir, size_t max_memory) {
         clock_gettime(CLOCK_MONOTONIC, &t_now);
         long init_ms = (t_now.tv_sec - t_start.tv_sec) * 1000 + (t_now.tv_nsec - t_start.tv_nsec) / 1000000;
         
-        // index.bin may reference offsets that are no longer valid in a
-        // corrupted cache.bin; validate the pool first and fall back to a
-        // full scan/rebuild instead of SIGSEGV'ing on bad offsets.
-        bool pool_ok = cache_pool_validate(cache);
-        if (!pool_ok)
-            fprintf(stderr, "[CACHE] pool validation failed, forcing rebuild\n");
-        int index_loaded = (pool_ok && cache_index_load(cache) == 0);
+        // 优先加载持久化索引（零拷贝）。cache_index_load 内部会校验 entry
+        // 偏移是否仍落在 pool 内且头部完好，失败返回 -1，再走扫描重建。
+        // 旧的线性 pool 校验不适用于「哈希桶与 entry 交错」的实际布局，
+        // 会把合法缓存误判为损坏，故不再使用。
+        int index_loaded = (cache_index_load(cache) == 0);
         clock_gettime(CLOCK_MONOTONIC, &t_now);
         long load_ms = (t_now.tv_sec - t_start.tv_sec) * 1000 + (t_now.tv_nsec - t_start.tv_nsec) / 1000000 - init_ms;
         
@@ -338,6 +336,15 @@ cache_t* cache_open(const char* db_dir, size_t max_memory) {
         } else {
             // 加载失败，回退到扫描重建
             printf("[CACHE] No persisted index found, rebuilding...\n");
+            
+            // cache_index_load 失败时已释放并重置索引结构，这里重新初始化
+            if (cache_hash_init(cache) < 0 || cache_sorted_init(cache) < 0 ||
+                cache_ns_init(cache) < 0 || cache_tag_index_init(cache) < 0 ||
+                cache_vector_index_init(cache) < 0) {
+                pool_close(&cache->pool);
+                free(cache);
+                return NULL;
+            }
             
             // 扫描所有 entry（通过 key_len 识别有效的 entry）
             size_t offset = CACHE_HEADER_SIZE;

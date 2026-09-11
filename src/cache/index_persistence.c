@@ -10,6 +10,7 @@
 #include <string.h>
 #include <errno.h>
 
+#define CACHE_PTR(cache, offset) ((void*)((char*)(cache)->pool.base + (offset)))
 #define INDEX_FILE_NAME "index.bin"
 
 // ====== Namespace Tree Persistence ======
@@ -376,6 +377,50 @@ int cache_index_save(cache_t* cache) {
     return 0;
 }
 
+// 释放已加载的索引结构（用于加载后发现偏移非法时回滚）
+static void discard_loaded_index(cache_t* cache) {
+    if (cache->sorted.offsets) {
+        free(cache->sorted.offsets);
+        cache->sorted.offsets = NULL;
+        cache->sorted.count = 0;
+        cache->sorted.capacity = 0;
+        cache->sorted.dirty = 0;
+    }
+    if (cache->vector_index.entries) {
+        free(cache->vector_index.entries);
+        cache->vector_index.entries = NULL;
+        cache->vector_index.count = 0;
+        cache->vector_index.capacity = 0;
+    }
+    if (cache->vector_index.hnsw) {
+        hnsw_destroy(cache->vector_index.hnsw);
+        cache->vector_index.hnsw = NULL;
+        cache->vector_index.use_hnsw = 0;
+    }
+    if (cache->ns_root) {
+        cache_ns_destroy(cache);
+    }
+    cache->hash.buckets_offset = 0;
+    cache->hash.bucket_count = 0;
+    cache->hash.size = 0;
+}
+
+// 校验持久化 sorted 索引引用的 entry 偏移是否仍落在 pool 内且头部完好。
+// cache.bin 被截断/损坏后，旧索引会引用越界偏移，直接使用会 SIGSEGV。
+static int loaded_offsets_valid(cache_t* cache) {
+    if (cache->sorted.count == 0) return 1;  // 无条目，交给上层重建
+    size_t used = cache->pool.used;
+    for (size_t i = 0; i < cache->sorted.count; i++) {
+        size_t off = cache->sorted.offsets[i];
+        if (off < CACHE_HEADER_SIZE || off + CACHE_ENTRY_HEADER_ALIGNED > used) return 0;
+        cache_entry_header_t* h = (cache_entry_header_t*)CACHE_PTR(cache, off);
+        if (h->key_len == 0 || h->key_len > CACHE_MAX_KEY_LEN ||
+            h->value_len > CACHE_MAX_VALUE_LEN) return 0;
+        if (off + cache_entry_total_size(h) > used) return 0;
+    }
+    return 1;
+}
+
 int cache_index_load(cache_t* cache) {
     if (!cache) return -1;
     
@@ -536,6 +581,14 @@ int cache_index_load(cache_t* cache) {
                 fprintf(stderr, "[CACHE] Unknown index type: %d\n", entry->type);
                 break;
         }
+    }
+    
+    // 校验加载的偏移，非法则回滚并让上层重建
+    if (!loaded_offsets_valid(cache)) {
+        fprintf(stderr, "[CACHE] persisted index references invalid offsets, discarding\n");
+        munmap(base, file_size);
+        discard_loaded_index(cache);
+        return -1;
     }
     
     // Store mmap info for cleanup

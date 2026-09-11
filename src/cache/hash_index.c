@@ -101,12 +101,13 @@ int cache_hash_insert(cache_t* cache, size_t entry_offset, const char* key, size
     
     uint64_t h = hash_fnv1a(key, key_len);
     size_t idx = h % cache->hash.bucket_count;
-    
-    cache_hash_bucket_t* buckets = (cache_hash_bucket_t*)CACHE_PTR(cache, cache->hash.buckets_offset);
-    
-    // 检查是否已存在（更新）
-    size_t* pp = &buckets[idx].entry_offset;
-    size_t current = buckets[idx].entry_offset;
+    size_t buckets_offset = cache->hash.buckets_offset;
+
+    // 用偏移量而非裸指针跟踪插入点：pool_alloc 可能触发 pool_resize /
+    // mremap 搬移整个映射，alloc 之前缓存的指针在 alloc 之后会失效
+    // （曾导致写野指针 SIGSEGV）。prev_offset==0 表示链头。
+    size_t prev_offset = 0;
+    size_t current = ((cache_hash_bucket_t*)CACHE_PTR(cache, buckets_offset))[idx].entry_offset;
     while (current) {
         cache_hash_bucket_t* b = (cache_hash_bucket_t*)CACHE_PTR(cache, current);
         cache_entry_header_t* header = (cache_entry_header_t*)CACHE_PTR(cache, b->entry_offset);
@@ -117,20 +118,27 @@ int cache_hash_insert(cache_t* cache, size_t entry_offset, const char* key, size
             b->entry_offset = entry_offset;
             return 0;
         }
-        pp = &b->next_offset;
+        prev_offset = current;
         current = b->next_offset;
     }
     
-    // 分配新 bucket 节点
-    size_t node_offset = (size_t)((char*)pool_alloc(&cache->pool, sizeof(cache_hash_bucket_t)) - (char*)cache->pool.base);
-    if (!node_offset) return -1;
+    // 分配新 bucket 节点（可能搬移 mmap，故先不缓存任何 pool 指针）
+    void* node_ptr = pool_alloc(&cache->pool, sizeof(cache_hash_bucket_t));
+    if (!node_ptr) return -1;
+    size_t node_offset = (size_t)((char*)node_ptr - (char*)cache->pool.base);
     
-    cache_hash_bucket_t* new_node = (cache_hash_bucket_t*)CACHE_PTR(cache, node_offset);
+    cache_hash_bucket_t* new_node = (cache_hash_bucket_t*)node_ptr;
     new_node->entry_offset = entry_offset;
     new_node->next_offset = 0;
     
-    // 添加到链尾
-    *pp = node_offset;
+    // 从偏移量重新解析插入点（映射可能已被搬移）
+    if (prev_offset == 0) {
+        cache_hash_bucket_t* head = (cache_hash_bucket_t*)CACHE_PTR(cache, buckets_offset);
+        head[idx].entry_offset = node_offset;
+    } else {
+        cache_hash_bucket_t* prev = (cache_hash_bucket_t*)CACHE_PTR(cache, prev_offset);
+        prev->next_offset = node_offset;
+    }
     cache->hash.size++;
     
     return 0;
