@@ -734,9 +734,25 @@ static int search_hnsw(ve_source_t* source, const float* query_vec, int top_k,
             if (sim > 1.0f) sim = 1.0f;
         }
         
+        // Lookup metadata once (noise penalty + filters 共用)
+        meta_entry_t* meta = NULL;
+        if (opts) {
+            meta = lookup_meta(name);
+        }
+        
+        // Noise penalty: 测试/自测路径降权 15%（实测：抽象算法查询曾被
+        // kasan_test_c / locktorture / torture_* 噪音顶到前排，盖过真实核心函数）
+        if (meta && meta->file) {
+            const char* fp = meta->file;
+            if (strstr(fp, "/test") || strstr(fp, "torture") || strstr(fp, "kunit")
+                || strstr(fp, "selftest") || strstr(fp, "/tools/testing")
+                || strstr(fp, "mock") || strstr(fp, "fuzzer")) {
+                sim *= 0.85f;
+            }
+        }
+        
         // Apply filters using metadata
         if (opts && (opts->kind_filter || opts->lang_filter || opts->file_filter)) {
-            meta_entry_t* meta = lookup_meta(name);
             if (!meta) continue;
             if (opts->kind_filter && strcasecmp(meta->kind, opts->kind_filter) != 0) continue;
             if (opts->lang_filter && strcasecmp(meta->language, opts->lang_filter) != 0) continue;

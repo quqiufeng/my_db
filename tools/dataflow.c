@@ -5,7 +5,7 @@
 #include <jansson.h>
 
 #define MAX_LINE 131072
-#define MAX_VARS 2000
+#define MAX_VARS 10000  /* 2000→10000: 中频变量找不到（PG htup/slot） */
 #define MAX_OCCURS 200
 #define MAX_FIELDS 50
 #define MAX_FUNCS 5000
