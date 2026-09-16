@@ -601,16 +601,48 @@ int main(int argc, char** argv) {
     printf("Phase 3: Building call graph with arguments...\n");
 
     // Text-based call detection for bodies (backward compat + ctags)
+    // 性能修复（2026-09-16）：旧实现 O(bodies × functions × strstr) ——
+    // 115k chunks 需 ~10 分钟，147 万 chunks 估算数天（"卡死"）。
+    // 新实现：每个 body 只扫一遍，tokenize 标识符 → is_func_known 哈希查找，
+    // 命中且后跟 '(' 才调用 find_call_with_args 提参数 → O(总文本)。
     func_body_t* b = bodies;
     while (b) {
-        for (int f = 0; f < g_func_count; f++) {
-            const char* callee = g_func_names[f];
-            if (strcmp(b->name, callee) == 0) continue;
-            if (strlen(callee) < 2) continue;
-
-            char args[1024];
-            if (find_call_with_args(b->content, callee, args, sizeof(args))) {
-                add_call_edge(callee, b->name, b->file, b->line_start, args);
+        // 每 body 去重小哈希（旧行为：同一 (callee, body) 只记一条边）
+        unsigned int seen[256];
+        memset(seen, 0, sizeof(seen));
+        const char* p = b->content;
+        while (*p) {
+            if (isalpha((unsigned char)*p) || *p == '_') {
+                const char* start = p;
+                while (isalnum((unsigned char)*p) || *p == '_') p++;
+                int tlen = (int)(p - start);
+                if (tlen >= 2 && tlen < MAX_NAME_LEN) {
+                    const char* q = p;
+                    while (*q && isspace((unsigned char)*q)) q++;
+                    if (*q == '(') {
+                        char tok[MAX_NAME_LEN];
+                        memcpy(tok, start, tlen);
+                        tok[tlen] = '\0';
+                        if (strcmp(b->name, tok) != 0 && is_func_known(tok)) {
+                            unsigned int sh = hash_str(tok) % 256;
+                            int dup = 0, probes = 0;
+                            while (seen[sh] && probes < 256) {
+                                if (seen[sh] == hash_str(tok)) { dup = 1; break; }
+                                sh = (sh + 1) % 256;
+                                probes++;
+                            }
+                            if (!dup) {
+                                seen[sh] = hash_str(tok);
+                                char args[1024];
+                                if (find_call_with_args(b->content, tok, args, sizeof(args))) {
+                                    add_call_edge(tok, b->name, b->file, b->line_start, args);
+                                }
+                            }
+                        }
+                    }
+                }
+            } else {
+                p++;
             }
         }
         b = b->next;
