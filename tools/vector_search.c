@@ -196,7 +196,7 @@ int main(int argc, char** argv) {
     int max_results = 10;
     const char* target_ns = NULL;
     
-    const char* model_type = "mpnet";
+    const char* model_type = "jina";
     vector_search_opts_t opts = {0};
     
     // Parse arguments
@@ -245,7 +245,7 @@ int main(int argc, char** argv) {
                 printf("  --rich       Include full code context\n");
                 printf("  --callgraph  Show function call relationships\n");
                 printf("  --snippet    Search by code snippet file\n");
-                printf("  --model      Model type: mpnet (default) or jina\n");
+                printf("  --model      Model type: jina (default) or mpnet\n");
                 printf("  --kind       Filter by symbol kind\n");
                 printf("  --lang       Filter by language\n");
                 printf("  --file       Filter by filename pattern\n");
