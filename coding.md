@@ -33,23 +33,35 @@
 |------|----------|----------|----------|------|-------------|
 | Linux Kernel | /opt/linux/src/linux-7.0.11 | /code/linux | /code/linux | ✅ 2026-06-10 | 已完成（不含 drivers） |
 | OpenResty | /opt/openresty-1.31.1.1 | /code/openresty | /code/openresty | ✅ 2026-06-10 | 已完成 |
-| Redis | 待下载 | /code/redis | /code/redis | 待探索 | — |
+| Redis | /opt/redis | /code/redis | /code/redis | ✅ 2026-08-28 | 已完成（10658 chunks） |
 | stable-diffusion.cpp | /opt/sd | /code/sd | /code/sd | 已完成 | 2026-07-07 |
 | llama.cpp | /opt/llama.cpp | /code/llama.cpp | /code/llama.cpp | ✅ 2026-06-10 | 已完成 |
-| PostgreSQL | 待下载 | /code/postgresql | /code/postgresql | 待探索 | — |
+| **PostgreSQL** | /opt/postgresql（git，2023+ 历史，更新至 2026-09-16） | /code/postgresql | /code/postgresql | ✅ 2026-09-16 | 56627 chunks，索引重建完成 |
 | SQLite | 待下载 | /code/sqlite | /code/sqlite | 待探索 | — |
 | RocksDB | 待下载 | /code/rocksdb | /code/rocksdb | 待探索 | — |
 | HAProxy | 待下载 | /code/haproxy | /code/haproxy | 待探索 | — |
 | libuv | 待下载 | /code/libuv | /code/libuv | 待探索 | — |
 | whisper.cpp | 待下载 | /code/whisper.cpp | /code/whisper.cpp | 待探索 | — |
-| CPython | /opt/cpython/src | /code/python | /code/python | ✅ 2026-06-10 | 已完成 |
+| CPython | /opt/cpython/src（git，更新至 2026-09-16） | /code/python | /code/python | ✅ 2026-09-16 重建 | 67590 chunks，索引重建完成 |
 | LuaJIT | https://github.com/LuaJIT/LuaJIT | /code/luajit | /code/LuaJIT/LuaJIT | ✅ 2026-06-10 | 已完成 |
 | HotSpot JVM | 待下载 | /code/hotspot | /code/hotspot | 待探索 | — |
 | mruby | 待下载 | /code/mruby | /code/mruby | 待探索 | — |
 | Zig | https://github.com/ziglang/zig | /code/zig | /code/zig | 待探索 | — |
-| PHP | /opt/php/src | /code/php | /code/php | ✅ 2026-06-09 | 已完成 |
+| PHP | /opt/php/src（git，更新至 2026-09-16） | /code/php | /code/php | ✅ 2026-09-16 重建 | 65459 chunks，索引重建完成 |
 | opencode | /opt/opencode | /code/opencode | /code/opencode | ✅ 2026-06-15 | 已完成（Node.js/TypeScript 验证） |
 | ComfyUI | /opt/static_comfyui/ComfyUI | /code/comfyui | /code/comfyui | ✅ 2026-07-05 | 已完成 |
+| **Ruby (CRuby)** | /opt/ruby（git，2023+ 历史，2026-08-31） | /code/ruby | /code/ruby | ✅ 2026-09-16 | 153005 chunks，新建索引 |
+| **Perl5** | /opt/perl5（git，2023+ 历史，2026-09-15） | /code/perl5 | /code/perl5 | ✅ 2026-09-16 | 9311 chunks，新建索引 |
+
+> **2026-09-16 批量重建说明**：CPython/PHP 源码 git 更新至 09-16 后索引全量重建（index+vector 覆盖写）；
+> Ruby/Perl5/PostgreSQL 为新建索引（git 含 2023+ 提交历史，可用于 func_pairs 修复对语料）。
+> 当日全部完成（chunks + vectors + hnsw + call_graph + dataflow），五语言冒烟搜索全部命中。
+> ⚠️ 教训三条：
+> ① code_indexer 的 worker 临时文件是固定 /tmp 名——**索引任务必须串行**，并行会交叉污染（php 的 chunks 曾混入 postgresql 缓存）。
+> ② **hnsw 不在 `vector` 四步流水线里**（词频→embedder→call_graph→dataflow），需单独跑
+>    `tools/build_hnsw_index <cache>/vectors/code_local_{name}.jina.bin --threads 8`。
+> ③ 老缓存若是 root 属主（6 月期），embedder/hnsw 会静默写失败留旧文件——先 `chown -R` 再重建；
+>    验收标准 = **.hnsw 时间戳比 .bin 新**（防旧索引冒充新索引）。
 
 
 > 使用 `./analyze_repo.sh <source>` 分析新项目后，数据会自动保存到 `/code/{project}/`。

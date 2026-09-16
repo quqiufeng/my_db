@@ -1,9 +1,0 @@
-[package]
-name = "agent-cli"
-version.workspace = true
-edition.workspace = true
-
-[dependencies]
-agent-acp = { path = "../acp" }
-tokio.workspace = true
-serde_json.workspace = true
