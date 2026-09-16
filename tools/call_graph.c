@@ -4,8 +4,8 @@
 #include <ctype.h>
 
 #define MAX_NAME_LEN 256
-#define MAX_FUNC 300000
-#define HASH_SIZE 524287
+#define MAX_FUNC 1200000
+#define HASH_SIZE 2097151
 static char** g_func_names = NULL;
 static int g_func_count = 0;
 
@@ -181,6 +181,7 @@ static unsigned int hash_str(const char* s) {
 
 static void add_func_name(const char* name) {
     if (is_noise_symbol(name)) return;
+    if (g_func_count >= MAX_FUNC) return;  // 溢出保护（旧版无检查，300k 后堆越界静默损坏）
     unsigned int h = hash_str(name);
     while (g_name_hash[h] >= 0) {
         if (strcmp(g_func_names[g_name_hash[h]], name) == 0) return;
