@@ -190,6 +190,13 @@ static void add_func_name(const char* name) {
     g_func_names[g_func_count] = strdup(name);
     g_name_hash[h] = g_func_count;
     g_func_count++;
+    // C++ 兼容（2026-09-17）：同时注册裸方法名——chunks 里是 Class::method，
+    // 但调用点写的是 obj.method( / obj->method(，token 只有裸名。
+    // 不注册裸名则 C++ 类方法的调用边全丢（percona 实测：79k 边 vs 应有 ~500k）。
+    const char* sep = strstr(name, "::");
+    if (sep && sep[2]) {
+        add_func_name(sep + 2);
+    }
 }
 
 static int is_func_known(const char* name) {
