@@ -190,6 +190,86 @@ static void json_escape(const char* src, char* dst, size_t dst_size) {
     dst[j] = '\0';
 }
 
+// ---- 从源码取【完整定义】（修：chunks 被窗口切成 Part N，检索只返回一片）----
+static int def_brace_end(const char* s, int n, int open) {
+    int depth = 0;
+    for (int i = open; i < n; i++) {
+        if (s[i] == '{') depth++;
+        else if (s[i] == '}') { if (--depth == 0) return i; }
+    }
+    return -1;
+}
+
+static int def_find(const char* s, int n, const char* name, const char* kind,
+                    int* ps, int* pe) {
+    int nl = (int)strlen(name);
+    if (nl == 0) return 0;
+    for (int i = 0; i + nl <= n; i++) {
+        if (strncmp(s + i, name, nl) != 0) continue;
+        if (i > 0 && (isalnum((unsigned char)s[i-1]) || s[i-1] == '_')) continue;
+        int j = i + nl;
+        if (j < n && (isalnum((unsigned char)s[j]) || s[j] == '_')) continue;
+        int k = j;
+        while (k < n && (s[k]==' '||s[k]=='\t'||s[k]=='\n'||s[k]=='\r')) k++;
+        int open = -1;
+        if (k < n && s[k] == '{') {
+            open = k;                                   // struct/union/enum NAME {
+        } else if (k < n && s[k] == '(') {              // function NAME(...) {
+            int d = 0, m = k;
+            for (; m < n; m++) {
+                if (s[m] == '(') d++;
+                else if (s[m] == ')' && --d == 0) break;
+            }
+            if (m >= n) continue;
+            int t = m + 1;
+            while (t < n && (s[t]==' '||s[t]=='\t'||s[t]=='\n'||s[t]=='\r')) t++;
+            if (t < n && s[t] == '{') open = t;
+        }
+        if (open < 0) continue;
+        int close = def_brace_end(s, n, open);
+        if (close < 0) continue;
+        int st = i;
+        while (st > 0 && s[st-1] != '\n') st--;          // 行首
+        if (kind == NULL || strcmp(kind, "function") == 0) {
+            if (st > 0) {                                // 带上返回类型那一行
+                int prev = st - 2;
+                while (prev > 0 && s[prev-1] != '\n') prev--;
+                int punct = 0;
+                for (int x = prev; x < st - 1; x++)
+                    if (strchr(";{}(),", s[x])) { punct = 1; break; }
+                if (!punct && st - 1 - prev > 0) st = prev;
+            }
+        }
+        *ps = st; *pe = close;
+        return 1;
+    }
+    return 0;
+}
+
+static void print_full_def(const char* file, const char* name, const char* kind) {
+    FILE* fp = fopen(file, "r");
+    if (!fp) return;
+    fseek(fp, 0, SEEK_END);
+    long sz = ftell(fp);
+    fseek(fp, 0, SEEK_SET);
+    if (sz <= 0 || sz > 8L*1024*1024) { fclose(fp); return; }
+    char* buf = malloc(sz + 1);
+    if (!buf) { fclose(fp); return; }
+    size_t rd = fread(buf, 1, sz, fp);
+    buf[rd] = '\0';
+    fclose(fp);
+    int st, en;
+    if (def_find(buf, (int)rd, name, kind, &st, &en)) {
+        printf("    FullDef:\n");
+        for (int i = st; i <= en; i++) {
+            if (i == st || buf[i-1] == '\n') printf("      | ");
+            putchar(buf[i]);
+        }
+        if (buf[en] != '\n') printf("\n");
+    }
+    free(buf);
+}
+
 int main(int argc, char** argv) {
     const char* cache_dir = NULL;
     const char* query = NULL;
@@ -381,15 +461,17 @@ int main(int argc, char** argv) {
                 if (results[i].language[0]) {
                     printf("    Language:  %s\n", results[i].language);
                 }
+                // 优先从源码取【完整定义】（修 chunks 被窗口切碎、只返回一片的问题）
+                if (results[i].file[0] && results[i].name[0]) {
+                    print_full_def(results[i].file, results[i].name, results[i].kind);
+                }
                 if (results[i].content[0]) {
-                    printf("    Code:\n");
+                    printf("    Code(window):\n");
                     char* p = results[i].content;
                     int line_no = 0;
-                    while (*p && line_no < 20) {
+                    while (*p && line_no < 6) {
                         printf("      %c ", '|');
-                        while (*p && *p != '\n') {
-                            putchar(*p++);
-                        }
+                        while (*p && *p != '\n') putchar(*p++);
                         printf("\n");
                         if (*p == '\n') p++;
                         line_no++;
