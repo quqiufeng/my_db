@@ -4,6 +4,58 @@
 
 ---
 
+## 🚀 开发与部署流程（固定）
+
+> **本地开发、远程使用**：本地改源码 → 本地 `make` → `scp` 二进制到远程 → 远程直接用。
+> （远程 `/opt/my_db` **不是 git clone**，含 onnx/cudnn 大库不进 git，**不要指望远程 `git pull`**。）
+> 源码历史在 GitHub **`quqiufeng/my_db`** 留存。
+
+```bash
+# ① 本地改源码（本地 /opt/my_db = git 仓库 quqiufeng/my_db）
+cd /opt/my_db
+vim tools/vector_search.c                 # 例：改某个工具
+git add tools/vector_search.c && git commit -m "..." && git push
+
+# ② 本地编译（不要在远程编译）
+make tools/vector_search                   # 单工具；或 make 全量
+
+# ③ 传二进制到远程
+sshpass -p '<pw>' scp -P <port> tools/vector_search root@<host>:/opt/my_db/tools/
+
+# ④ 远程直接用（无需编译）
+./ai_code_search.sh search <cache_dir> "<query>" <k>
+```
+
+> ⚠️ 索引任务必须**串行**（code_indexer 的 worker 临时文件是固定 `/tmp` 名，并行会交叉污染）。
+
+---
+
+## 🎯 功能与作用
+
+**作用**：把任意代码仓库变成**可自然语言查询的记忆库**，给 LLM 做 **RAG（检索增强）**——
+定位实现、取**完整类型定义**、看调用关系/数据流、找同族实现与用法。
+用途：**读项目 / 改项目 / 写代码**（补 LLM 不知道未见项目类型系统的短板 = 信息对等）。
+
+**核心能力**：
+
+| 能力 | 命令 | 说明 |
+|---|---|---|
+| **语义搜索** | `ai_code_search.sh search <cache> "<自然语言>" [k]` | 功能描述 → 定位 `file:line`；默认 `--rich` **输出完整定义 `FullDef`**（源码花括号配平，不再截断） |
+| 代码片段 | `snippet <cache> <file>` | 按文件/片段匹配 |
+| 变量数据流 | `dataflow <cache> <var>` | 字段级 + 跨函数的 定义/赋值/使用 |
+| 调用关系 | `callgraph <cache>`（search 自带 callers） | 谁调用谁（调用图） |
+| 索引 | `index <repo> <cache> [workers]` | 提取 chunks（函数/结构体/宏/typedef） |
+| 向量 | `vector <cache> [name]` | 词频 + Jina 向量 + 调用图 + 数据流 四步 |
+| 词频 | `word_freq` | TF-IDF 重排（辅助搜索） |
+
+**关键性质（面向 LLM/RAG）**：
+- **信息对等**：`--rich` 现在返回**完整定义**（修了旧的"窗口切成 Part N、只返回一片"）。
+- **精确定位**：以 `file:symbol` 为准（版本免疫），行号仅参考。
+- **多维证据**：语义检索 + 调用图 + 数据流可交叉验证。
+- **本地隐私**：C 引擎 + GPU 向量，代码不出机器。
+
+---
+
 ## 项目文件存储目录
 
 所有探索开源项目生成的数据文件统一保存在 **`/code/`** 目录下，按项目名组织：
