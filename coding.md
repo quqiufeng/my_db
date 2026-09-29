@@ -56,6 +56,31 @@ sshpass -p '<pw>' scp -P <port> tools/vector_search root@<host>:/opt/my_db/tools
 
 ---
 
+## 🔧 索引生成流程（严格：index + vector + hnsw，**缺一不可**）
+
+> ⚠️ **只跑 `index` → 没有向量 → 语义搜索 `search` 失效**（search 靠 Jina 向量；
+> chunks 一旦重建，向量必须一起重算，否则**向量与 chunks 对不上**）。
+
+```bash
+cd /opt/my_db
+# ① 抽取 chunks（CPU：ctags + AST 文本解析，workers 并行）
+./ai_code_search.sh index  <repo_path> <cache_dir> [workers]
+# ② 生成向量 + 调用图 + 数据流（GPU：Jina/TensorRT；四步 = 词频 → 向量 → 调用图 → 数据流）
+./ai_code_search.sh vector <cache_dir> <project_name>
+# ③ 构建 HNSW 近邻索引（⚠️ 不在 vector 四步流水线里，必须单独跑）
+./tools/build_hnsw_index <cache_dir>/vectors/code_local_<project_name>.jina.bin --threads 8
+```
+
+**纪律（血泪教训）**：
+1. **索引任务必须串行**——`code_indexer` 的 worker 临时文件是固定 `/tmp` 名，并行会交叉污染缓存。
+2. **`index` 是 CPU（ctags），`vector` 是 GPU（Jina/TensorRT）**——**重建索引后必须重算向量**，
+   否则 `search` 的向量与 chunks 不匹配 → 语义搜索失效。
+3. **HNSW 不在 `vector` 流水线内**（四步不含 hnsw）——必须单独 `build_hnsw_index`。
+4. **验收标准**：`.hnsw` 时间戳**新于** `.bin`（防旧索引冒充新索引）；`search` 冒烟命中。
+5. **老缓存 root 属主** → embedder/hnsw 静默写失败留旧文件 → 先 `chown -R` 再重建。
+
+---
+
 ## 项目文件存储目录
 
 所有探索开源项目生成的数据文件统一保存在 **`/code/`** 目录下，按项目名组织：
