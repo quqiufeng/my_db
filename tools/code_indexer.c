@@ -637,6 +637,22 @@ static int json_escape_str(const char* src, char* dst, int max_len) {
     return j;
 }
 
+// 从函数名所在行回溯到声明开头（含返回类型/限定符行，如 "static void"/"ngx_int_t"）
+static int decl_start(char** file_lines, int count, int line) {
+    int s = line;
+    while (s > 1 && s - 1 <= count) {
+        const char* p = file_lines[s - 2];
+        while (*p == ' ' || *p == '\t' || *p == '\r') p++;
+        if (*p == '\0' || *p == '#' || *p == '/' || *p == '*') break;   // 空/预处理/注释
+        int punct = 0;
+        for (const char* q = p; *q; q++)
+            if (*q == ';' || *q == '{' || *q == '}' || *q == '(' || *q == ')') { punct = 1; break; }
+        if (punct) break;
+        s--;
+    }
+    return s;
+}
+
 static void write_chunk(FILE* fp, FILE* text_fp, FILE* meta_fp,
                         const char* name, const char* file,
                         const char* kind, int line_start, int line_end,
@@ -945,8 +961,22 @@ static int worker_process(worker_t* worker, int worker_id) {
                             }
 
                             if (file_lines && line_num <= file_line_count) {
+                                int cstart = decl_start(file_lines, file_line_count, line_num);
+                                if (cstart < line_num) {   // 把返回类型/限定符补进 signature
+                                    char pre[1024] = {0};
+                                    for (int l = cstart; l < line_num; l++) {
+                                        if (strlen(pre) + strlen(file_lines[l-1]) + 2 < sizeof(pre)) {
+                                            strcat(pre, file_lines[l-1]);
+                                            strcat(pre, " ");
+                                        }
+                                    }
+                                    char ns[2048];
+                                    snprintf(ns, sizeof(ns), "%s%s%s", pre, name, signature);
+                                    strncpy(signature, ns, sizeof(signature) - 1);
+                                    signature[sizeof(signature) - 1] = '\0';
+                                }
                                 int pos = 0;
-                                for (int l = line_num; l <= end_line && l <= file_line_count; l++) {
+                                for (int l = cstart; l <= end_line && l <= file_line_count; l++) {
                                     int len = strlen(file_lines[l-1]);
                                     if (pos + len < sizeof(content) - 2) {
                                         memcpy(content + pos, file_lines[l-1], len);
@@ -988,6 +1018,16 @@ static int worker_process(worker_t* worker, int worker_id) {
                         int part = 0;
 
                         while (offset < content_len) {
+                            if (part == 0) {
+                                // 首个 chunk = 完整函数（供语料生成/检索；向量端自行截断），无 Part 标记
+                                write_chunk(chunk_fp, text_fp, meta_fp, name, filepath, kind,
+                                            line_num, end_line, lang, signature, content, "");
+                                ctags_chunk_count++;
+                                offset += (window_size > overlap) ? (window_size - overlap) : window_size;
+                                part++;
+                                if (part >= 5) break;
+                                continue;
+                            }
                             char chunk_content[4096];
                             int remaining = content_len - offset;
                             int take = (remaining > window_size) ? window_size : remaining;
