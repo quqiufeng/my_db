@@ -219,20 +219,20 @@ int main(int argc, char** argv) {
         if (n == 0) break;
         batch_id++;
 
-        // Allocate vector storage for this batch
+        // Allocate vector storage for this batch (contiguous; 批量推理)
+        const char** texts = malloc(n * sizeof(char*));
+        float* vecbuf = malloc((size_t)n * DIM * sizeof(float));
         float** vectors = malloc(n * sizeof(float*));
-        if (!vectors) { free_items(batch, n); break; }
+        if (!vectors || !texts || !vecbuf) { free(texts); free(vecbuf); free(vectors); free_items(batch, n); break; }
         for (int i = 0; i < n; i++) {
-            vectors[i] = malloc(DIM * sizeof(float));
-            if (!vectors[i]) { /* partial cleanup handled below */ }
+            texts[i] = batch[i].text;
+            vectors[i] = vecbuf + (size_t)i * DIM;
         }
 
-        // Encode
-        for (int i = 0; i < n; i++) {
-            if (onnx_embedder_encode(embedder, batch[i].text, vectors[i]) != 0) {
-                fprintf(stderr, "Warning: failed to encode item %d\n", total_processed + i);
-                memset(vectors[i], 0, DIM * sizeof(float));
-            }
+        // Encode（一次批量推理，替代逐条）
+        if (onnx_embedder_encode_batch(embedder, texts, n, vecbuf) != 0) {
+            fprintf(stderr, "Warning: batch encode failed\n");
+            memset(vecbuf, 0, (size_t)n * DIM * sizeof(float));
         }
 
         // Append to files
@@ -240,7 +240,8 @@ int main(int argc, char** argv) {
         is_first = 0;
 
         // Cleanup batch
-        for (int i = 0; i < n; i++) free(vectors[i]);
+        free(texts);
+        free(vecbuf);
         free(vectors);
         free_items(batch, n);
 
