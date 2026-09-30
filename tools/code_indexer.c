@@ -993,6 +993,34 @@ static int worker_process(worker_t* worker, int worker_id) {
                         end_line = line_num;
                     }
 
+                    // 宏/typedef/enum：从源码读其定义行（#define ... / typedef ...）
+                    if (content[0] == '\0' &&
+                        (strcmp(kind, "macro") == 0 || strcmp(kind, "typedef") == 0 ||
+                         strcmp(kind, "enum") == 0 || strcmp(kind, "struct") == 0 ||
+                         strcmp(kind, "enumerator") == 0)) {
+                        FILE* lf = fopen(fullpath, "r");
+                        if (lf) {
+                            char ln[8192];
+                            int cur = 1;
+                            while (fgets(ln, sizeof(ln), lf)) {
+                                if (cur == line_num) {
+                                    // 续行（以 '\' 结尾）#define 继续拼接
+                                    size_t off = 0;
+                                    size_t ll = strlen(ln);
+                                    while (ll < sizeof(ln) && ll >= 2 && ln[ll-2] == '\\' && fgets(ln + strlen(ln), sizeof(ln) - strlen(ln), lf)) {
+                                        ll = strlen(ln);
+                                    }
+                                    (void)off;
+                                    strncpy(content, ln, sizeof(content) - 1);
+                                    content[sizeof(content) - 1] = '\0';
+                                    break;
+                                }
+                                cur++;
+                            }
+                            fclose(lf);
+                        }
+                    }
+
                     if (!content[0] && signature[0]) {
                         snprintf(content, sizeof(content), "%s %s;", name, signature);
                     }
@@ -1004,11 +1032,11 @@ static int worker_process(worker_t* worker, int worker_id) {
                     }
 
                     if (strcmp(kind, "member") == 0 || strcmp(kind, "field") == 0 ||
-                        strcmp(kind, "enumerator") == 0 || strcmp(kind, "variable") == 0 ||
-                        strcmp(kind, "local") == 0 || strcmp(kind, "parameter") == 0 ||
-                        strcmp(kind, "macro") == 0) {
+                        strcmp(kind, "variable") == 0 ||
+                        strcmp(kind, "local") == 0 || strcmp(kind, "parameter") == 0) {
                         continue;
                     }
+                    // 注意：macro 不再跳过 —— 宏/头文件内联是"构件"，语料需要它们
 
                     int content_len = strlen(content);
                     if (content_len > 2000) {
