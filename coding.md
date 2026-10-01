@@ -129,6 +129,8 @@ cd /opt/my_db
 | ComfyUI | /opt/static_comfyui/ComfyUI | /code/comfyui | /code/comfyui | ✅ 2026-07-05 | 已完成 |
 | **Ruby (CRuby)** | /opt/ruby（git，2023+ 历史，2026-08-31） | /code/ruby | /code/ruby | ✅ 2026-09-16 | 153005 chunks，新建索引 |
 | **Perl5** | /opt/perl5（git，2023+ 历史，2026-09-15） | /code/perl5 | /code/perl5 | ✅ 2026-09-16 | 9311 chunks，新建索引 |
+| **qwenimage-ncnn-vulkan** | /opt/qwenimage-ncnn-vulkan（GitHub nihui，Qwen-Image-2.1 ncnn/Vulkan） | /opt/code_caches/qwenimage_cache | 同左 | ✅ 2026-10-01 | 1145 chunks（39 文件），已探索架构 |
+| **zimage-ncnn-vulkan** | /opt/zimage-ncnn-vulkan（GitHub nihui，Z-Image ncnn/Vulkan，经 gitcode.com/gh_mirrors 镜像 clone——GitHub 直连当时不通） | /opt/code_caches/zimage_cache | 同左 | ✅ 2026-10-01 | 496 chunks（18 文件），早期开发阶段 |
 
 > **2026-09-16 批量重建说明**：CPython/PHP 源码 git 更新至 09-16 后索引全量重建（index+vector 覆盖写）；
 > Ruby/Perl5/PostgreSQL 为新建索引（git 含 2023+ 提交历史，可用于 func_pairs 修复对语料）。
