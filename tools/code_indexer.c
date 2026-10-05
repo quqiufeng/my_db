@@ -993,29 +993,63 @@ static int worker_process(worker_t* worker, int worker_id) {
                         end_line = line_num;
                     }
 
-                    // 宏/typedef/enum：从源码读其定义行（#define ... / typedef ...）
+                    // 宏/typedef/struct/union/enum：读【完整定义】
                     if (content[0] == '\0' &&
                         (strcmp(kind, "macro") == 0 || strcmp(kind, "typedef") == 0 ||
                          strcmp(kind, "enum") == 0 || strcmp(kind, "struct") == 0 ||
-                         strcmp(kind, "enumerator") == 0)) {
+                         strcmp(kind, "union") == 0 || strcmp(kind, "enumerator") == 0)) {
                         FILE* lf = fopen(fullpath, "r");
                         if (lf) {
-                            char ln[8192];
-                            int cur = 1;
-                            while (fgets(ln, sizeof(ln), lf)) {
-                                if (cur == line_num) {
-                                    // 续行（以 '\' 结尾）#define 继续拼接
-                                    size_t off = 0;
-                                    size_t ll = strlen(ln);
-                                    while (ll < sizeof(ln) && ll >= 2 && ln[ll-2] == '\\' && fgets(ln + strlen(ln), sizeof(ln) - strlen(ln), lf)) {
-                                        ll = strlen(ln);
+                            if (strcmp(kind, "macro") == 0 || strcmp(kind, "enumerator") == 0) {
+                                // 单行（#define 以 '\' 续行则拼接）
+                                char ln[8192];
+                                int cur = 1;
+                                while (fgets(ln, sizeof(ln), lf)) {
+                                    if (cur == line_num) {
+                                        size_t ll = strlen(ln);
+                                        while (ll < sizeof(ln) && ll >= 2 && ln[ll - 2] == '\\' &&
+                                               fgets(ln + strlen(ln), sizeof(ln) - strlen(ln), lf)) {
+                                            ll = strlen(ln);
+                                        }
+                                        strncpy(content, ln, sizeof(content) - 1);
+                                        content[sizeof(content) - 1] = '\0';
+                                        break;
                                     }
-                                    (void)off;
-                                    strncpy(content, ln, sizeof(content) - 1);
-                                    content[sizeof(content) - 1] = '\0';
-                                    break;
+                                    cur++;
                                 }
-                                cur++;
+                            } else {
+                                // typedef/struct/union/enum：回退到声明起点(typedef/struct/{…)，前进到 ';'，取完整定义
+                                rewind(lf);
+                                char** lines = malloc(60000 * sizeof(char*));
+                                int nl = 0;
+                                char lb[8192];
+                                while (nl < 60000 && fgets(lb, sizeof(lb), lf)) {
+                                    lines[nl++] = strdup(lb);
+                                }
+                                if (line_num >= 1 && line_num <= nl) {
+                                    int sidx = line_num - 1;
+                                    int st = sidx;
+                                    while (st > 0 && (sidx - st) <= 500) {
+                                        char* L = lines[st];
+                                        if (strstr(L, "typedef") || strstr(L, "struct") ||
+                                            strstr(L, "union") || strstr(L, "enum") || strchr(L, '{'))
+                                            break;
+                                        st--;
+                                    }
+                                    int en = sidx;
+                                    while (en < nl && !strchr(lines[en], ';')) en++;
+                                    if (en >= nl) en = sidx;
+                                    size_t pos = 0;
+                                    for (int l = st; l <= en && pos < sizeof(content) - 2; l++) {
+                                        size_t len = strlen(lines[l]);
+                                        if (pos + len >= sizeof(content) - 1) break;
+                                        memcpy(content + pos, lines[l], len);
+                                        pos += len;
+                                    }
+                                    content[pos] = '\0';
+                                }
+                                for (int i = 0; i < nl; i++) free(lines[i]);
+                                free(lines);
                             }
                             fclose(lf);
                         }

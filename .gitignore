@@ -116,3 +116,7 @@ tools/pdf2md
 .aicoding/
 .opencode/
 *.bak
+
+# Tool binaries (generated)
+tools/book2audio
+tests/test_framework
