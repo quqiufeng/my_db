@@ -12,7 +12,7 @@
 
 #define DIM 768
 #define MAX_SEQ 512
-#define BATCH_SIZE 2048
+#define BATCH_SIZE 16
 #define MAX_TEXT_LEN 16384
 
 typedef struct {
