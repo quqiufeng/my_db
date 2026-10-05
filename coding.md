@@ -65,9 +65,9 @@ sshpass -p '<pw>' scp -P <port> tools/vector_search root@<host>:/opt/my_db/tools
 cd /opt/my_db
 # ① 抽取 chunks（CPU：ctags + AST 文本解析，workers 并行）
 ./ai_code_search.sh index  <repo_path> <cache_dir> [workers]
-# ② 生成向量 + 调用图 + 数据流（GPU：Jina/TensorRT；四步 = 词频 → 向量 → 调用图 → 数据流）
+# ② 生成向量 + 调用图 + 数据流 + 校验/重建 HNSW（GPU；五步 = 词频 → 向量(含HNSW) → 调用图 → 数据流 → HNSW验收）
 ./ai_code_search.sh vector <cache_dir> <project_name>
-# ③ 构建 HNSW 近邻索引（⚠️ 不在 vector 四步流水线里，必须单独跑）
+# ③ 单独重建 HNSW（一般不需要；vector 已自动验收，缺失/过旧会自动重建）
 ./tools/build_hnsw_index <cache_dir>/vectors/code_local_<project_name>.jina.bin --threads 8
 ```
 
@@ -75,9 +75,12 @@ cd /opt/my_db
 1. **索引任务必须串行**——`code_indexer` 的 worker 临时文件是固定 `/tmp` 名，并行会交叉污染缓存。
 2. **`index` 是 CPU（ctags），`vector` 是 GPU（Jina/TensorRT）**——**重建索引后必须重算向量**，
    否则 `search` 的向量与 chunks 不匹配 → 语义搜索失效。
-3. **HNSW 不在 `vector` 流水线内**（四步不含 hnsw）——必须单独 `build_hnsw_index`。
+3. **HNSW 由 `vector` 自动校验/重建**（Step 5/5，`.hnsw` 缺失或旧于 `.bin` 才重跑 `build_hnsw_index`）。
 4. **验收标准**：`.hnsw` 时间戳**新于** `.bin`（防旧索引冒充新索引）；`search` 冒烟命中。
 5. **老缓存 root 属主** → embedder/hnsw 静默写失败留旧文件 → 先 `chown -R` 再重建。
+6. **向量编码不能静默失败**：`batch_embedder` 的 `BATCH_SIZE` 必须 ≤ TensorRT 优化 profile 上限（当前 `32`）。
+   超限时 `setInputShape` 报错；旧版会 `memset` 成**零向量**（搜索分数塌到 ~0.05 却不报错）。
+   现已改为：跳过失败批 + 结束时**非零退出**，且 `vector` 命令校验 HNSW 失败即中止。
 
 ---
 
@@ -1866,6 +1869,23 @@ g_cache = cache_open(cache_dir, 4ULL * 1024 * 1024 * 1024);
 
 ---
 
+### 10. batch_embedder 批量超过 TensorRT profile → 零向量（搜索静默失效）
+
+**现象**: 重建 OpenResty 后 `search` 分数全在 0.02–0.05，命中函数完全不相关，但命令返回成功、无报错。
+
+**原因**: `onnx_embedder` 的 TensorRT V2 优化 profile 为 `input_ids/attention_mask: 1x512..32x512`；
+`tools/batch_embedder.c` 的 `#define BATCH_SIZE 2048` 使每批 `setInputShape` 失败。
+旧失败分支 `memset(vecbuf, 0, ...)` 会把整批写成**零向量**，且仍追加进 `.bin`。
+
+**修复**（`tools/batch_embedder.c` + `ai_code_search.sh` + `tools/vector_search.c`）:
+- `BATCH_SIZE 2048 → 16`（≤ profile 上限 32；实测 147 items/s）
+- 编码失败**不再写零向量**：跳过该批、累计失败数，结束时**非零退出**
+- HNSW 由后台 fork 改为**同步** `waitpid`，失败视为致命
+- `ai_code_search.sh vector` 增加 **Step 5/5**：校验 `.hnsw` 新于 `.bin`，缺失/过旧自动重建；embedder 非零退出即中止
+- `vector_search` 对 `top1 < 0.30` 输出**低置信度告警**（提示索引可能损坏）
+
+---
+
 ### 修复效果汇总
 
 | # | 修复点 | 影响项目 | 之前 | 之后 |
@@ -1879,4 +1899,5 @@ g_cache = cache_open(cache_dir, 4ULL * 1024 * 1024 * 1024);
 | 7 | Makefile -shared 污染 | 多个工具 | 段错误 | 正常执行 |
 | 8 | 目录排除 | Linux 内核 | 硬编码 | 运行时参数 |
 | 9 | cache mmap 大小 | Linux 内核 | 2GB | 4GB |
+| 10 | batch_embedder 批量 > TRT profile | OpenResty 重建 | 零向量(搜索~0.05) | BATCH=16 + 失败非零退出 + HNSW 自动验收 |
 

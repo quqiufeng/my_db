@@ -163,6 +163,7 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INDEXER="${SCRIPT_DIR}/tools/code_indexer"
 BATCH_EMBEDDER="${SCRIPT_DIR}/tools/batch_embedder"
+BUILD_HNSW="${SCRIPT_DIR}/tools/build_hnsw_index"
 VECTOR_SEARCH="${SCRIPT_DIR}/tools/vector_search"
 CALL_GRAPH="${SCRIPT_DIR}/tools/call_graph"
 WORD_FREQ="${SCRIPT_DIR}/tools/word_freq"
@@ -271,25 +272,48 @@ cmd_vector() {
     echo ""
 
     # Step 1: 生成词频统计（用于 TF-IDF 排序优化）
-    info "Step 1/4: 统计词频..."
+    info "Step 1/5: 统计词频..."
     "$WORD_FREQ" "$cache_dir" || warn "词频统计失败（非致命）"
 
-    # Step 2: 生成语义向量
-    info "Step 2/4: 生成语义向量（TensorRT GPU）..."
-    "$BATCH_EMBEDDER" "$cache_dir" --model jina --name "$project_name"
+    # Step 2: 生成语义向量（内部会同步构建 HNSW）
+    info "Step 2/5: 生成语义向量（TensorRT GPU）..."
+    if ! "$BATCH_EMBEDDER" "$cache_dir" --model jina --name "$project_name"; then
+        error "向量生成失败（batch embedder 非零退出）—— 已中止，避免产出坏索引"
+        exit 1
+    fi
 
     # Step 3: 构建调用关系图（含参数信息）
-    info "Step 3/4: 构建调用关系图（含参数）..."
+    info "Step 3/5: 构建调用关系图（含参数）..."
     "$CALL_GRAPH" "$cache_dir" || warn "调用图构建失败（非致命）"
 
     # Step 4: 生成变量数据流分析（含字段级+跨函数）
-    info "Step 4/4: 生成变量数据流分析（字段级+跨函数）..."
+    info "Step 4/5: 生成变量数据流分析（字段级+跨函数）..."
     "$DATAFLOW" analyze "$cache_dir" || warn "数据流分析失败（非致命）"
+
+    # Step 5: 校验 HNSW 近邻索引（必须新于 .bin，缺失/过旧则重建）
+    info "Step 5/5: 校验 HNSW 索引..."
+    local vec_bin="${cache_dir}/vectors/code_local_${project_name}.jina.bin"
+    local vec_hnsw="${vec_bin}.hnsw"
+    if [[ ! -f "$vec_bin" ]]; then
+        error "未找到向量文件: $vec_bin"
+        exit 1
+    fi
+    if [[ ! -f "$vec_hnsw" || "$vec_bin" -nt "$vec_hnsw" ]]; then
+        warn "HNSW 缺失或过旧，重新构建..."
+        "$BUILD_HNSW" "$vec_bin" --threads 8 || { error "HNSW 构建失败"; exit 1; }
+    fi
+    if [[ "$vec_hnsw" -nt "$vec_bin" ]]; then
+        ok "HNSW 验收通过（.hnsw 新于 .bin）"
+    else
+        error "HNSW 验收失败：.hnsw 不新于 .bin"
+        exit 1
+    fi
 
     ok "分析完成!"
     info "输出文件:"
     info "  ${cache_dir}/vectors/code_local_${project_name}.jina.bin - 语义向量"
     info "  ${cache_dir}/vectors/code_local_${project_name}.jina.idx - 向量索引"
+    info "  ${cache_dir}/vectors/code_local_${project_name}.jina.bin.hnsw - HNSW 近邻索引"
     info "  ${cache_dir}/call_graph.json - 调用关系图（含参数列表）"
     info "  ${cache_dir}/dataflow.json - 变量数据流（字段级+跨函数）"
     info "  ${cache_dir}/word_freq.json - 词频统计（TF-IDF）"

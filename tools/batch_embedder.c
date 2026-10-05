@@ -210,9 +210,13 @@ int main(int argc, char** argv) {
     if (!batch) { fprintf(stderr, "OOM\n"); return 1; }
 
     clock_t start = clock();
-    int total_processed = 0;
+    int total_processed = 0;   // items seen
+    int total_written = 0;     // items successfully embedded + written
     int is_first = 1;
     int batch_id = 0;
+    int failed_batches = 0;
+    int failed_items = 0;
+    int hnsw_failed = 0;
 
     while (1) {
         int n = load_items_batch(text_fp, meta_fp, batch, BATCH_SIZE);
@@ -229,15 +233,19 @@ int main(int argc, char** argv) {
             vectors[i] = vecbuf + (size_t)i * DIM;
         }
 
+        total_processed += n;
+
         // Encode（一次批量推理，替代逐条）
         if (onnx_embedder_encode_batch(embedder, texts, n, vecbuf) != 0) {
-            fprintf(stderr, "Warning: batch encode failed\n");
-            memset(vecbuf, 0, (size_t)n * DIM * sizeof(float));
+            // Fail loud: never write zero vectors (they silently destroy search).
+            fprintf(stderr, "  [ERROR] batch %d encode failed (n=%d) - skipped\n", batch_id, n);
+            failed_batches++;
+            failed_items += n;
+        } else {
+            append_vectors(bin_file, idx_file, batch, vectors, n, is_first);
+            is_first = 0;
+            total_written += n;
         }
-
-        // Append to files
-        append_vectors(bin_file, idx_file, batch, vectors, n, is_first);
-        is_first = 0;
 
         // Cleanup batch
         free(texts);
@@ -245,38 +253,62 @@ int main(int argc, char** argv) {
         free(vectors);
         free_items(batch, n);
 
-        total_processed += n;
-
         // Progress
         double elapsed = (double)(clock() - start) / CLOCKS_PER_SEC;
-        printf("  Progress: %d items (%.0f items/s, batch %d)\n",
-               total_processed, total_processed / elapsed, batch_id);
+        printf("  Progress: %d/%d items (%.0f items/s, batch %d)\n",
+               total_written, total_processed,
+               total_processed / (elapsed > 0 ? elapsed : 1), batch_id);
     }
 
     free(batch);
     fclose(text_fp);
     fclose(meta_fp);
 
+    if (total_written == 0) {
+        fprintf(stderr, "ERROR: no vectors written (%d/%d items failed)\n",
+                failed_items, total_processed);
+        onnx_embedder_free(embedder);
+        return 2;
+    }
+
     // Update header with final count
-    update_header(bin_file, total_processed);
+    update_header(bin_file, total_written);
 
     double elapsed = (double)(clock() - start) / CLOCKS_PER_SEC;
-    printf("Done in %.1fs (%.0f items/s)\n", elapsed, total_processed / elapsed);
+    printf("Done in %.1fs (%.0f items/s): %d/%d written\n",
+           elapsed, total_processed / (elapsed > 0 ? elapsed : 1),
+           total_written, total_processed);
     printf("Saved vectors to %s\n", bin_file);
     printf("Saved index to %s\n", idx_file);
 
-    // Fork HNSW index build
-    printf("Starting HNSW index build in background...\n");
+    // Build HNSW index synchronously so failures are visible (not fire-and-forget).
+    printf("Building HNSW index...\n");
     pid_t pid = fork();
     if (pid == 0) {
-        execl("./tools/build_hnsw_index", "build_hnsw_index", bin_file, (char*)NULL);
-        execlp("tools/build_hnsw_index", "build_hnsw_index", bin_file, (char*)NULL);
-        fprintf(stderr, "[HNSW] Failed to start index builder\n");
-        _exit(1);
+        execl("./tools/build_hnsw_index", "build_hnsw_index", bin_file, "--threads", "8", (char*)NULL);
+        execlp("tools/build_hnsw_index", "build_hnsw_index", bin_file, "--threads", "8", (char*)NULL);
+        _exit(127);
     } else if (pid > 0) {
-        printf("HNSW index build started in background (PID: %d)\n", (int)pid);
+        int st = 0;
+        waitpid(pid, &st, 0);
+        if (!(WIFEXITED(st) && WEXITSTATUS(st) == 0)) {
+            fprintf(stderr, "[HNSW] build_hnsw_index failed\n");
+            hnsw_failed = 1;
+        }
+    } else {
+        fprintf(stderr, "[HNSW] fork failed\n");
+        hnsw_failed = 1;
     }
 
     onnx_embedder_free(embedder);
-    return 0;
+
+    if (failed_items > 0) {
+        fprintf(stderr, "ERROR: %d/%d items failed to embed across %d batches; vectors incomplete\n",
+                failed_items, total_processed, failed_batches);
+    }
+    if (hnsw_failed) {
+        fprintf(stderr, "ERROR: HNSW index build failed\n");
+    }
+
+    return (failed_items > 0 || hnsw_failed) ? 2 : 0;
 }

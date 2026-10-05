@@ -493,6 +493,13 @@ int main(int argc, char** argv) {
         }
     }
     
+    if (n > 0 && results[0].score < 0.30f) {
+        fprintf(stderr,
+            "\n[WARN] 低置信度: top1=%.4f < 0.30。索引可能已损坏或与查询不匹配；\n"
+            "       请确认 vectors/*.jina.bin.hnsw 新于 .bin，必要时重跑: ai_code_search.sh vector <cache>\n",
+            results[0].score);
+    }
+
     free(results);
     vector_engine_close(engine);
     free_call_graph();
