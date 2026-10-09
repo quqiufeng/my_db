@@ -4,6 +4,96 @@
 
 ---
 
+## 📖 Code Search 使用方法（权威速查 · 必读）
+
+> **完整方法论**（Phase 映射 / 证据分级 / 报告模板）见 **[code_search_best_practices.md](code_search_best_practices.md)**。
+> 探索任何项目：**先 `check` → 再「整体架构 → 子模块」→ 结论标 `[static]/[verified]`**。
+
+### 0. 前置检查（必做）
+
+```bash
+./ai_code_search.sh check <cache_dir> [project]
+# 校验：chunks / 向量 / HNSW 新鲜度 / call_graph / dataflow / word_freq / KV 是否导入
+```
+
+- `check` 通过才可探索；**KV 未导入** → `context/symbol` 不可用（只能语义搜索）。
+- 导入 KV：`./tools/cache_import <cache_dir> /code/<project> --cache-dir /memory`（含 chunks+callgraph+dataflow+**symbols**）。
+
+### 1. 统一入口：`ai_code_search.sh`
+
+| 子命令 | 用途 |
+|---|---|
+| `check <cache> [project]` | 探索前置检查 |
+| `index <repo> <cache> [workers] [--exclude-dir a,b]` | 索引（CPU，**串行**） |
+| `vector <cache> [name]` | 词频→向量→调用图→数据流→HNSW 验收（GPU） |
+| `search <cache> "<自然语言>" [n] [--rich\|--callgraph\|--kind\|--lang\|--file\|--json]` | 语义搜索，**默认 brief**（`name+score+Location`），`--rich` 给完整定义 |
+| `snippet <cache> <file> [n]` | 代码片段相似实现 |
+| `dataflow <cache> <var>` | 变量/字段级数据流 |
+| `callgraph <cache>` | 构建/查看调用图 |
+| `cross-search "<query>" [n] [proj...]` | 跨项目搜索（并发限流+超时） |
+
+```bash
+./ai_code_search.sh check /opt/code_caches/nginx_cache nginx
+./ai_code_search.sh search /opt/code_caches/nginx_cache "event loop epoll" 8
+./ai_code_search.sh search /opt/code_caches/nginx_cache "ngx_palloc" 3 --rich
+```
+
+### 2. 精确符号 / 上下文：`tools/cache_query`（走 KV，**不需向量**）
+
+```bash
+CQ=./tools/cache_query
+$CQ <name>  --repo /code/<project> --type symbol            # 精确定位
+$CQ <name>  --repo /code/<project> --type context --depth N # +caller/callee/调用链/dataflow
+$CQ <name>  --repo /code/<project> --type context --brief   # 精简：符号+caller/callee 名
+$CQ /code/<project>/chunks/... --type exact                 # 原始 key
+```
+
+- **stdout 是纯 JSON**（`[CACHE]`/embedder 日志已改到 stderr），可直接管道 `jq`/python。
+- `context` 的 `callers/callees` 是真实调用关系（已修反向图 bug）。
+
+### 3. 脚本化探索（agent 首选）
+
+**`tools/ctx.py`**——批量 context，只回吐「符号 + caller/callee 名」，省 context：
+
+```bash
+./tools/ctx.py /code/linux_723 vfs_read ksys_read filemap_read --max 8
+./tools/ctx.py /code/openresty ngx_http_lua_run_thread --depth 2
+./tools/ctx.py /code/linux_723 call_rcu --json        # + --json 走管道
+```
+
+**探索骨架**（与最佳实践 §4/§6 对应）：
+
+```bash
+# ① 架构扫描：一批自然语言 query 定位子系统入口
+for q in "scheduler pick next task" "virtual file system inode" "network socket tcp"; do
+  ./ai_code_search.sh search <cache> "$q" 5            # 默认 brief，直接看 file:line
+done
+# ② 批量取调用关系（脚本）：确认主线/多态/横切
+./tools/ctx.py /code/<project> <fn1> <fn2> <fn3> --max 10
+# ③ 数据流：追踪关键变量/字段
+./ai_code_search.sh dataflow <cache> <var>
+# ④ 跨项目对照（已在 /memory 的项目）
+./ai_code_search.sh cross-search "memory pool allocator"
+```
+
+核心：**CLI 返回结构化 JSON → 脚本只提取所需字段 → 少 token、可聚合**。单次查询直接命令即可，批量/聚合用 `ctx.py`。
+
+### 4. 证据纪律
+
+- `search`/`callgraph`/`dataflow`/`context` 结果**一律是 `[static]`**（静态证据），不等于运行时真相。
+- 承重结论须经真实 build + 断点/测试验证后才能标 `[verified]`。
+- 引用统一用 `file:symbol`，行号仅参考。
+
+### 5. 改动后回归（真实项目验证）
+
+```bash
+./tests/validate_tools.sh     # 内置 openresty + linux_723；向量/HNSW/search 分数/context callees/ dataflow 不变量
+```
+
+> 经验：本项目关键缺陷（UTF-8 abort、cache_import O(n²)、namespace 去重爆炸、dataflow 内存上限、symbol 未导入、日志污染 stdout、callees 自指）**全部由真实项目暴露**，务必用真项目跑回归。
+
+---
+
 ## 🚀 开发与部署流程（固定）
 
 > **本地开发、远程使用**：本地改源码 → 本地 `make` → `scp` 二进制到远程 → 远程直接用。
@@ -40,7 +130,7 @@ sshpass -p '<pw>' scp -P <port> tools/vector_search root@<host>:/opt/my_db/tools
 
 | 能力 | 命令 | 说明 |
 |---|---|---|
-| **语义搜索** | `ai_code_search.sh search <cache> "<自然语言>" [k]` | 功能描述 → 定位 `file:line`；默认 `--rich` **输出完整定义 `FullDef`**（源码花括号配平，不再截断） |
+| **语义搜索** | `ai_code_search.sh search <cache> "<自然语言>" [k]` | 功能描述 → 定位 `file:line`；**默认 brief**（name+score+Location），`--rich` 输出完整定义 `FullDef` |
 | 代码片段 | `snippet <cache> <file>` | 按文件/片段匹配 |
 | 变量数据流 | `dataflow <cache> <var>` | 字段级 + 跨函数的 定义/赋值/使用 |
 | 调用关系 | `callgraph <cache>`（search 自带 callers） | 谁调用谁（调用图） |
