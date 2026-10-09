@@ -12,7 +12,7 @@
 
 #define DIM 768
 #define MAX_SEQ 512
-#define BATCH_SIZE 16
+#define BATCH_SIZE 32
 #define MAX_TEXT_LEN 16384
 
 typedef struct {
@@ -57,6 +57,17 @@ static void free_items(item_t* items, int count) {
         free(items[i].name);
         free(items[i].text);
     }
+}
+
+// 长度分桶：按文本长度排序的索引比较器（长度≈token 数）
+static item_t* g_sort_items;
+static int cmp_len(const void* a, const void* b) {
+    int ia = *(const int*)a, ib = *(const int*)b;
+    size_t la = strlen(g_sort_items[ia].text);
+    size_t lb = strlen(g_sort_items[ib].text);
+    if (la < lb) return -1;
+    if (la > lb) return 1;
+    return ia - ib;
 }
 
 // Load up to `max_items` items from the text/meta file pair.
@@ -175,10 +186,15 @@ int main(int argc, char** argv) {
     const char* cache_dir = argv[1];
     const char* model_type = "jina";
     const char* custom_name = NULL;
+    int batch_size = BATCH_SIZE;
 
     for (int i = 2; i < argc; i++) {
         if (strcmp(argv[i], "--model") == 0 && i + 1 < argc) model_type = argv[++i];
         else if (strcmp(argv[i], "--name") == 0 && i + 1 < argc) custom_name = argv[++i];
+        else if (strcmp(argv[i], "--batch") == 0 && i + 1 < argc) {
+            int b = atoi(argv[++i]);
+            if (b >= 1 && b <= 4096) batch_size = b;
+        }
     }
 
     char text_file[512], meta_file[512];
@@ -237,9 +253,14 @@ int main(int argc, char** argv) {
     snprintf(idx_file, sizeof(idx_file), "%s/code_local_%s.jina.idx", vec_dir, safe_name);
 
     // Streaming: process in batches
-    printf("Encoding (streaming, batch_size=%d)...\n", BATCH_SIZE);
-    item_t* batch = malloc(BATCH_SIZE * sizeof(item_t));
-    if (!batch) { fprintf(stderr, "OOM\n"); return 1; }
+    // Streaming + length-bucketing: 读取一个窗口 → 按文本长度排序 → 同长度组批
+    // （减少 padding，多数批从 512 降到 ~192/256，显著降低 GPU 计算）
+    printf("Encoding (streaming + length-bucketed, batch_size=%d)...\n", batch_size);
+    #define EMB_WINDOW 2048
+    item_t* window = malloc(EMB_WINDOW * sizeof(item_t));
+    int* order = malloc(EMB_WINDOW * sizeof(int));
+    char* failed = malloc(EMB_WINDOW);
+    if (!window || !order || !failed) { fprintf(stderr, "OOM\n"); return 1; }
 
     clock_t start = clock();
     int total_processed = 0;   // items seen
@@ -251,39 +272,72 @@ int main(int argc, char** argv) {
     int hnsw_failed = 0;
 
     while (1) {
-        int n = load_items_batch(text_fp, meta_fp, batch, BATCH_SIZE);
+        int n = load_items_batch(text_fp, meta_fp, window, EMB_WINDOW);
         if (n == 0) break;
-        batch_id++;
-
-        // Allocate vector storage for this batch (contiguous; 批量推理)
-        const char** texts = malloc(n * sizeof(char*));
-        float* vecbuf = malloc((size_t)n * DIM * sizeof(float));
-        float** vectors = malloc(n * sizeof(float*));
-        if (!vectors || !texts || !vecbuf) { free(texts); free(vecbuf); free(vectors); free_items(batch, n); break; }
-        for (int i = 0; i < n; i++) {
-            texts[i] = batch[i].text;
-            vectors[i] = vecbuf + (size_t)i * DIM;
-        }
-
         total_processed += n;
 
-        // Encode（一次批量推理，替代逐条）
-        if (onnx_embedder_encode_batch(embedder, texts, n, vecbuf) != 0) {
-            // Fail loud: never write zero vectors (they silently destroy search).
-            fprintf(stderr, "  [ERROR] batch %d encode failed (n=%d) - skipped\n", batch_id, n);
-            failed_batches++;
-            failed_items += n;
-        } else {
-            append_vectors(bin_file, idx_file, batch, vectors, n, is_first);
-            is_first = 0;
-            total_written += n;
+        g_sort_items = window;
+        for (int i = 0; i < n; i++) { order[i] = i; failed[i] = 0; }
+        qsort(order, n, sizeof(int), cmp_len);
+
+        float* winvec = malloc((size_t)n * DIM * sizeof(float));
+        if (!winvec) { free_items(window, n); break; }
+
+        for (int base = 0; base < n; base += batch_size) {
+            int m = (n - base < batch_size) ? (n - base) : batch_size;
+            const char** texts = malloc(m * sizeof(char*));
+            float* vecbuf = malloc((size_t)m * DIM * sizeof(float));
+            if (!texts || !vecbuf) {
+                free(texts); free(vecbuf);
+                failed_items += m;
+                for (int j = 0; j < m; j++) failed[order[base + j]] = 1;
+                continue;
+            }
+            for (int j = 0; j < m; j++) texts[j] = window[order[base + j]].text;
+            batch_id++;
+
+            if (onnx_embedder_encode_batch(embedder, texts, m, vecbuf) != 0) {
+                // Fail loud: never write zero vectors (silently destroys search)
+                fprintf(stderr, "  [ERROR] batch %d encode failed (n=%d) - skipped\n", batch_id, m);
+                failed_batches++;
+                failed_items += m;
+                for (int j = 0; j < m; j++) failed[order[base + j]] = 1;
+            } else {
+                for (int j = 0; j < m; j++) {
+                    int orig = order[base + j];
+                    memcpy(winvec + (size_t)orig * DIM, vecbuf + (size_t)j * DIM,
+                           (size_t)DIM * sizeof(float));
+                }
+            }
+            free(texts);
+            free(vecbuf);
         }
 
-        // Cleanup batch
-        free(texts);
-        free(vecbuf);
-        free(vectors);
-        free_items(batch, n);
+        // 按原始顺序写出成功项（.idx 记录 name→offset，故顺序可重排，只需一致）
+        item_t* ok_items = malloc((size_t)n * sizeof(item_t));
+        float** ok_vecs = malloc((size_t)n * sizeof(float*));
+        if (ok_items && ok_vecs) {
+            int ok = 0;
+            for (int i = 0; i < n; i++) {
+                if (!failed[i]) {
+                    ok_items[ok] = window[i];
+                    ok_vecs[ok] = winvec + (size_t)i * DIM;
+                    ok++;
+                }
+            }
+            if (ok > 0) {
+                append_vectors(bin_file, idx_file, ok_items, ok_vecs, ok, is_first);
+                is_first = 0;
+                total_written += ok;
+            }
+        } else {
+            failed_items += n;
+        }
+        free(ok_items);
+        free(ok_vecs);
+        free(winvec);
+
+        free_items(window, n);
 
         // Progress
         double elapsed = (double)(clock() - start) / CLOCKS_PER_SEC;
@@ -292,7 +346,9 @@ int main(int argc, char** argv) {
                total_processed / (elapsed > 0 ? elapsed : 1), batch_id);
     }
 
-    free(batch);
+    free(window);
+    free(order);
+    free(failed);
     fclose(text_fp);
     fclose(meta_fp);
 

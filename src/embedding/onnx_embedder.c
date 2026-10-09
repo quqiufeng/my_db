@@ -596,9 +596,9 @@ onnx_embedder_t* onnx_embedder_init(const char* model_path, const char* vocab_pa
                 "1",
                 trt_cache_path,
                 "0",
-                "input_ids:1x512,attention_mask:1x512",
+                "input_ids:1x64,attention_mask:1x64",
                 "input_ids:32x512,attention_mask:32x512",
-                "input_ids:8x512,attention_mask:8x512"
+                "input_ids:8x256,attention_mask:8x256"
             };
             
             status = g_ort->UpdateTensorRTProviderOptions(trt_options_v2, keys, values, 10);
@@ -898,20 +898,22 @@ int onnx_embedder_encode_batch(onnx_embedder_t* e, const char** texts, int count
         return -1;
     }
     
-    // Allocate batch buffers
-    int64_t* batch_input_ids = (int64_t*)malloc(count * e->max_seq_length * sizeof(int64_t));
-    int64_t* batch_attention_mask = (int64_t*)malloc(count * e->max_seq_length * sizeof(int64_t));
-    if (!batch_input_ids || !batch_attention_mask) {
+    // Allocate batch buffers (tokenization stride = max_seq_length)
+    int64_t* batch_input_ids = (int64_t*)malloc((size_t)count * e->max_seq_length * sizeof(int64_t));
+    int64_t* batch_attention_mask = (int64_t*)malloc((size_t)count * e->max_seq_length * sizeof(int64_t));
+    int* token_counts = (int*)calloc(count, sizeof(int));
+    if (!batch_input_ids || !batch_attention_mask || !token_counts) {
         free(batch_input_ids);
         free(batch_attention_mask);
+        free(token_counts);
         set_error("Failed to allocate batch buffers");
         return -1;
     }
     
     // Tokenize all texts
     for (int i = 0; i < count; i++) {
-        int64_t* ids = batch_input_ids + i * e->max_seq_length;
-        int64_t* mask = batch_attention_mask + i * e->max_seq_length;
+        int64_t* ids = batch_input_ids + (size_t)i * e->max_seq_length;
+        int64_t* mask = batch_attention_mask + (size_t)i * e->max_seq_length;
         
         int token_count;
         if (e->tokenizer_type == TOKENIZER_BPE) {
@@ -941,6 +943,7 @@ int onnx_embedder_encode_batch(onnx_embedder_t* e, const char** texts, int count
         } else {
             token_count = wordpiece_tokenize(e, texts[i], ids, e->max_seq_length);
         }
+        token_counts[i] = token_count;
         
         // Pad and create attention mask
         for (int j = 0; j < e->max_seq_length; j++) {
@@ -953,25 +956,58 @@ int onnx_embedder_encode_batch(onnx_embedder_t* e, const char** texts, int count
         }
     }
     
-    // Create input tensors [count, max_seq_length]
-    int64_t input_shape[] = {count, e->max_seq_length};
+    // 按本 batch 实际最大长度 padding（不再一律 512）——小 chunk 占多数，可大幅降低算力浪费。
+    // 向上取整到 64 的倍数（对齐），上限 max_seq_length。
+    int maxlen = 64;
+    for (int i = 0; i < count; i++) {
+        if (token_counts[i] > maxlen) maxlen = token_counts[i];
+    }
+    int seq_used = (maxlen + 63) & ~63;
+    if (seq_used > e->max_seq_length) seq_used = e->max_seq_length;
+    
+    int64_t* packed_ids = batch_input_ids;
+    int64_t* packed_mask = batch_attention_mask;
+    int packed = 0;
+    if (seq_used < e->max_seq_length) {
+        packed_ids = (int64_t*)malloc((size_t)count * seq_used * sizeof(int64_t));
+        packed_mask = (int64_t*)malloc((size_t)count * seq_used * sizeof(int64_t));
+        if (!packed_ids || !packed_mask) {
+            free(packed_ids); free(packed_mask);
+            free(batch_input_ids); free(batch_attention_mask); free(token_counts);
+            set_error("Failed to pack batch buffers");
+            return -1;
+        }
+        for (int i = 0; i < count; i++) {
+            memcpy(packed_ids + (size_t)i * seq_used,
+                   batch_input_ids + (size_t)i * e->max_seq_length,
+                   (size_t)seq_used * sizeof(int64_t));
+            memcpy(packed_mask + (size_t)i * seq_used,
+                   batch_attention_mask + (size_t)i * e->max_seq_length,
+                   (size_t)seq_used * sizeof(int64_t));
+        }
+        packed = 1;
+    }
+    
+    // Create input tensors [count, seq_used]
+    int64_t input_shape[] = {count, seq_used};
     OrtValue* input_tensor = NULL;
     OrtValue* mask_tensor = NULL;
     OrtStatus* status;
     
     status = g_ort->CreateTensorWithDataAsOrtValue(
-        e->memory_info, batch_input_ids, count * e->max_seq_length * sizeof(int64_t),
+        e->memory_info, packed_ids, (size_t)count * seq_used * sizeof(int64_t),
         input_shape, 2, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64, &input_tensor);
     if (status != NULL) {
         set_error("Failed to create batch input tensor");
         g_ort->ReleaseStatus(status);
         free(batch_input_ids);
         free(batch_attention_mask);
+        if (packed) { free(packed_ids); free(packed_mask); }
         return -1;
     }
     
     status = g_ort->CreateTensorWithDataAsOrtValue(
-        e->memory_info, batch_attention_mask, count * e->max_seq_length * sizeof(int64_t),
+        e->memory_info, packed_mask, (size_t)count * seq_used * sizeof(int64_t),
         input_shape, 2, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64, &mask_tensor);
     if (status != NULL) {
         g_ort->ReleaseValue(input_tensor);
@@ -979,6 +1015,7 @@ int onnx_embedder_encode_batch(onnx_embedder_t* e, const char** texts, int count
         g_ort->ReleaseStatus(status);
         free(batch_input_ids);
         free(batch_attention_mask);
+        if (packed) { free(packed_ids); free(packed_mask); }
         return -1;
     }
     
@@ -996,6 +1033,7 @@ int onnx_embedder_encode_batch(onnx_embedder_t* e, const char** texts, int count
     if (status != NULL) {
         free(batch_input_ids);
         free(batch_attention_mask);
+        if (packed) { free(packed_ids); free(packed_mask); }
         set_error("ONNX batch inference failed");
         g_ort->ReleaseStatus(status);
         return -1;
@@ -1007,6 +1045,7 @@ int onnx_embedder_encode_batch(onnx_embedder_t* e, const char** texts, int count
     if (status != NULL) {
         free(batch_input_ids);
         free(batch_attention_mask);
+        if (packed) { free(packed_ids); free(packed_mask); }
         g_ort->ReleaseValue(output_tensor);
         set_error("Failed to get batch output data");
         g_ort->ReleaseStatus(status);
@@ -1033,15 +1072,16 @@ int onnx_embedder_encode_batch(onnx_embedder_t* e, const char** texts, int count
     } else {
         // Output shape: [count, seq_length, dim]
         for (int i = 0; i < count; i++) {
-            float* out = output_data + i * e->max_seq_length * e->dim;
-            int64_t* mask = batch_attention_mask + i * e->max_seq_length;
+            float* out = output_data + (size_t)i * seq_used * e->dim;
+            int64_t* mask = packed_mask + (size_t)i * seq_used;
             
-            mean_pool_and_normalize(out, mask, e->max_seq_length, e->dim, vectors + i * e->dim);
+            mean_pool_and_normalize(out, mask, seq_used, e->dim, vectors + i * e->dim);
         }
     }
     
     free(batch_input_ids);
     free(batch_attention_mask);
+    if (packed) { free(packed_ids); free(packed_mask); }
     g_ort->ReleaseValue(output_tensor);
     return 0;
 }
