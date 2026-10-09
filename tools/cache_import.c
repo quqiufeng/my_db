@@ -245,7 +245,18 @@ static void import_symbols(const char* analysis_dir, const char* namespace) {
         json_object_set_new(obj, "kind", json_string(kind));
         json_object_set_new(obj, "file", json_string(file));
         json_object_set_new(obj, "line", json_integer(ln));
-        json_array_append_new(arr, obj);
+
+        // 优先级：.c 里的 function/method 排在前面（do_symbol 取首个），
+        // 避免 handle_mm_fault 之类解析到头文件内联包装而定位不到真实实现。
+        size_t flen = strlen(file);
+        int is_header = (flen >= 2 && strcmp(file + flen - 2, ".h") == 0);
+        int preferred = (strcmp(kind, "function") == 0 || strcmp(kind, "method") == 0)
+                        && !is_header;
+        if (preferred && json_array_size(arr) > 0) {
+            json_array_insert_new(arr, 0, obj);
+        } else {
+            json_array_append_new(arr, obj);
+        }
         added++;
     }
 

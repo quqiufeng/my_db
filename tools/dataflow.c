@@ -6,7 +6,7 @@
 
 #define MAX_LINE 131072
 #define MAX_VARS 2000000  /* 动态分配；上限覆盖 Linux 内核（旧值 10000 只覆盖前 1 万变量） */
-#define MAX_OCCURS 200
+#define MAX_OCCURS 2000  /* 200→2000: 高频变量（i/ret 等）不再过早截断；occurs 动态分配 */
 #define MAX_FIELDS 50
 #define MAX_FUNCS 5000
 

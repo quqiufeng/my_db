@@ -26,6 +26,22 @@ uint64_t cache_now_ms(void) {
     return (uint64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 }
 
+// LRU 淘汰候选（文件作用域，供 qsort 比较用）
+typedef struct {
+    uint64_t access_time;
+    size_t offset;
+    size_t key_len;
+    size_t total_size;
+} cache_evict_candidate_t;
+
+static int evict_candidate_cmp(const void* a, const void* b) {
+    const cache_evict_candidate_t* x = (const cache_evict_candidate_t*)a;
+    const cache_evict_candidate_t* y = (const cache_evict_candidate_t*)b;
+    if (x->access_time < y->access_time) return -1;
+    if (x->access_time > y->access_time) return 1;
+    return 0;
+}
+
 // 检查 entry 是否过期
 int cache_entry_is_expired(cache_entry_t* entry, uint64_t now) {
     if (!entry || entry->expire_at == 0) return 0;
@@ -450,12 +466,6 @@ int cache_set(cache_t* cache, const char* key, const char* value, uint64_t ttl_m
     // LRU 淘汰：如果内存不足，批量淘汰最老的非永久条目
     if (cache->memory_used + aligned_size > cache->memory_max) {
         // 收集所有可淘汰的条目（非永久、未删除）
-        typedef struct {
-            uint64_t access_time;
-            size_t offset;
-            size_t key_len;
-            size_t total_size;
-        } evict_candidate_t;
         
         // 一次性扫描所有条目，使用固定大小 buffer 避免大内存分配
         if (cache->entry_count == 0) return CACHE_ERR_NOMEM;
@@ -463,7 +473,7 @@ int cache_set(cache_t* cache, const char* key, const char* value, uint64_t ttl_m
         #define MAX_EVICT_CANDIDATES 4096
         size_t max_candidates = cache->entry_count < MAX_EVICT_CANDIDATES ? 
                                 cache->entry_count : MAX_EVICT_CANDIDATES;
-        evict_candidate_t* candidates = malloc(sizeof(evict_candidate_t) * max_candidates);
+        cache_evict_candidate_t* candidates = malloc(sizeof(cache_evict_candidate_t) * max_candidates);
         if (!candidates) return CACHE_ERR_NOMEM;
         
         size_t candidate_count = 0;
@@ -505,26 +515,14 @@ int cache_set(cache_t* cache, const char* key, const char* value, uint64_t ttl_m
             return CACHE_ERR_NOMEM;  // 没有可淘汰的条目
         }
         
-        // 按 access_time 排序（升序，最老的在前）
-        for (size_t i = 0; i < candidate_count - 1; i++) {
-            size_t min_idx = i;
-            for (size_t j = i + 1; j < candidate_count; j++) {
-                if (candidates[j].access_time < candidates[min_idx].access_time) {
-                    min_idx = j;
-                }
-            }
-            if (min_idx != i) {
-                evict_candidate_t tmp = candidates[i];
-                candidates[i] = candidates[min_idx];
-                candidates[min_idx] = tmp;
-            }
-        }
+        // 按 access_time 排序（升序，最老的在前）—— qsort O(k log k)，替代旧的选择排序 O(k²)
+        qsort(candidates, candidate_count, sizeof(cache_evict_candidate_t), evict_candidate_cmp);
         
         // 批量淘汰，直到有足够空间
         size_t evicted = 0;
         
         for (size_t i = 0; i < candidate_count && cache->memory_used + aligned_size > cache->memory_max; i++) {
-            evict_candidate_t* c = &candidates[i];
+            cache_evict_candidate_t* c = &candidates[i];
             cache_entry_header_t* h = (cache_entry_header_t*)CACHE_PTR(cache, c->offset);
             
             if (h->flags & CACHE_ENTRY_DELETED) continue;  // 可能已被之前的淘汰标记
@@ -659,14 +657,7 @@ int cache_batch_set(cache_t* cache, const cache_batch_item_t* items, size_t coun
         size_t evicted = 0;
         
         // 收集可淘汰的候选（非永久、未删除，按 access_time 升序）
-        typedef struct {
-            uint64_t access_time;
-            size_t offset;
-            size_t key_len;
-            size_t total_size;
-        } evict_candidate_t;
-        
-        evict_candidate_t* candidates = malloc(sizeof(evict_candidate_t) * cache->entry_count);
+        cache_evict_candidate_t* candidates = malloc(sizeof(cache_evict_candidate_t) * cache->entry_count);
         if (!candidates) return CACHE_ERR_NOMEM;
         
         size_t candidate_count = 0;
@@ -690,20 +681,8 @@ int cache_batch_set(cache_t* cache, const cache_batch_item_t* items, size_t coun
             offset += total_size;
         }
         
-        // 选择排序（O(n²)，candidate_count 通常较小）
-        for (size_t i = 0; i < candidate_count - 1; i++) {
-            size_t min_idx = i;
-            for (size_t j = i + 1; j < candidate_count; j++) {
-                if (candidates[j].access_time < candidates[min_idx].access_time) {
-                    min_idx = j;
-                }
-            }
-            if (min_idx != i) {
-                evict_candidate_t tmp = candidates[i];
-                candidates[i] = candidates[min_idx];
-                candidates[min_idx] = tmp;
-            }
-        }
+        // qsort O(k log k)，替代旧的选择排序 O(k²)
+        qsort(candidates, candidate_count, sizeof(cache_evict_candidate_t), evict_candidate_cmp);
         
         // 批量淘汰直到有足够空间
         for (size_t i = 0; i < candidate_count && evicted < need; i++) {
