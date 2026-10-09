@@ -182,9 +182,94 @@ static void import_chunks(const char* analysis_dir, const char* namespace) {
     free(line);
     fclose(fp);
 
-    // Symbol index: built on-demand during queries (skip bulk import for speed)
+    // Symbol 索引见 import_symbols()（Phase 1b）
     char msg[256];
     snprintf(msg, sizeof(msg), "Stored %d chunks out of %d", stored, valid);
+    log_info(msg);
+}
+
+// 从原始 JSON 行提取字符串字段（简单 strstr，字段顺序保证顶层字段先出现）
+static int raw_field(const char* line, const char* key, char* out, int cap) {
+    char pat[64];
+    snprintf(pat, sizeof(pat), "\"%s\":\"", key);
+    const char* p = strstr(line, pat);
+    if (!p) { out[0] = '\0'; return 0; }
+    p += strlen(pat);
+    const char* e = strchr(p, '"');
+    if (!e) { out[0] = '\0'; return 0; }
+    int len = (int)(e - p);
+    if (len >= cap) len = cap - 1;
+    memcpy(out, p, len);
+    out[len] = '\0';
+    return 1;
+}
+
+// 导入 symbol 反向索引：/code/<ns>/symbols/<name> = [{name,kind,file,line}, ...]
+// 供 cache_query --type symbol/context 使用（旧版为提速跳过了此步，导致 context 恒空）。
+static void import_symbols(const char* analysis_dir, const char* namespace) {
+    char path[512];
+    snprintf(path, sizeof(path), "%s/chunks_meta.jsonl", analysis_dir);
+    FILE* fp = fopen(path, "r");
+    if (!fp) { log_warn("chunks_meta.jsonl not found (symbols)"); return; }
+
+    log_info("Phase 1b: Building symbol index...");
+
+    json_t* map = json_object();   // name -> array of {name,kind,file,line}
+    char* line = malloc(MAX_LINE);
+    int added = 0;
+
+    while (fgets(line, MAX_LINE, fp)) {
+        char name[512], kind[64], file[1024];
+        if (!raw_field(line, "name", name, sizeof(name))) continue;
+        if (!raw_field(line, "file", file, sizeof(file))) continue;
+        raw_field(line, "kind", kind, sizeof(kind));
+
+        // 过滤低价值 kind（变量/成员/局部等不建符号索引）
+        if (strcmp(kind, "variable") == 0 || strcmp(kind, "member") == 0 ||
+            strcmp(kind, "field") == 0 || strcmp(kind, "local") == 0 ||
+            strcmp(kind, "parameter") == 0) {
+            continue;
+        }
+
+        long ln = 0;
+        const char* lp = strstr(line, "\"line_start\":");
+        if (lp) ln = strtol(lp + 13, NULL, 10);
+
+        json_t* arr = json_object_get(map, name);
+        if (!arr) {
+            arr = json_array();
+            json_object_set_new(map, name, arr);
+        }
+        json_t* obj = json_object();
+        json_object_set_new(obj, "name", json_string(name));
+        json_object_set_new(obj, "kind", json_string(kind));
+        json_object_set_new(obj, "file", json_string(file));
+        json_object_set_new(obj, "line", json_integer(ln));
+        json_array_append_new(arr, obj);
+        added++;
+    }
+
+    free(line);
+    fclose(fp);
+
+    const char* nm;
+    json_t* arr;
+    int written = 0;
+    json_object_foreach(map, nm, arr) {
+        char key[2048];
+        snprintf(key, sizeof(key), "%s/symbols/%s", namespace, nm);
+        char* s = json_dumps(arr, JSON_COMPACT);
+        if (s) {
+            safe_set_json(key, s);
+            free(s);
+            written++;
+        }
+    }
+
+    json_decref(map);
+
+    char msg[160];
+    snprintf(msg, sizeof(msg), "Indexed %d symbol entries into %d names", added, written);
     log_info(msg);
 }
 
@@ -497,6 +582,7 @@ int main(int argc, char** argv) {
     
     if (!skip_chunks) {
         import_chunks(analysis_dir, namespace);
+        import_symbols(analysis_dir, namespace);
     }
     if (!skip_callgraph) {
         import_callgraph(analysis_dir, namespace);
