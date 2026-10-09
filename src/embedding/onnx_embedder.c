@@ -515,7 +515,7 @@ onnx_embedder_t* onnx_embedder_init(const char* model_path, const char* vocab_pa
             return NULL;
         }
         
-        printf("Loaded tokenizers-cpp from %s\n", vocab_path);
+        fprintf(stderr, "Loaded tokenizers-cpp from %s\n", vocab_path);
     } else {
         // WordPiece tokenizer (MPNet / BERT)
         e->tokenizer_type = TOKENIZER_WORDPIECE;
@@ -529,7 +529,7 @@ onnx_embedder_t* onnx_embedder_init(const char* model_path, const char* vocab_pa
             return NULL;
         }
         
-        printf("Loaded WordPiece vocab: %d tokens (UNK=%d, CLS=%d, SEP=%d, PAD=%d)\n",
+        fprintf(stderr, "Loaded WordPiece vocab: %d tokens (UNK=%d, CLS=%d, SEP=%d, PAD=%d)\n",
                e->vocab_size, e->unk_id, e->cls_id, e->sep_id, e->pad_id);
     }
     
@@ -653,13 +653,13 @@ onnx_embedder_t* onnx_embedder_init(const char* model_path, const char* vocab_pa
             fprintf(stderr, "  [ERROR] CUDA not available, falling back to CPU. Check LD_LIBRARY_PATH for CUDA/cuDNN libraries.\n");
             g_ort->ReleaseStatus(status);
         } else {
-            printf("  Using CUDA GPU acceleration\n");
+            fprintf(stderr, "  Using CUDA GPU acceleration\n");
         }
     } else {
         if (is_jina) {
-            printf("  Using TensorRT GPU acceleration (FP32 for Jina)\n");
+            fprintf(stderr, "  Using TensorRT GPU acceleration (FP32 for Jina)\n");
         } else {
-            printf("  Using TensorRT GPU acceleration (FP16)\n");
+            fprintf(stderr, "  Using TensorRT GPU acceleration (FP16)\n");
         }
     }
     }  // close if (!use_tensorrt)
@@ -701,7 +701,7 @@ onnx_embedder_t* onnx_embedder_init(const char* model_path, const char* vocab_pa
         // Non-fatal: fallback to creating tensors per-call
     }
     
-    printf("ONNX embedder initialized: model=%s, seq_len=%d, dim=%d\n",
+    fprintf(stderr, "ONNX embedder initialized: model=%s, seq_len=%d, dim=%d\n",
            model_path, max_seq_length, dim);
     
     return e;

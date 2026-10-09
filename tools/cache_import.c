@@ -291,6 +291,10 @@ static void import_callgraph(const char* analysis_dir, const char* namespace) {
     json_t* func_data;
     int stored_callers = 0;
     int stored_callees = 0;
+
+    // 正向表：caller → [callee 调用点]。call_graph.json 是反向图（key=callee，
+    // "function"=caller），旧版把 func_name(callee 自己) 当 callee 存 → 全自指。
+    json_t* callee_map = json_object();
     
     int callgraph_total = json_object_size(root);
     int callgraph_idx = 0;
@@ -302,9 +306,8 @@ static void import_callgraph(const char* analysis_dir, const char* namespace) {
         json_t* calls = json_object_get(func_data, "calls");
         if (!calls || !json_is_array(calls)) continue;
         
-        // Build callers and callees maps
+        // Build callers of func_name（call_graph.json 的 key 即 callee）
         json_t* callers = json_array();
-        json_t* callees = json_array();
         
         size_t idx;
         json_t* call;
@@ -322,13 +325,19 @@ static void import_callgraph(const char* analysis_dir, const char* namespace) {
             json_object_set_new(site, "line", json_integer(line));
             json_object_set_new(site, "args", json_string(args ? args : ""));
             json_array_append_new(callers, site);
-            
+
+            // 正向累加：caller 调用了 callee(=func_name)
+            json_t* carr = json_object_get(callee_map, caller);
+            if (!carr) {
+                carr = json_array();
+                json_object_set_new(callee_map, caller, carr);
+            }
             json_t* site2 = json_object();
             json_object_set_new(site2, "name", json_string(func_name));
             json_object_set_new(site2, "file", json_string(file ? file : ""));
             json_object_set_new(site2, "line", json_integer(line));
             json_object_set_new(site2, "args", json_string(args ? args : ""));
-            json_array_append_new(callees, site2);
+            json_array_append_new(carr, site2);
         }
         
         // Store callers: who calls this function
@@ -348,14 +357,18 @@ static void import_callgraph(const char* analysis_dir, const char* namespace) {
         } else {
             json_decref(callers);
         }
-        
-        // Store callees: what this function calls
-        if (json_array_size(callees) > 0) {
+    }
+    
+    // Store callees（正向）: what each function calls
+    {
+        const char* caller_name;
+        json_t* carr;
+        json_object_foreach(callee_map, caller_name, carr) {
             char key[512];
-            snprintf(key, sizeof(key), "%s/callees/%s", namespace, func_name);
+            snprintf(key, sizeof(key), "%s/callees/%s", namespace, caller_name);
             json_t* val = json_object();
-            json_object_set_new(val, "count", json_integer(json_array_size(callees)));
-            json_object_set_new(val, "callees", callees);
+            json_object_set_new(val, "count", json_integer(json_array_size(carr)));
+            json_object_set_new(val, "callees", json_incref(carr));
             char* str = json_dumps(val, JSON_COMPACT);
             if (str) {
                 safe_set_json(key, str);
@@ -363,10 +376,9 @@ static void import_callgraph(const char* analysis_dir, const char* namespace) {
                 stored_callees++;
             }
             json_decref(val);
-        } else {
-            json_decref(callees);
         }
     }
+    json_decref(callee_map);
     
     json_decref(root);
     
