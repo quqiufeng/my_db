@@ -2,15 +2,35 @@
 #include <string.h>
 #include <stdlib.h>
 
+// 辅助：比较 namespace 子节点名（用于排序/二分）
+static int ns_name_cmp(const char* a, size_t alen, const char* b, size_t blen) {
+    size_t m = alen < blen ? alen : blen;
+    int c = memcmp(a, b, m);
+    if (c) return c;
+    if (alen < blen) return -1;
+    if (alen > blen) return 1;
+    return 0;
+}
+
 // 辅助：查找或创建子节点
+// children 按 name 排序，二分查找 O(log n)。
+// 修复：旧实现用 child->path(完整路径) 与 name(单个分量) 比较，长度必然不等，
+// 去重永不命中 → 每个 key 都新建节点、namespace 树爆炸 → 导入 O(n²)。
 static cache_ns_node_t* find_or_create_child(cache_ns_node_t* parent, 
                                               const char* name, size_t name_len) {
-    // 先查找
-    for (size_t i = 0; i < parent->child_count; i++) {
-        cache_ns_node_t* child = parent->children[i];
-        if (strlen(child->path) == name_len && memcmp(child->path, name, name_len) == 0) {
-            return child;
-        }
+    size_t parent_len = strlen(parent->path);
+    size_t sep_len = (parent_len > 0) ? 1 : 0;
+
+    // 二分查找
+    size_t lo = 0, hi = parent->child_count;
+    while (lo < hi) {
+        size_t mid = (lo + hi) / 2;
+        cache_ns_node_t* child = parent->children[mid];
+        const char* cname = child->path + parent_len + sep_len;
+        size_t clen = strlen(child->path) - (parent_len + sep_len);
+        int c = ns_name_cmp(cname, clen, name, name_len);
+        if (c == 0) return child;
+        if (c < 0) lo = mid + 1; else hi = mid;
     }
     
     // 扩容
@@ -28,10 +48,7 @@ static cache_ns_node_t* find_or_create_child(cache_ns_node_t* parent,
     cache_ns_node_t* child = calloc(1, sizeof(cache_ns_node_t));
     if (!child) return NULL;
     
-    // 构建完整路径
-    size_t parent_len = strlen(parent->path);
-    // parent 可能是根节点 ""，此时不加额外的 '/'
-    size_t sep_len = (parent_len > 0) ? 1 : 0;
+    // 构建完整路径（parent 可能是根节点 ""，此时不加额外的 '/'）
     child->path = malloc(parent_len + sep_len + name_len + 1);
     if (!child->path) {
         free(child);
@@ -45,7 +62,11 @@ static cache_ns_node_t* find_or_create_child(cache_ns_node_t* parent,
     memcpy(child->path + parent_len + sep_len, name, name_len);
     child->path[parent_len + sep_len + name_len] = '\0';
     
-    parent->children[parent->child_count++] = child;
+    // 插入到 lo 位置，保持排序
+    memmove(&parent->children[lo + 1], &parent->children[lo],
+            (parent->child_count - lo) * sizeof(cache_ns_node_t*));
+    parent->children[lo] = child;
+    parent->child_count++;
     return child;
 }
 

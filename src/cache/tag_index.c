@@ -177,8 +177,39 @@ void cache_tag_index_destroy(cache_t* cache) {
     idx->size = 0;
 }
 
+// 扩容 tag hash 表（负载因子 >= 1.0）。
+// 修复：初始仅 64 个 bucket 且永不扩容，海量唯一 token 会让链长线性增长，
+// find_or_create_tag 退化为 O(n)，整个导入 O(n²)（内核 6.9 万 chunks 实测）。
+static int cache_tag_index_resize(cache_tag_index_t* idx, size_t new_count) {
+    if (new_count <= idx->bucket_count) return 0;
+    cache_tag_entry_t** new_buckets = calloc(new_count, sizeof(cache_tag_entry_t*));
+    if (!new_buckets) return -1;
+
+    for (size_t i = 0; i < idx->bucket_count; i++) {
+        cache_tag_entry_t* entry = idx->buckets[i];
+        while (entry) {
+            cache_tag_entry_t* next = entry->next;
+            uint64_t h = tag_hash(entry->tag, strlen(entry->tag));
+            size_t b = h & (new_count - 1);
+            entry->next = new_buckets[b];
+            new_buckets[b] = entry;
+            entry = next;
+        }
+    }
+
+    free(idx->buckets);
+    idx->buckets = new_buckets;
+    idx->bucket_count = new_count;
+    return 0;
+}
+
 // 查找或创建 tag entry
 static cache_tag_entry_t* find_or_create_tag(cache_tag_index_t* idx, const char* tag, size_t tag_len) {
+    // 负载因子控制：tag 数达到 bucket 数即翻倍（保持 2 的幂）
+    if (idx->bucket_count > 0 && idx->size >= idx->bucket_count) {
+        cache_tag_index_resize(idx, idx->bucket_count * 2);
+    }
+
     uint64_t h = tag_hash(tag, tag_len);
     size_t bucket = h & (idx->bucket_count - 1);
     
@@ -239,15 +270,10 @@ int cache_tag_index_add(cache_t* cache, size_t entry_offset, const char* value, 
         cache_tag_entry_t* entry = find_or_create_tag(&cache->tag_index, tags[i], tag_len);
         if (!entry) continue;  // 内存不足，跳过
         
-        // 检查是否已存在
-        int exists = 0;
-        for (size_t j = 0; j < entry->count; j++) {
-            if (entry->offsets[j] == entry_offset) {
-                exists = 1;
-                break;
-            }
-        }
-        if (exists) continue;
+        // 注意：这里**不能**线性扫描 entry->offsets 去重。
+        // 公共 token（如 struct/return）的 offsets 列表会增长到 O(n)，
+        // 每次插入都扫描 → 整个导入退化为 O(n²)（实测 6 万 chunks 后每万块翻倍）。
+        // 重复由 cache_set 更新路径先 remove 旧条目保证，这里直接追加（均摊 O(1)）。
         
         // 扩容
         if (entry->count >= entry->capacity) {
