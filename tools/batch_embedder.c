@@ -20,6 +20,37 @@ typedef struct {
     char* text;
 } item_t;
 
+// 将非法 UTF-8 字节替换为 '?'（原地）。
+// 背景：中文等注释被 chunk 窗口从多字节字符中间截断会留下非法 UTF-8，
+// Rust tokenizer(tokenizers-cpp) 遇非法 UTF-8 会 panic 并 abort 整个进程，
+// 导致整个向量化任务失败。此处做防御性清洗，保证任何输入都不会崩溃。
+static void sanitize_utf8(char* s) {
+    unsigned char* p = (unsigned char*)s;
+    unsigned char* o = p;
+    while (*p) {
+        unsigned char c = *p;
+        int len;
+        if (c < 0x80) len = 1;
+        else if ((c & 0xE0) == 0xC0) len = 2;
+        else if ((c & 0xF0) == 0xE0) len = 3;
+        else if ((c & 0xF8) == 0xF0) len = 4;
+        else { *o++ = '?'; p++; continue; }
+
+        int ok = 1;
+        for (int i = 1; i < len; i++) {
+            if ((p[i] & 0xC0) != 0x80) { ok = 0; break; }
+        }
+        // 拒绝过长编码（overlong）与非法代理区（ASCII 安全检查）
+        if (ok && len == 2 && c < 0xC2) ok = 0;
+        if (ok && len == 4 && c > 0xF4) ok = 0;
+
+        if (!ok) { *o++ = '?'; p++; continue; }
+        for (int i = 0; i < len; i++) *o++ = p[i];
+        p += len;
+    }
+    *o = '\0';
+}
+
 // Free an item batch
 static void free_items(item_t* items, int count) {
     for (int i = 0; i < count; i++) {
@@ -65,6 +96,7 @@ static int load_items_batch(FILE* text_fp, FILE* meta_fp,
         if (!items[n].text) { free(items[n].name); break; }
         memcpy(items[n].text, text_line, copy_len);
         items[n].text[copy_len] = '\0';
+        sanitize_utf8(items[n].text);
 
         n++;
     }

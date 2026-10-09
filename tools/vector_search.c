@@ -484,11 +484,14 @@ int main(int argc, char** argv) {
                 printf("\n");
             }
         } else {
+            // 简洁模式（默认，无 --rich）：name + score + Location。
+            // 供架构扫描/快速定位使用；完整定义请加 --rich。
             printf("\nTop %d results:\n", n);
-            printf("%-50s %s\n", "Name", "Score");
-            printf("%-50s %s\n", "----", "-----");
             for (int i = 0; i < n; i++) {
-                printf("%-50s %.4f\n", results[i].name, results[i].score);
+                printf("[%d] %s (%.4f)\n", i + 1, results[i].name, results[i].score);
+                if (results[i].file[0]) {
+                    printf("    Location:  %s:%d\n", results[i].file, results[i].line_start);
+                }
             }
         }
     }

@@ -6,6 +6,17 @@
 # 功能：对代码库进行索引、生成向量、构建调用图、语义搜索、变量数据流追踪
 # 技术栈：C 多进程索引 + Jina v2 语义向量 + TensorRT GPU 推理
 #
+# ★ 使用规范（务必遵守）：
+#   本脚本的调用方式遵循《代码搜索最佳实践》——见同目录 code_search_best_practices.md
+#   （结合 how-to-read-code 方法论的探索流程）。
+#   核心纪律：
+#     1) 先明确目的（Scope）；无明确指令时默认从「整体架构 → 子模块」推进，不要反问；
+#     2) 本脚本所有搜索/调用图/数据流结果均为【静态证据 [static]】，不等于运行时真相；
+#        承重结论必须经真实 build + 断点/测试验证后才能标【[verified]】；
+#     3) 索引必须 index + vector 配套（只跑 index 无向量 → search 失效），且索引任务必须串行；
+#     4) 引用统一用 file:symbol，行号仅参考。
+#   完整最佳实践、Phase 映射与报告模板：见 code_search_best_practices.md
+#
 # 使用方式:
 #   ./ai_code_search.sh index <repo_path> [cache_dir] [workers]  # 索引代码
 #   ./ai_code_search.sh vector <cache_dir> [project_name]        # 生成向量+调用图+数据流
@@ -344,34 +355,54 @@ cmd_callgraph() {
 cmd_search() {
     local cache_dir="${1:-}"
     local query="${2:-}"
-    local max_results="${3:-10}"
 
     if [[ -z "$cache_dir" || -z "$query" ]]; then
-        echo "用法: $0 search <cache_dir> <query> [max_results]"
+        echo "用法: $0 search <cache_dir> <query> [max_results] [选项...]"
         echo "  cache_dir:    缓存目录路径"
         echo "  query:        自然语言查询（用引号包裹）"
         echo "  max_results:  返回结果数量 (默认: 10)"
+        echo "  选项:         --rich       输出完整定义 FullDef（默认只给 name/score/Location）"
+        echo "                --callgraph  附带 caller 列表"
+        echo "                --json       JSON 输出"
+        echo "                --kind K    只搜某类符号 (function/struct/...)"
+        echo "                --lang L    限定语言 (c/cpp/...)"
+        echo "                --file F    限定文件名子串"
+        echo "                --no-boost / --max-results N"
+        echo ""
+        echo "说明: 默认 brief 输出（含 Location），便于架构扫描与快速定位；"
+        echo "      需要完整代码再显式加 --rich。"
         echo ""
         echo "示例:"
         echo "  $0 search /opt/code_caches/sd_cache \"upscale image\" 5"
-        echo "  $0 search /opt/code_caches/sd_cache \"memory allocation buffer pool\" 10"
-        echo "  $0 search /opt/code_caches/sd_cache \"VAE encode latent\" 5"
+        echo "  $0 search /opt/code_caches/nginx_cache \"event loop\" 10 --callgraph"
+        echo "  $0 search /opt/code_caches/nginx_cache \"ngx_palloc\" 3 --rich"
         exit 1
     fi
+    shift 2
 
     if [[ ! -d "${cache_dir}/vectors" ]]; then
         error "未找到向量文件，请先运行: $0 vector ${cache_dir}"
         exit 1
     fi
 
+    # 解析位置参数（max_results）与其余转发选项
+    local max_results=10
+    local -a extra=()
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            ''|*[!0-9]*) extra+=("$1"); shift ;;
+            *) max_results="$1"; shift ;;
+        esac
+    done
+
     info "语义搜索: \"$query\""
     info "  缓存: $cache_dir"
     info "  最大结果: $max_results"
+    info "  模式: $([[ " ${extra[*]} " == *" --rich "* || " ${extra[*]} " == *" --json "* ]] && echo "详细" || echo "brief（加 --rich 看完整定义）")"
     echo ""
 
-    # 使用 Jina 模型 + rich 模式 + callgraph 显示
-    "$VECTOR_SEARCH" "$cache_dir" "$query" "$max_results" \
-        --model jina --rich --callgraph 2>/dev/null
+    # 默认走 brief（不加 --rich/--callgraph）；用户显式传的选项原样转发
+    "$VECTOR_SEARCH" "$cache_dir" "$query" "$max_results" --model jina "${extra[@]}" 2>/dev/null
 }
 
 # ============================================
@@ -550,6 +581,90 @@ cmd_cross_search() {
     "$CROSS_SEARCH" "$query" "$max_results" "${@:3}"
 }
 
+# ============================================
+# 子命令: check - 探索前置检查（索引/向量/HNSW/分析产物/KV Cache）
+# ============================================
+cmd_check() {
+    local cache_dir="${1:-}"
+    local project="${2:-}"
+
+    if [[ -z "$cache_dir" ]]; then
+        echo "用法: $0 check <cache_dir> [project_name]"
+        echo "  cache_dir: 分析缓存目录（含 chunks/vectors）"
+        echo "  project:   项目名（探测 /memory KV 是否已导入 namespace /code/<project>）"
+        echo ""
+        echo "示例: $0 check /opt/code_caches/openresty_cache openresty"
+        exit 1
+    fi
+
+    local fail=0
+    echo "前置检查: $cache_dir"
+    echo "──────────────────────────────────────────────"
+
+    # ① chunks
+    if [[ -s "${cache_dir}/chunks_meta.jsonl" ]]; then
+        ok "chunks_meta.jsonl ($(wc -l < "${cache_dir}/chunks_meta.jsonl") chunks)"
+    else
+        error "缺少 chunks_meta.jsonl → 先运行: $0 index <repo> ${cache_dir}"
+        fail=1
+    fi
+
+    # ② 向量 + HNSW 新鲜度验收
+    local bin
+    bin=$(ls "${cache_dir}/vectors/"*.jina.bin 2>/dev/null | head -1)
+    if [[ -z "$bin" ]]; then
+        error "缺少 vectors/*.jina.bin → 语义搜索失效，先运行: $0 vector ${cache_dir}"
+        fail=1
+    else
+        ok "向量: $(basename "$bin")"
+        if [[ ! -f "${bin}.hnsw" ]]; then
+            error "缺少 $(basename "${bin}").hnsw → 语义搜索失效，重跑: $0 vector ${cache_dir}"
+            fail=1
+        elif [[ "${bin}.hnsw" -nt "$bin" ]]; then
+            ok "HNSW 新于 .bin（验收通过）"
+        else
+            error "HNSW 旧于 .bin（旧索引冒充新索引）→ 重跑: $0 vector ${cache_dir}"
+            fail=1
+        fi
+    fi
+
+    # ③ 分析产物
+    local f
+    for f in call_graph.json dataflow.json word_freq.json; do
+        if [[ -s "${cache_dir}/${f}" ]]; then ok "$f"; else warn "缺少 ${f}（callgraph/dataflow/词频 功能受限）"; fi
+    done
+
+    # ④ KV Cache（context/symbol 依赖）
+    echo ""
+    echo "KV Cache:"
+    if [[ -f /memory/index.bin && -f /memory/cache.bin ]]; then
+        ok "/memory 就绪"
+        if [[ -n "$project" ]]; then
+            local cq="${SCRIPT_DIR}/tools/cache_query"
+            if [[ -x "$cq" ]]; then
+                if "$cq" "/code/${project}/_meta/info" --type exact 2>/dev/null | grep -q '"results":\[{'; then
+                    ok "KV 已导入 /code/${project}（context/symbol 可用）"
+                else
+                    warn "KV 未导入 /code/${project} → context/symbol 不可用"
+                    warn "  修复: cache_import ${cache_dir} /code/${project} --cache-dir /memory"
+                fi
+            fi
+        else
+            info "未指定 project，跳过 KV 命名空间探测"
+        fi
+    else
+        warn "/memory 不存在 → context/symbol 不可用（仅向量 search 可用）"
+    fi
+
+    echo "──────────────────────────────────────────────"
+    if [[ $fail -eq 0 ]]; then
+        ok "检查通过，可开始探索"
+    else
+        error "存在阻塞项，请先修复再探索"
+        exit 1
+    fi
+}
+
 # 主程序
 # ============================================
 main() {
@@ -559,10 +674,12 @@ main() {
     shift || true
 
     case "$cmd" in
+        check|k)
+            cmd_check "$@"
+            ;;
         index|i)
             cmd_index "$@"
-            ;;
-        vector|v)
+            ;;        vector|v)
             cmd_vector "$@"
             ;;
         callgraph|c)
@@ -592,6 +709,7 @@ main() {
             echo "========================="
             echo ""
             echo "子命令:"
+            echo "  check <cache> [project]         - 探索前置检查(索引/向量/HNSW/KV)"
             echo "  index <repo> [cache] [workers]  - 索引代码库"
             echo "  vector <cache> [name]           - 生成语义向量"
             echo "  callgraph <cache>               - 构建调用关系图"
@@ -609,6 +727,10 @@ main() {
             echo "  $0 snippet /opt/code_caches/sd_cache ./my_code.cpp 5"
             echo "  $0 dataflow /opt/code_caches/nginx_cache c     # 追踪 connection (含字段级和跨函数流)"
             echo "  $0 analyze /opt/stable-diffusion.cpp /opt/code_caches/sd_cache"
+            echo ""
+            echo "★ 使用规范: 遵循《代码搜索最佳实践》code_search_best_practices.md"
+            echo "  - 先定目的(Scope)；搜索/调用图/数据流结果均为静态证据 [static]，非运行时真相"
+            echo "  - 承重结论须经 build + 断点/测试验证后标 [verified]；index 与 vector 必须配套且串行"
             echo ""
             echo "高级搜索选项（直接用 vector_search 工具）:"
             echo "  --model jina      使用 Jina v2 代码模型"

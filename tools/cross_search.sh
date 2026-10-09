@@ -72,6 +72,7 @@ search_project() {
     local project="$1"
     local query="$2"
     local max_per_project="$3"
+    local per_timeout="${4:-90}"
 
     local cache_dir="${CACHE_DIR_BASE}/${project}_cache"
     local namespace="/code/${project}"
@@ -87,7 +88,8 @@ search_project() {
     fi
 
     local output
-    output=$("$CACHE_QUERY" "$query" \
+    # 单项目超时：cache_query 需加载模型，个别大项目/GPU 争用可能长时间不返回
+    output=$(timeout "$per_timeout" "$CACHE_QUERY" "$query" \
         --repo "$namespace" \
         --type search \
         --analysis-dir "$cache_dir" \
@@ -154,20 +156,28 @@ main() {
     fi
 
     local max_per_project=$(( max_results > 5 ? max_results : 5 ))
+    local max_parallel="${CROSS_SEARCH_JOBS:-2}"   # 限制并发：每个 cache_query 都会加载模型，并发过高会 GPU 争用/超时
+    local per_timeout="${CROSS_SEARCH_TIMEOUT:-90}" # 单项目超时（秒）
 
     log "跨项目语义搜索: \"$query\""
-    log "搜索范围: ${#projects[@]} 个项目"
+    log "搜索范围: ${#projects[@]} 个项目（并发 ${max_parallel}，单项目超时 ${per_timeout}s）"
     log ""
 
     local tmpfile
     tmpfile=$(mktemp /tmp/cross_search_XXXXXX.jsonl)
     trap "rm -f '$tmpfile'" EXIT
 
-    # 并行搜索每个项目
+    # 并行搜索每个项目（带并发上限）
     local pids=()
+    local running=0
     for project in "${projects[@]}"; do
-        search_project "$project" "$query" "$max_per_project" >> "$tmpfile" &
+        search_project "$project" "$query" "$max_per_project" "$per_timeout" >> "$tmpfile" &
         pids+=($!)
+        running=$((running + 1))
+        if (( running >= max_parallel )); then
+            wait -n 2>/dev/null || true
+            running=$((running - 1))
+        fi
     done
 
     for pid in "${pids[@]}"; do

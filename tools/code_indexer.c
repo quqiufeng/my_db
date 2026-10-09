@@ -13,6 +13,20 @@
 
 #define MAX_PATH_LEN 2048
 
+// UTF-8 边界对齐：返回 <= off 的最大位置，使 s[ret] 不是 UTF-8 续接字节(0b10xxxxxx)。
+// 用于 chunk 窗口切分，避免把多字节字符（如中文注释）从中间截断产生非法 UTF-8。
+static int utf8_floor(const char* s, int off) {
+    while (off > 0 && ((unsigned char)s[off] & 0xC0) == 0x80) off--;
+    return off;
+}
+
+// UTF-8 边界对齐（向后）：给定长度 take，若 content[off+take] 是续接字节则回退 take，
+// 保证切片 content[off, off+take) 以完整字符结尾。
+static int utf8_floor_len(const char* content, int off, int take) {
+    while (take > 0 && ((unsigned char)content[off + take] & 0xC0) == 0x80) take--;
+    return take > 0 ? take : 1;
+}
+
 // 插件配置
 #define MAX_PLUGINS 8
 #define MAX_EXTENSIONS 16
@@ -1060,7 +1074,7 @@ static int worker_process(worker_t* worker, int worker_id) {
                     }
 
                     if (strlen(content) > 16000) {
-                        content[16000] = '\0';
+                        content[utf8_floor(content, 16000)] = '\0';
                         char* last_nl = strrchr(content, '\n');
                         if (last_nl) *(last_nl + 1) = '\0';
                     }
@@ -1086,6 +1100,7 @@ static int worker_process(worker_t* worker, int worker_id) {
                                             line_num, end_line, lang, signature, content, "");
                                 ctags_chunk_count++;
                                 offset += (window_size > overlap) ? (window_size - overlap) : window_size;
+                                offset = utf8_floor(content, offset);
                                 part++;
                                 if (part >= 5) break;
                                 continue;
@@ -1093,6 +1108,10 @@ static int worker_process(worker_t* worker, int worker_id) {
                             char chunk_content[4096];
                             int remaining = content_len - offset;
                             int take = (remaining > window_size) ? window_size : remaining;
+                            // 不把多字节 UTF-8 字符从中间截断（否则留下非法 UTF-8）
+                            if (offset + take < content_len) {
+                                take = utf8_floor_len(content, offset, take);
+                            }
 
                             if (signature[0]) {
                                 snprintf(chunk_content, sizeof(chunk_content), "%s // Part %d\n",
@@ -1122,6 +1141,7 @@ static int worker_process(worker_t* worker, int worker_id) {
                             ctags_chunk_count++;
 
                             offset += (take > overlap) ? (take - overlap) : take;
+                            offset = utf8_floor(content, offset);
                             part++;
 
                             if (part >= 5) break;

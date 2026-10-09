@@ -142,6 +142,19 @@ static int is_noise_symbol(const char* name) {
     for (int i = 0; i < n; i++) {
         if (strcmp(NOISE_SYMBOLS[i], name) == 0) return 1;
     }
+
+    // 启发式过滤（治 LuaJIT 等宏污染扇入排名）：
+    //   ① 长度 < 3 的符号（调试宏 dd、单双字母）基本不是函数调用目标；
+    //   ② 全大写（A-Z/0-9/_）标识符视为宏（LJLIB_CF/LJFOLD/LJLIB_REC…），非函数。
+    {
+        int len = (int)strlen(name);
+        if (len < 3) return 1;
+        int has_lower = 0;
+        for (const char* q = name; *q; q++) {
+            if (*q >= 'a' && *q <= 'z') { has_lower = 1; break; }
+        }
+        if (!has_lower) return 1;
+    }
     return 0;
 }
 

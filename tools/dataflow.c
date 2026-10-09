@@ -10,6 +10,24 @@
 #define MAX_FIELDS 50
 #define MAX_FUNCS 5000
 
+// 前向声明（is_c_type 定义在后面）
+static int is_c_type(const char* word);
+
+// C 控制关键字/字面量：不能作为变量名收集（否则 dataflow.json 出现 "void"/"return" 等噪声键）
+static int is_c_keyword(const char* word) {
+    static const char* kw[] = {
+        "return", "if", "else", "for", "while", "do", "switch", "case",
+        "break", "continue", "goto", "sizeof", "typedef", "register",
+        "volatile", "extern", "inline", "restrict", "_Bool",
+        "true", "false", "NULL", "nullptr", "this",
+        NULL
+    };
+    for (int i = 0; kw[i]; i++) {
+        if (strcmp(word, kw[i]) == 0) return 1;
+    }
+    return 0;
+}
+
 // ============================================
 // 基础数据结构
 // ============================================
@@ -72,7 +90,20 @@ static call_graph_t g_call_graph = {NULL, 0, 0};
 // 变量管理
 // ============================================
 
+// 合法 C 标识符：首字符 alpha/underscore，其余 alnum/underscore。
+// 同时挡掉非 ASCII 字节（避免 dataflow.json 出现非法 UTF-8 的变量名键）
+static int is_identifier(const char* s) {
+    if (!s || !(isalpha((unsigned char)s[0]) || s[0] == '_')) return 0;
+    for (const char* p = s + 1; *p; p++) {
+        if (!(isalnum((unsigned char)*p) || *p == '_')) return 0;
+    }
+    return 1;
+}
+
 static var_record_t* find_or_create_var(const char* name) {
+    // 过滤 C 类型/关键字/非法标识符：避免 "void"（来自 "static void *fn"）、"return"、
+    // 以及非 ASCII 字节（如 "\xb0"）进入变量表污染输出。
+    if (!is_identifier(name) || is_c_type(name) || is_c_keyword(name)) return NULL;
     for (int i = 0; i < g_var_count; i++) {
         if (strcmp(g_vars[i].name, name) == 0) return &g_vars[i];
     }
