@@ -54,6 +54,8 @@ VS=./tools/vector_search         # 语义搜索引擎（需向量）
 | **探索前置检查**（索引/向量/HNSW/KV） | `$ACS check <cache> [project]` |
 | 语义搜索（自然语言→file:line，默认 brief） | `$ACS search <cache> "<query>" [n] [--rich|--callgraph|--kind|--lang|--file]` |
 | 单函数完整角色（caller/callee/调用链/dataflow） | `$CQ <fn> --repo <ns> --type context --depth N` |
+| **批量符号关系（agent 友好）** | `./tools/ctx.py <ns> <fn> [fn2 ...] [--depth N]`（只回吐 符号+caller/callee 名） |
+| **精简输出** | `$CQ <fn> --repo <ns> --type context --brief`（同上，单条） |
 | 精确符号 | `$CQ <fn> --repo <ns> --type symbol` |
 | 片段相似实现 | `$ACS snippet <cache> <code_file> [n]` |
 | 变量/字段级数据流 | `$ACS dataflow <cache> <var>` |
@@ -218,7 +220,27 @@ Observed path（Phase 5 backtrace 摘录，短）：
 
 ---
 
-## 10. 后续落地建议（可选）
+## 10. 真实项目验证（必须）
+
+工具是否"好用"**只能靠真实项目检验**——绝大多数缺陷只在真数据下触发。建议每次改动后跑：
+
+```bash
+./tests/validate_tools.sh          # 内置 openresty + linux_723
+# 或指定：./tests/validate_tools.sh <name> <cache> <namespace> <symbol> "<query>"
+```
+
+不变量（任一失败即非零退出）：
+- **向量**：`.bin` 存在、`.hnsw` 新于 `.bin`、`search top1 > 0.3`（防零向量/坏索引）
+- **context**：`symbol` 命中、`callees` 非空且**不全自指**（防 call_graph 反向图 bug）
+- **dataflow**：合法 JSON、变量数 > 阈值、无 `void`/`return` 噪声键
+
+> 经验：本项目的关键缺陷（UTF-8 abort、cache_import O(n²)、namespace 去重爆炸、
+> dataflow 内存/上限、symbol 未导入、`[CACHE]`/embedder 日志污染 stdout、callees 全自指）
+> **全部由真实项目暴露**，而非单元测试。
+
+---
+
+## 11. 后续落地建议（可选）
 
 固化为 opencode skill：
 - 路径：`.opencode/skill/how-to-read-code-with-search/SKILL.md`
