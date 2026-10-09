@@ -94,6 +94,35 @@ done
 
 ---
 
+## ⚙️ 运行依赖（GPU 加速必装 TensorRT）
+
+**向量化（`batch_embedder`）的加速依赖 TensorRT**，缺它可用但**明显变慢**（自动降级，不报错）：
+
+| 依赖 | 作用 | 缺失后果 |
+|---|---|---|
+| **NVIDIA 驱动 + CUDA** | GPU 基础 | 回落到 CPU（极慢） |
+| **TensorRT 10**（`/opt/TensorRT-10`） | 推理加速（实测内核 69 万 chunks **~17 分钟**） | 回落 CUDA EP（慢得多） |
+| **cuDNN** | CUDA EP 依赖 | CUDA 不可用 |
+| **ONNX Runtime GPU 1.20.1**（`/data/venv/onnxruntime-linux-x64-gpu-1.20.1`） | ONNX 推理引擎 | 无法加载模型 |
+| **Jina v2 模型** `/opt/models/jina-embeddings-v2-base-code/` | 嵌入模型 | 搜索失效 |
+
+**TRT 配置要点**（已在代码内固定）：
+- **动态 shape profile**：`input_ids/attention_mask: 1x64 … 32x512`（配合"按 batch 实际长度 padding + 长度分桶"）。
+  ⚠️ profile 若写成固定 `512`，变长输入会 `setInputShape` 失败 → 该批跳过 → 大量丢向量。改 profile 后**必须删 `$HOME/trt_cache` 重建 engine**。
+- `BATCH_SIZE ≤ 32`（TRT profile 上限；超限失败并**非零退出**，绝不写零向量）。
+- 首次运行在 `$HOME/trt_cache` 构建 engine（约十几秒），之后复用。
+
+**环境变量**（`ai_code_search.sh` 已自动拼接；单独调试 `batch_embedder`/`cache_query` 时需手动设）：
+```bash
+export LD_LIBRARY_PATH="/opt/my_db:/opt/TensorRT-10/lib:/opt/cuda/lib64:\
+/data/venv/lib/python3.12/site-packages/nvidia/cudnn/lib:\
+/data/venv/onnxruntime-linux-x64-gpu-1.20.1/lib:${LD_LIBRARY_PATH:-}"
+```
+
+> **实测加速比（linux 内核 693,026 chunks）**：优化前 140 items/s（82 分钟）→ 优化后 **684 items/s（约 17 分钟）= ~4.9x**。
+
+---
+
 ## 🚀 开发与部署流程（固定）
 
 > **本地开发、远程使用**：本地改源码 → 本地 `make` → `scp` 二进制到远程 → 远程直接用。
@@ -1491,13 +1520,15 @@ sudo ln -s /opt/jina-embeddings-v2-base-code/merges.txt \
 
 ---
 
-### 3. TensorRT V2 配置失败 → 回退到 CUDA（非阻塞）
+### 3. TensorRT 加速（曾回退 CUDA，已修复）
 
-**现象**: `[WARN] TensorRT V2 config failed, falling back to legacy API` + `Using CUDA GPU acceleration`
+**历史现象**: `[WARN] TensorRT V2 config failed, falling back to legacy API` + `Using CUDA GPU acceleration`。
 
-**原因**: ONNX Runtime 1.20.1 的 TensorRT V2 Execution Provider 与 TensorRT 10 不完全兼容。代码自动回退到 CUDA EP。
+**原因**: TRT V2 profile 曾写成固定 `1x512..32x512`，变长输入 `setInputShape` 失败。已改为**动态 profile** `1x64..32x512`，
+配合「按 batch 实际长度 padding + 长度分桶」，TensorRT 现已真正生效（详见文首「运行依赖」）。
 
-**影响**: **无**。CUDA GPU 加速正常工作（~130 items/s）。仅与 TensorRT 相关的性能警告，不影响结果。
+**影响 / 现状**: TensorRT 真在加速——linux 内核 693k chunks 从 82 分钟 → **~17 分钟（684 items/s）**。
+若 TensorRT 缺失则回落 CUDA EP（可用但慢）。改 profile 后需删 `$HOME/trt_cache` 重建 engine。
 
 ---
 
@@ -1968,11 +1999,13 @@ g_cache = cache_open(cache_dir, 4ULL * 1024 * 1024 * 1024);
 旧失败分支 `memset(vecbuf, 0, ...)` 会把整批写成**零向量**，且仍追加进 `.bin`。
 
 **修复**（`tools/batch_embedder.c` + `ai_code_search.sh` + `tools/vector_search.c`）:
-- `BATCH_SIZE 2048 → 16`（≤ profile 上限 32；实测 147 items/s）
+- `BATCH_SIZE 2048 → 32`（≤ profile 上限 32）
 - 编码失败**不再写零向量**：跳过该批、累计失败数，结束时**非零退出**
 - HNSW 由后台 fork 改为**同步** `waitpid`，失败视为致命
 - `ai_code_search.sh vector` 增加 **Step 5/5**：校验 `.hnsw` 新于 `.bin`，缺失/过旧自动重建；embedder 非零退出即中止
 - `vector_search` 对 `top1 < 0.30` 输出**低置信度告警**（提示索引可能损坏）
+- **TRT profile 改动态** `1x64..32x512` + 「按 batch 实际长度 padding + 长度分桶」→
+  内核 693k chunks 从 82 分钟 → **~17 分钟（684 items/s，~4.9x）**（见文首「运行依赖」）
 
 ---
 
