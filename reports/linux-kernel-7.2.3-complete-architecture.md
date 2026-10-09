@@ -73,7 +73,7 @@ erDiagram
     inode ||--|| file_operations : i_fop
     dentry }o--|| inode : 指向
     net_device ||--o{ sk_buff : 收发
-    bio ||--|| request : blk-mq
+    bio ||--|| request : blk_mq
 ```
 
 ## 4. 关键执行路径（代码级 + 工具抽取的真实关系）

@@ -49,7 +49,7 @@ flowchart TB
 
 ```mermaid
 erDiagram
-    ngx_http_request_t ||--|| ngx_http_lua_ctx_t : has(ctx_ref)
+    ngx_http_request_t ||--|| ngx_http_lua_ctx_t : has_ctx_ref
     ngx_http_lua_ctx_t ||--|| ngx_http_lua_co_ctx_t : entry_co_ctx
     ngx_http_lua_ctx_t ||--o{ ngx_http_lua_co_ctx_t : user_co_ctx
     ngx_http_lua_ctx_t ||--o| Cosocket : downstream
