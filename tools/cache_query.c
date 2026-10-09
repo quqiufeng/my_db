@@ -338,12 +338,74 @@ static void print_usage(const char* prog) {
     printf("  --model <model>         Model type: jina (default) or mpnet\n");
     printf("  --depth <n>             Call chain expansion depth for context queries (default: 0)\n");
     printf("  --pretty, -p            Pretty-print JSON output\n");
+    printf("  --brief, -b             Compact text output (symbol + callers/callees), agent-friendly\n");
     printf("\nExamples:\n");
     printf("  %s ngx_palloc --repo /code/nginx --type context\n", prog);
     printf("  %s ngx_palloc --repo /code/nginx --type context --depth 3\n", prog);
     printf("  %s \"memory pool\" --repo /code/nginx --type search --analysis-dir /opt/code_caches/nginx_cache\n", prog);
     printf("  %s \"event loop\" --repo /code/nginx --type search --analysis-dir /opt/code_caches/nginx_cache --kind function --lang c\n", prog);
     printf("  %s \"GPU kernel\" --repo /code/project --type search --analysis-dir /opt/code_caches/project_cache --file cuda\n", prog);
+}
+
+// 简洁文本输出（agent 友好）：只给符号 + caller/callee 名，省 context。
+static void print_brief(json_t* response) {
+    const char* type = json_string_value(json_object_get(response, "type"));
+    json_t* results = json_object_get(response, "results");
+    json_t* ctx = json_object_get(response, "context");
+
+    if (type && strcmp(type, "exact") == 0) {
+        size_t idx; json_t* r;
+        json_array_foreach(results, idx, r) {
+            const char* v = json_string_value(json_object_get(r, "value"));
+            if (v) printf("%.4000s\n", v);
+        }
+        return;
+    }
+
+    json_t* sym = ctx ? json_object_get(ctx, "symbol") : NULL;
+    if ((!sym || json_is_null(sym)) && results && json_array_size(results) > 0)
+        sym = json_array_get(results, 0);
+
+    if (sym && json_is_object(sym)) {
+        const char* nm = json_string_value(json_object_get(sym, "name"));
+        const char* file = json_string_value(json_object_get(sym, "file"));
+        const char* kind = json_string_value(json_object_get(sym, "kind"));
+        long ln = -1;
+        json_t* line = json_object_get(sym, "line");
+        if (line && json_is_integer(line)) ln = (long)json_integer_value(line);
+        printf("%s  %s:%ld  kind=%s\n", nm ? nm : "?", file ? file : "?", ln, kind ? kind : "");
+    }
+
+    if (ctx) {
+        json_t* callers = json_object_get(ctx, "callers");
+        if (callers && json_array_size(callers)) {
+            printf("callers(%zu): ", json_array_size(callers));
+            for (size_t i = 0; i < json_array_size(callers); i++) {
+                const char* n = json_string_value(json_object_get(json_array_get(callers, i), "name"));
+                printf("%s%s", i ? ", " : "", n ? n : "?");
+            }
+            printf("\n");
+        }
+        json_t* callees = json_object_get(ctx, "callees");
+        if (callees && json_array_size(callees)) {
+            printf("callees(%zu): ", json_array_size(callees));
+            for (size_t i = 0; i < json_array_size(callees) && i < 30; i++) {
+                const char* n = json_string_value(json_object_get(json_array_get(callees, i), "name"));
+                printf("%s%s", i ? ", " : "", n ? n : "?");
+            }
+            printf("\n");
+        }
+    }
+
+    // 无语义符号时（如 search 结果），列出 name+file
+    if ((!sym || !json_is_object(sym)) && results && json_array_size(results)) {
+        size_t idx; json_t* r;
+        json_array_foreach(results, idx, r) {
+            const char* nm = json_string_value(json_object_get(r, "name"));
+            const char* file = json_string_value(json_object_get(r, "file"));
+            if (nm) printf("[%zu] %s  %s\n", idx + 1, nm, file ? file : "");
+        }
+    }
 }
 
 int main(int argc, char** argv) {
@@ -359,6 +421,7 @@ int main(int argc, char** argv) {
     const char* analysis_dir = NULL;
     const char* model_type = "jina";
     int pretty = 0;
+    int brief = 0;
     int no_boost = 0;
     int max_results = 10;
     int call_depth = 0;
@@ -398,6 +461,8 @@ int main(int argc, char** argv) {
             no_boost = 1;
         } else if (strcmp(argv[i], "--pretty") == 0 || strcmp(argv[i], "-p") == 0) {
             pretty = 1;
+        } else if (strcmp(argv[i], "--brief") == 0 || strcmp(argv[i], "-b") == 0) {
+            brief = 1;
         } else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
             print_usage(argv[0]);
             return 0;
@@ -473,13 +538,17 @@ int main(int argc, char** argv) {
                       (ts_end.tv_nsec - ts_start.tv_nsec) / 1000000;
     json_object_set_new(response, "timing_ms", json_integer(elapsed_ms));
     
-    // Print JSON
-    char* output = json_dumps(response, pretty ? JSON_INDENT(2) : JSON_COMPACT);
-    if (output) {
-        printf("%s\n", output);
-        free(output);
+    // Print output
+    if (brief) {
+        print_brief(response);
     } else {
-        fprintf(stderr, "[ERROR] json_dumps failed\n");
+        char* output = json_dumps(response, pretty ? JSON_INDENT(2) : JSON_COMPACT);
+        if (output) {
+            printf("%s\n", output);
+            free(output);
+        } else {
+            fprintf(stderr, "[ERROR] json_dumps failed\n");
+        }
     }
     
     json_decref(response);

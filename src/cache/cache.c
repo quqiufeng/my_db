@@ -324,18 +324,18 @@ cache_t* cache_open(const char* db_dir, size_t max_memory) {
         long load_ms = (t_now.tv_sec - t_start.tv_sec) * 1000 + (t_now.tv_nsec - t_start.tv_nsec) / 1000000 - init_ms;
         
         if (index_loaded) {
-            printf("[CACHE] Loaded persisted indexes, skipping rebuild\n");
+            fprintf(stderr, "[CACHE] Loaded persisted indexes, skipping rebuild\n");
             // 如果持久化索引中已包含 vector_index 数据，跳过耗时重建
             if (cache->vector_index.count == 0) {
                 cache_vector_index_rebuild(cache);
             }
             clock_gettime(CLOCK_MONOTONIC, &t_now);
             long rebuild_ms = (t_now.tv_sec - t_start.tv_sec) * 1000 + (t_now.tv_nsec - t_start.tv_nsec) / 1000000 - init_ms - load_ms;
-            printf("[CACHE] Timing: pool=%ldms, init=%ldms, index_load=%ldms, vector_rebuild=%ldms\n",
+            fprintf(stderr, "[CACHE] Timing: pool=%ldms, init=%ldms, index_load=%ldms, vector_rebuild=%ldms\n",
                    pool_ms, init_ms - pool_ms, load_ms, rebuild_ms);
         } else {
             // 加载失败，回退到扫描重建
-            printf("[CACHE] No persisted index found, rebuilding...\n");
+            fprintf(stderr, "[CACHE] No persisted index found, rebuilding...\n");
             
             // cache_index_load 失败时已释放并重置索引结构，这里重新初始化
             if (cache_hash_init(cache) < 0 || cache_sorted_init(cache) < 0 ||

@@ -372,7 +372,7 @@ int cache_index_save(cache_t* cache) {
         return -1;
     }
     
-    printf("[CACHE] Index saved: %s (%zu bytes, %d indexes)\n", path, total_size, index_count);
+    fprintf(stderr, "[CACHE] Index saved: %s (%zu bytes, %d indexes)\n", path, total_size, index_count);
     
     return 0;
 }
@@ -596,7 +596,7 @@ int cache_index_load(cache_t* cache) {
     cache->index_mmap_size = file_size;
     cache->index_loaded = 1;
     
-    printf("[CACHE] Index loaded from %s (%zu bytes, %d indexes)\n",
+    fprintf(stderr, "[CACHE] Index loaded from %s (%zu bytes, %d indexes)\n",
            path, file_size, index_count);
     
     return 0;
