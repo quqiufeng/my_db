@@ -239,6 +239,33 @@ static void test_stats() {
     printf("[PASS]\n\n");
 }
 
+static void test_lru_many() {
+    printf("=== Test: LRU (many candidates → qsort 淘汰) ===\n");
+
+    system("rm -rf /tmp/test_lru_many");
+    cache_t* cache = cache_open("/tmp/test_lru_many", 256 * 1024);  // 256KB
+    assert(cache != NULL);
+
+    char k[32], v[256];
+    memset(v, 'x', sizeof(v) - 1);
+    v[sizeof(v) - 1] = '\0';
+
+    // 插入远超容量的非永久条目 → 触发批量淘汰（多候选，走 qsort）
+    for (int i = 0; i < 3000; i++) {
+        snprintf(k, sizeof(k), "key_%d", i);
+        assert(cache_set(cache, k, v, 100000) == CACHE_OK);
+    }
+
+    size_t cnt = cache_count(cache);
+    printf("  3000 inserts → count=%zu (应 <3000，发生淘汰)\n", cnt);
+    assert(cnt < 3000);
+    assert(cache_get(cache, "key_2999") != NULL);
+
+    cache_close(cache);
+    system("rm -rf /tmp/test_lru_many");
+    printf("[PASS]\n\n");
+}
+
 int main() {
     printf("========================================\n");
     printf("     KV Cache Test Suite\n");
@@ -248,6 +275,7 @@ int main() {
     test_namespace();
     test_search();
     test_ttl_lru();
+    test_lru_many();
     test_iterator();
     test_persistence();
     test_stats();
