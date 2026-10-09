@@ -139,7 +139,11 @@ export LD_LIBRARY_PATH="/opt/my_db:/opt/TensorRT-10/lib:/opt/cuda/lib64:\
 | TRT engine 缓存 | `$HOME/trt_cache` | — | 换卡/改 profile 后删除以重建 |
 
 **当前 3080 20GB 的取值即现状，无需改动**：`device_id=0`、`trt_max_workspace_size=12GB`、`gpu_mem_limit=16GB`、`BATCH_SIZE=32`。
-若换到 **≤12GB** 的卡，至少把 `trt_max_workspace_size` 降到 4–6GB、`gpu_mem_limit` 降到 ~8–10GB，否则 TRT 建 engine 可能 OOM。
+
+**换卡参考**：
+- **RTX 4090D（24GB）**：现有 `trt_max_workspace_size=12GB`、`gpu_mem_limit=16GB` **正是当初按 4090D 写的，可直接用**；想更充分利用可把 `gpu_mem_limit` 提到 ~19GB、workspace 提到 16GB（对 Jina 这种小模型收益有限，12GB 已足够）。其余参数（profile/BATCH_SIZE/DIM）不变。
+- **≤12GB 的卡**：至少把 `trt_max_workspace_size` 降到 4–6GB、`gpu_mem_limit` 降到 ~8–10GB，否则 TRT 建 engine 可能 OOM。
+- **换任意卡后**：`rm -rf $HOME/trt_cache` 让 TRT 按新 GPU 重建 engine（跨架构 engine 不通用）。
 
 ---
 
