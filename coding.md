@@ -121,6 +121,26 @@ export LD_LIBRARY_PATH="/opt/my_db:/opt/TensorRT-10/lib:/opt/cuda/lib64:\
 
 > **实测加速比（linux 内核 693,026 chunks）**：优化前 140 items/s（82 分钟）→ 优化后 **684 items/s（约 17 分钟）= ~4.9x**。
 
+### GPU 可调参数（按显卡/显存调整）
+
+> **当前机器：NVIDIA GeForce RTX 3080（20GB）**。
+> 以下值均为**源码硬编码**（暂不支持 env 覆盖），改后需 `make` 重编译对应库/工具；
+> **换卡（尤其换架构）后建议 `rm -rf $HOME/trt_cache`** 让 TensorRT 重建 engine。
+
+| 参数 | 当前值 | 位置 | 调整建议（按显存） |
+|---|---|---|---|
+| `device_id` | `0` | `src/embedding/onnx_embedder.c:592`(TRT-V2) / `:627`(TRT-legacy) / `:644`(CUDA) | 多卡时改成目标 GPU 序号 |
+| `trt_max_workspace_size` | **12 GB** | `onnx_embedder.c:593`(V2) / `:630`(legacy) | ≥24GB 可提到 16–20GB；10–12GB 降到 4–6GB；8GB 降到 ~2–3GB（**过大可能建 engine 时 OOM**） |
+| `cuda gpu_mem_limit` | **16 GB** | `onnx_embedder.c:647` | 设为显存 ~80%（3080 20GB → 16GB 合适） |
+| TRT 动态 profile | `1x64 … 32x512` | `onnx_embedder.c:599-601` | batch 上限(=32)、seq 上限(512) 可按显存/模型调；改后删 trt_cache |
+| `BATCH_SIZE` | `32` | `tools/batch_embedder.c:15` | 不得超过 profile 的 batch 上限(32)；小显存可降到 16 |
+| `MAX_SEQ` | `512` | `tools/batch_embedder.c:14` | Jina 模型上限 512，一般不动 |
+| `DIM` | `768` | `tools/batch_embedder.c:13` | Jina v2 固定 768，**不可改** |
+| TRT engine 缓存 | `$HOME/trt_cache` | — | 换卡/改 profile 后删除以重建 |
+
+**当前 3080 20GB 的取值即现状，无需改动**：`device_id=0`、`trt_max_workspace_size=12GB`、`gpu_mem_limit=16GB`、`BATCH_SIZE=32`。
+若换到 **≤12GB** 的卡，至少把 `trt_max_workspace_size` 降到 4–6GB、`gpu_mem_limit` 降到 ~8–10GB，否则 TRT 建 engine 可能 OOM。
+
 ---
 
 ## 🚀 开发与部署流程（固定）
