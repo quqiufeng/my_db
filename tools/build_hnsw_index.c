@@ -12,19 +12,34 @@
 int main(int argc, char** argv) {
     if (argc < 2) {
         printf("Build HNSW index from vector binary file\n");
-        printf("Usage: %s <vec_file> [--threads N]\n", argv[0]);
+        printf("Usage: %s <vec_file> [--threads N] [--m N] [--ef-construction N] [--ef-search N]\n", argv[0]);
+        printf("  --m                max connections (default 16; 越大越准越慢)\n");
+        printf("  --ef-construction  build search width (default 200; 越大越准越慢，100 约快 1.3x)\n");
+        printf("  --ef-search        query search width (default 64)\n");
         printf("\nExample:\n");
         printf("  %s /memory/vectors/code_local_llama.cpp.jina.bin\n", argv[0]);
-        printf("  %s /memory/vectors/code_local_llama.cpp.jina.bin --threads 4\n", argv[0]);
+        printf("  %s /memory/vectors/code_local_llama.cpp.jina.bin --threads 8 --ef-construction 100\n", argv[0]);
         return 1;
     }
     
     const char* vec_file = argv[1];
     int num_threads = 0;  // 0 = use OpenMP default
+    int cfg_m = 16;               // HNSW M（连接数）
+    int cfg_ef_construction = 200; // 构建时搜索宽度（越大越慢越准）
+    int cfg_ef_search = 64;        // 查询默认宽度
     
     for (int i = 2; i < argc; i++) {
         if (strcmp(argv[i], "--threads") == 0 && i + 1 < argc) {
             num_threads = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--m") == 0 && i + 1 < argc) {
+            cfg_m = atoi(argv[++i]);
+            if (cfg_m < 4) cfg_m = 4;
+        } else if (strcmp(argv[i], "--ef-construction") == 0 && i + 1 < argc) {
+            cfg_ef_construction = atoi(argv[++i]);
+            if (cfg_ef_construction < 16) cfg_ef_construction = 16;
+        } else if (strcmp(argv[i], "--ef-search") == 0 && i + 1 < argc) {
+            cfg_ef_search = atoi(argv[++i]);
+            if (cfg_ef_search < 8) cfg_ef_search = 8;
         }
     }
     
@@ -102,10 +117,10 @@ int main(int argc, char** argv) {
         return 1;
     }
     
-    // Configure for code search
-    hnsw_set_m(hnsw, 16);
-    hnsw_set_ef_construction(hnsw, 200);
-    hnsw_set_ef_search(hnsw, 64);
+    // Configure for code search（可用 --m / --ef-construction / --ef-search 覆盖）
+    hnsw_set_m(hnsw, cfg_m);
+    hnsw_set_ef_construction(hnsw, cfg_ef_construction);
+    hnsw_set_ef_search(hnsw, cfg_ef_search);
     
     // Pre-allocate capacity for all nodes
     if (hnsw_reserve(hnsw, count + 64) != 0) {

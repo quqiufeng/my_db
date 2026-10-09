@@ -150,7 +150,9 @@ static int ensure_vector_pool_capacity(hnsw_index_t* idx, size_t n) {
 static float hnsw_distance(const hnsw_index_t* idx, const float* a, const float* b) {
     // 输入向量已归一化：cosine_similarity = dot(a,b) / (|a||b|) = dot(a,b)
     // 直接返回 1 - dot_product 作为距离（越小越近）
+    // SIMD：768 维点积是构建/搜索的热点，用 omp simd reduction 向量化（-O2 默认不向量化归约）
     float dot = 0.0f;
+    #pragma omp simd reduction(+:dot)
     for (size_t i = 0; i < idx->dim; i++) {
         dot += a[i] * b[i];
     }

@@ -121,6 +121,10 @@ export LD_LIBRARY_PATH="/opt/my_db:/opt/TensorRT-10/lib:/opt/cuda/lib64:\
 
 > **实测加速比（linux 内核 693,026 chunks）**：优化前 140 items/s（82 分钟）→ 优化后 **684 items/s（约 17 分钟）= ~4.9x**。
 
+> **HNSW 构建提速**：768 维点积加 `#pragma omp simd`（`-O2` 默认不向量化归约）+ `build_hnsw_index` 新增
+> `--m/--ef-construction/--ef-search`。openresty 35k 向量：34.9s → **17.6s（SIMD）/ 13.3s（ef=100）= ~2.6x**；
+> 内核 HNSW（原 ~15 分钟）预计 **~6 分钟**。
+
 ### GPU 可调参数（按显卡/显存调整）
 
 > **当前机器：NVIDIA GeForce RTX 3080（20GB）**。
