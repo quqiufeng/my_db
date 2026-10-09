@@ -5,7 +5,7 @@
 #include <jansson.h>
 
 #define MAX_LINE 131072
-#define MAX_VARS 10000  /* 2000→10000: 中频变量找不到（PG htup/slot） */
+#define MAX_VARS 2000000  /* 动态分配；上限覆盖 Linux 内核（旧值 10000 只覆盖前 1 万变量） */
 #define MAX_OCCURS 200
 #define MAX_FIELDS 50
 #define MAX_FUNCS 5000
@@ -52,17 +52,35 @@ typedef struct {
 } field_record_t;
 
 // 变量记录（增强版：支持字段）
+// occurs/fields 改为动态分配：旧版内联 occurs[MAX_OCCURS]（每变量 ~232KB），
+// 导致 MAX_VARS 无法上调、内核只覆盖前 1 万变量。
 typedef struct {
     char name[128];
     char type[128];
-    occurrence_t occurs[MAX_OCCURS];
+    occurrence_t* occurs;   // 动态，上限 MAX_OCCURS
     int occur_count;
-    field_record_t fields[MAX_FIELDS];  // 字段级访问
+    int occur_capacity;
+    field_record_t* fields; // 动态，上限 MAX_FIELDS
     int field_count;
+    int field_capacity;
 } var_record_t;
 
-static var_record_t g_vars[MAX_VARS];
+static var_record_t* g_vars = NULL;
 static int g_var_count = 0;
+static int g_var_capacity = 0;
+
+// 变量名哈希索引（开放寻址）：name → g_vars 下标+1，0 表示空。
+// 修复 find_or_create_var 旧版线性扫描（变量一多即 O(n²)）。
+#define VAR_HASH_INIT 65536
+static int* g_var_hash = NULL;
+static size_t g_var_hash_size = 0;
+static size_t g_var_hash_used = 0;
+
+static unsigned int var_hash(const char* s) {
+    unsigned int h = 2166136261u;
+    while (*s) { h ^= (unsigned char)*s++; h *= 16777619u; }
+    return h;
+}
 
 // ============================================
 // 跨函数数据流
@@ -104,16 +122,61 @@ static var_record_t* find_or_create_var(const char* name) {
     // 过滤 C 类型/关键字/非法标识符：避免 "void"（来自 "static void *fn"）、"return"、
     // 以及非 ASCII 字节（如 "\xb0"）进入变量表污染输出。
     if (!is_identifier(name) || is_c_type(name) || is_c_keyword(name)) return NULL;
-    for (int i = 0; i < g_var_count; i++) {
-        if (strcmp(g_vars[i].name, name) == 0) return &g_vars[i];
+
+    if (!g_var_hash) {
+        g_var_hash_size = VAR_HASH_INIT;
+        g_var_hash = calloc(g_var_hash_size, sizeof(int));
+        if (!g_var_hash) return NULL;
     }
+
+    // 哈希查找 O(1)
+    unsigned int h = var_hash(name) & (unsigned int)(g_var_hash_size - 1);
+    while (g_var_hash[h]) {
+        int idx = g_var_hash[h] - 1;
+        if (strcmp(g_vars[idx].name, name) == 0) return &g_vars[idx];
+        h = (h + 1) & (unsigned int)(g_var_hash_size - 1);
+    }
+
     if (g_var_count >= MAX_VARS) return NULL;
-    strncpy(g_vars[g_var_count].name, name, sizeof(g_vars[g_var_count].name) - 1);
-    g_vars[g_var_count].name[sizeof(g_vars[g_var_count].name) - 1] = '\0';
-    g_vars[g_var_count].type[0] = '\0';
-    g_vars[g_var_count].occur_count = 0;
-    g_vars[g_var_count].field_count = 0;
-    return &g_vars[g_var_count++];
+
+    // 动态扩容变量数组
+    if (g_var_count >= g_var_capacity) {
+        int newcap = g_var_capacity ? g_var_capacity * 2 : 4096;
+        if (newcap > MAX_VARS) newcap = MAX_VARS;
+        var_record_t* nv = realloc(g_vars, (size_t)newcap * sizeof(var_record_t));
+        if (!nv) return NULL;
+        g_vars = nv;
+        g_var_capacity = newcap;
+    }
+
+    int idx = g_var_count++;
+    var_record_t* var = &g_vars[idx];
+    strncpy(var->name, name, sizeof(var->name) - 1);
+    var->name[sizeof(var->name) - 1] = '\0';
+    var->type[0] = '\0';
+    var->occurs = NULL; var->occur_count = 0; var->occur_capacity = 0;
+    var->fields = NULL; var->field_count = 0; var->field_capacity = 0;
+
+    // 插入哈希
+    g_var_hash[h] = idx + 1;
+    g_var_hash_used++;
+
+    // 负载因子 > 0.7 扩容哈希
+    if (g_var_hash_used * 10 >= g_var_hash_size * 7) {
+        size_t newsize = g_var_hash_size * 2;
+        int* nh = calloc(newsize, sizeof(int));
+        if (nh) {
+            for (int i = 0; i < g_var_count; i++) {
+                unsigned int hh = var_hash(g_vars[i].name) & (unsigned int)(newsize - 1);
+                while (nh[hh]) hh = (hh + 1) & (unsigned int)(newsize - 1);
+                nh[hh] = i + 1;
+            }
+            free(g_var_hash);
+            g_var_hash = nh;
+            g_var_hash_size = newsize;
+        }
+    }
+    return var;
 }
 
 static field_record_t* find_or_create_field(var_record_t* var, const char* field_name) {
@@ -122,6 +185,14 @@ static field_record_t* find_or_create_field(var_record_t* var, const char* field
             return &var->fields[i];
     }
     if (var->field_count >= MAX_FIELDS) return NULL;
+    if (var->field_count >= var->field_capacity) {
+        int newcap = var->field_capacity ? var->field_capacity * 2 : 4;
+        if (newcap > MAX_FIELDS) newcap = MAX_FIELDS;
+        field_record_t* nf = realloc(var->fields, (size_t)newcap * sizeof(field_record_t));
+        if (!nf) return NULL;
+        var->fields = nf;
+        var->field_capacity = newcap;
+    }
     field_record_t* field = &var->fields[var->field_count++];
     strncpy(field->field_name, field_name, sizeof(field->field_name) - 1);
     field->field_name[sizeof(field->field_name) - 1] = '\0';
@@ -144,6 +215,14 @@ static void add_occurrence(var_record_t* var, const char* file, const char* func
                            int line, int col, const char* context, int is_def,
                            const char* field_name) {
     if (!var || var->occur_count >= MAX_OCCURS) return;
+    if (var->occur_count >= var->occur_capacity) {
+        int newcap = var->occur_capacity ? var->occur_capacity * 2 : 8;
+        if (newcap > MAX_OCCURS) newcap = MAX_OCCURS;
+        occurrence_t* no = realloc(var->occurs, (size_t)newcap * sizeof(occurrence_t));
+        if (!no) return;
+        var->occurs = no;
+        var->occur_capacity = newcap;
+    }
     occurrence_t* occ = &var->occurs[var->occur_count++];
     strncpy(occ->file, file, sizeof(occ->file) - 1);
     strncpy(occ->func, func, sizeof(occ->func) - 1);
