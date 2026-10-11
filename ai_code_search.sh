@@ -241,7 +241,8 @@ cmd_index() {
     info "  工作进程: $workers"
     echo ""
 
-    "$INDEXER" "$repo_path" "$cache_dir" "$workers"
+    shift $(( $# < 3 ? $# : 3 )) 2>/dev/null || true
+    "$INDEXER" "$repo_path" "$cache_dir" "$workers" "$@"
 
     ok "索引完成!"
     info "输出文件:"
