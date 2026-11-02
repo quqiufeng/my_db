@@ -505,13 +505,13 @@ static int split_paragraphs(const char* text, size_t text_len,
     
     for (int i = 0; i < count; i++) {
         size_t len = strlen(raw[i]);
-        if (len > MAX_CHUNK_SIZE) {
+        if (len > MERGE_TARGET) {
             const char* fp = raw[i];
             const char* fend = raw[i] + len;
             
             while (fp < fend) {
                 size_t remain = fend - fp;
-                size_t target = (remain > TARGET_CHUNK_SIZE * 2) ? TARGET_CHUNK_SIZE * 2 : remain;
+                size_t target = (remain > MERGE_TARGET) ? MERGE_TARGET : remain;
                 const char* cut = find_best_cut(fp, fend, target);
                 size_t chunk = cut - fp;
                 if (chunk == 0) chunk = remain;
@@ -562,7 +562,7 @@ static int split_paragraphs(const char* text, size_t text_len,
         // 上一页还没凑够目标大小，且放得下当前段落 → 并入上一页
         if (final_count > 0) {
             size_t prev_len = strlen(final[final_count - 1]);
-            if (prev_len < MERGE_TARGET && prev_len + len + 1 <= MAX_CHUNK_SIZE) {
+            if (prev_len < MERGE_TARGET && prev_len + len + 1 <= MERGE_TARGET) {
                 size_t new_len = prev_len + len + 2;
                 char* merged = malloc(new_len + 1);
                 if (merged) {
