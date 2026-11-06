@@ -174,7 +174,9 @@ $(CACHE_SNAPSHOT): $(TOOLS_DIR)/cache_snapshot.c $(LIB)
 CODE_INDEXER = $(TOOLS_DIR)/code_indexer
 BATCH_EMBEDDER = $(TOOLS_DIR)/batch_embedder
 CACHE_IMPORT = $(TOOLS_DIR)/cache_import
-CACHE_QUERY = $(TOOLS_DIR)/cache_query
+# 真实二进制加 .bin 后缀；同名的 cache_query 是净化 LD_LIBRARY_PATH 的 shell 包装，
+# 不能让 make 覆盖它（否则 lite 自带的 onnxruntime 1.26 会遮蔽系统的 1.20.1）。
+CACHE_QUERY = $(TOOLS_DIR)/cache_query.bin
 
 # Vector engine library
 VECTOR_ENGINE_OBJ = $(OBJ_DIR)/vector_engine.o

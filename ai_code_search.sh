@@ -158,8 +158,37 @@ GPU_LIBS=""
 [ -d "/opt/cuda/lib64" ] && GPU_LIBS="${GPU_LIBS}:/opt/cuda/lib64"
 [ -d "/opt/TensorRT-10/lib" ] && GPU_LIBS="${GPU_LIBS}:/opt/TensorRT-10/lib"
 [ -d "/data/venv/lib/python3.12/site-packages/nvidia/cudnn/lib" ] && GPU_LIBS="${GPU_LIBS}:/data/venv/lib/python3.12/site-packages/nvidia/cudnn/lib"
+
+# ONNX Runtime：libonnx_embedder.so 依赖 1.20.1 的版本符号（VERS_1.20.1）。
+# 必须显式前置一个 1.20.1 目录；否则父进程 LD_LIBRARY_PATH 里若有更高版本
+# （例如 lite 打包的 1.26），dlopen 会因缺版本符号失败，且错误易被静默吞掉。
+for _ort in \
+    "${LITE_ORT_LIBDIR:-}" \
+    "/data/venv/onnxruntime-linux-x64-gpu-1.20.1/lib" \
+    "/venv/onnxruntime-linux-x64-gpu-1.20.1/lib" \
+    "/usr/local/lib" \
+    "/usr/lib/x86_64-linux-gnu"; do
+    if [ -n "$_ort" ] && [ -e "$_ort/libonnxruntime.so.1" ]; then
+        GPU_LIBS="${GPU_LIBS}:${_ort}"
+        break
+    fi
+done
+
 GPU_LIBS="${GPU_LIBS#:}"
-export LD_LIBRARY_PATH="${GPU_LIBS}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+# 剔除会遮蔽系统同名库的目录（如 lite 打包的 onnxruntime 1.26）。
+_CLEAN_LD=""
+if [ -n "${LD_LIBRARY_PATH:-}" ]; then
+    IFS=':' read -r -a _ld_parts <<< "$LD_LIBRARY_PATH"
+    for _p in "${_ld_parts[@]}"; do
+        [ -z "$_p" ] && continue
+        case "$_p" in
+            */share/lite/lib) continue ;;
+        esac
+        _CLEAN_LD="${_CLEAN_LD}:${_p}"
+    done
+    _CLEAN_LD="${_CLEAN_LD#:}"
+fi
+export LD_LIBRARY_PATH="${GPU_LIBS}${_CLEAN_LD:+:${_CLEAN_LD}}"
 
 # 验证 GPU 可用性
 if command -v nvidia-smi &>/dev/null; then
@@ -403,7 +432,26 @@ cmd_search() {
     echo ""
 
     # 默认走 brief（不加 --rich/--callgraph）；用户显式传的选项原样转发
-    "$VECTOR_SEARCH" "$cache_dir" "$query" "$max_results" --model jina "${extra[@]}" 2>/dev/null
+    run_vector_search "$cache_dir" "$query" "$max_results" --model jina "${extra[@]}"
+}
+
+# 运行 vector_search：成功时丢弃 stderr（ONNX/TensorRT 噪声），
+# 失败时把 stderr 回放出来——否则底层库加载失败会表现为“零结果”。
+run_vector_search() {
+    local err
+    err="$(mktemp "${TMPDIR:-/tmp}/acs_vs.XXXXXX")"
+    local rc=0
+    # vector_search 只编码一条 query：TensorRT 的 600MB engine 反序列化是纯开销
+    # （实测 3.9s -> 1.4s，RSS 4.1GB -> 1.3GB）。batch_embedder 才需要 TRT。
+    ONNX_EMBEDDER_DISABLE_TRT=1 "$VECTOR_SEARCH" "$@" 2>"$err" || rc=$?
+    if [[ $rc -ne 0 ]]; then
+        error "vector_search 失败 (exit $rc)"
+        sed 's/^/  | /' "$err" >&2
+        rm -f "$err"
+        return $rc
+    fi
+    rm -f "$err"
+    return 0
 }
 
 # ============================================
@@ -434,8 +482,8 @@ cmd_snippet() {
     info "  缓存: $cache_dir"
     echo ""
 
-    "$VECTOR_SEARCH" "$cache_dir" --snippet "$code_file" "$max_results" \
-        --model jina --rich --callgraph 2>/dev/null
+    run_vector_search "$cache_dir" --snippet "$code_file" "$max_results" \
+        --model jina --rich --callgraph
 }
 
 # ============================================
@@ -643,11 +691,31 @@ cmd_check() {
         if [[ -n "$project" ]]; then
             local cq="${SCRIPT_DIR}/tools/cache_query"
             if [[ -x "$cq" ]]; then
-                if "$cq" "/code/${project}/_meta/info" --type exact 2>/dev/null | grep -q '"results":\[{'; then
+                # 必须区分两种失败：
+                #   a) cache_query 根本跑不起来（动态库/模型加载失败）
+                #   b) 跑起来了但 namespace 确实没导入
+                # 以前统一 2>/dev/null + grep，两者都显示成“未导入”，
+                # 会把人误导去重导 KV（真正原因却是 LD_LIBRARY_PATH 里有更高版本
+                # 的 libonnxruntime 遮蔽了 1.20.1）。
+                local cq_err cq_out cq_rc=0
+                cq_err="$(mktemp "${TMPDIR:-/tmp}/acs_cq.XXXXXX")"
+                cq_out="$("$cq" "/code/${project}/_meta/info" --type exact 2>"$cq_err")" || cq_rc=$?
+                if [[ $cq_rc -ne 0 ]]; then
+                    error "cache_query 无法运行 (exit $cq_rc) → context/symbol 不可用"
+                    sed 's/^/  | /' "$cq_err" >&2
+                    warn "  常见原因: LD_LIBRARY_PATH 里有更高版本的 libonnxruntime"
+                    case ":${LD_LIBRARY_PATH:-}:" in
+                        *"/share/lite/lib:"*)
+                            error "  检测到 /share/lite/lib 在 LD_LIBRARY_PATH 中，请移除后重试" ;;
+                    esac
+                    rm -f "$cq_err"
+                elif echo "$cq_out" | grep -q '"results":\[{'; then
                     ok "KV 已导入 /code/${project}（context/symbol 可用）"
+                    rm -f "$cq_err"
                 else
                     warn "KV 未导入 /code/${project} → context/symbol 不可用"
                     warn "  修复: cache_import ${cache_dir} /code/${project} --cache-dir /memory"
+                    rm -f "$cq_err"
                 fi
             fi
         else

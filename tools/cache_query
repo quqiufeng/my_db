@@ -1,0 +1,53 @@
+#!/bin/bash
+# cache_query 包装：净化 LD_LIBRARY_PATH 后调用真实二进制 cache_query.bin。
+#
+# 背景：libonnx_embedder.so 依赖 onnxruntime 1.20.1 的版本符号（VERS_1.20.1）。
+# 若父进程 LD_LIBRARY_PATH 里有更高版本（例如 lite 打包的 1.26 位于
+# /usr/local/share/lite/lib），dlopen 会在进 main() 之前失败，表现为
+# “version `VERS_1.20.1' not found”，而且很多人会误判成 KV 没导入。
+set -u
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BIN="$SELF_DIR/cache_query.bin"
+[ -x "$BIN" ] || { echo "cache_query.bin missing" >&2; exit 127; }
+
+# 1) 剔除会遮蔽系统库的目录（lite 自带 onnxruntime 等）
+_CLEAN=""
+if [ -n "${LD_LIBRARY_PATH:-}" ]; then
+    IFS=':' read -r -a _parts <<< "$LD_LIBRARY_PATH"
+    for _p in "${_parts[@]}"; do
+        [ -z "$_p" ] && continue
+        case "$_p" in
+            */share/lite/lib) continue ;;
+        esac
+        _CLEAN="${_CLEAN:+$_CLEAN:}$_p"
+    done
+fi
+
+# 2) 前置一个 1.20.1 的 onnxruntime 目录（如果系统里有）
+_PRE=""
+for _cand in "${LITE_ORT_LIBDIR:-}" \
+             "/data/venv/onnxruntime-linux-x64-gpu-1.20.1/lib" \
+             "/venv/onnxruntime-linux-x64-gpu-1.20.1/lib" \
+             "/usr/local/lib" \
+             "/usr/lib/x86_64-linux-gnu"; do
+    if [ -n "$_cand" ] && [ -e "$_cand/libonnxruntime.so.1" ]; then
+        _PRE="$_cand"
+        break
+    fi
+done
+
+export LD_LIBRARY_PATH="${_PRE}${_PRE:+${_CLEAN:+:}}${_CLEAN}"
+
+# cache_query 只用文本 KV 查找 + 独立 vector_engine，不用 KV 内向量索引。
+# cache_open 默认会对整个 pool 线性扫描重建它（/memory 34GB 实测 100s+、RSS 18GB）。
+export CACHE_SKIP_VECTOR_INDEX=1
+
+# 纯查询会话：close 时不要重写 179MB index.bin（727ms），也不要 msync 34GB pool。
+export CACHE_READONLY=1
+
+# cache_query 只编码一条 query（--type search）或完全不编码（context/symbol）。
+# TensorRT 的 600MB engine 每次进程启动都要反序列化，单查询下是纯亏：
+# 实测 3.9s -> 1.4s、RSS 4.1GB -> 1.3GB。批量编码走 batch_embedder，不受影响。
+export ONNX_EMBEDDER_DISABLE_TRT=1
+
+exec "$BIN" "$@"
