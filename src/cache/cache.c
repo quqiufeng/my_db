@@ -341,8 +341,17 @@ cache_t* cache_open(const char* db_dir, size_t max_memory) {
         
         if (index_loaded) {
             fprintf(stderr, "[CACHE] Loaded persisted indexes, skipping rebuild\n");
-            // 如果持久化索引中已包含 vector_index 数据，跳过耗时重建
-            if (cache->vector_index.count == 0) {
+            // 如果持久化索引中已包含 vector_index 数据，跳过耗时重建。
+            // CACHE_SKIP_VECTOR_INDEX=1 且只用文本 KV（cache_query 的 context/symbol、
+            // lite 的记忆层）时，重建毫无意义：那是对整个 pool 的线性扫描，
+            // /memory 34GB 实测 100s+、RSS 18GB。语义搜索走 vector_engine（读
+            // cache_dir/vectors），不依赖这里的索引。
+            static int skip_vector = -1;
+            if (skip_vector < 0) {
+                const char* v = getenv("CACHE_SKIP_VECTOR_INDEX");
+                skip_vector = (v && v[0] && v[0] != '0') ? 1 : 0;
+            }
+            if (cache->vector_index.count == 0 && !skip_vector) {
                 cache_vector_index_rebuild(cache);
             }
             clock_gettime(CLOCK_MONOTONIC, &t_now);
@@ -394,8 +403,11 @@ cache_t* cache_open(const char* db_dir, size_t max_memory) {
             }
             cache->entry_count = valid_count;
             
-            // 重建向量索引
-            cache_vector_index_rebuild(cache);
+            // 重建向量索引（同 CACHE_SKIP_VECTOR_INDEX 理由，见上）
+            {
+                const char* v = getenv("CACHE_SKIP_VECTOR_INDEX");
+                if (!(v && v[0] && v[0] != '0')) cache_vector_index_rebuild(cache);
+            }
         }
     }
     
@@ -404,15 +416,26 @@ cache_t* cache_open(const char* db_dir, size_t max_memory) {
 
 void cache_close(cache_t* cache) {
     if (!cache) return;
-    
-    // 保存索引（如果数据有变化）
-    cache_index_save(cache);
+
+    // CACHE_READONLY=1：纯查询会话（cache_query / vector_search）不写索引。
+    // 每次 close 都会重写整份 index.bin（/memory 179MB 实测 727ms），
+    // 而查询没有改动任何数据。同时避免「跳过向量重建后又把残缺索引写回去」
+    // 破坏其它需要向量索引的调用方（import_book 等）。
+    static int readonly_mode = -1;
+    if (readonly_mode < 0) {
+        const char* v = getenv("CACHE_READONLY");
+        readonly_mode = (v && v[0] && v[0] != '0') ? 1 : 0;
+    }
+    if (!readonly_mode) {
+        cache_index_save(cache);
+    }
     
     // 保存 header
-    cache_header_save(cache);
-    
-    // 关闭 pool
-    pool_sync(&cache->pool);
+    if (!readonly_mode) cache_header_save(cache);
+
+    // 关闭 pool。只读会话跳过 msync：pool 是 34GB，MS_SYNC 要遍历全部
+    // 页表，实测 200ms+ 且没有任何脏页需要刷。
+    if (!readonly_mode) pool_sync(&cache->pool);
     pool_close(&cache->pool);
     
     // 释放排序数组内存
