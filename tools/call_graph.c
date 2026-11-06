@@ -174,6 +174,16 @@ typedef struct func_node {
 
 static func_node_t* g_func_nodes = NULL;
 
+// Go/C++ 裸名 -> 唯一作用域名（用于把跨包/跨类的调用边挂回 scoped symbol）
+typedef struct {
+    char bare[MAX_NAME_LEN];
+    char scoped[MAX_NAME_LEN];
+    int ambiguous;
+} bare_entry_t;
+static bare_entry_t* g_bares = NULL;
+static int g_bare_hash[HASH_SIZE];
+static int g_bare_count = 0;
+
 typedef struct plugin_edge {
     char caller[MAX_NAME_LEN];
     char callee[MAX_NAME_LEN];
@@ -208,7 +218,26 @@ static void add_func_name(const char* name) {
     // 不注册裸名则 C++ 类方法的调用边全丢（percona 实测：79k 边 vs 应有 ~500k）。
     const char* sep = strstr(name, "::");
     if (sep && sep[2]) {
-        add_func_name(sep + 2);
+        const char* bare = sep + 2;
+        if (g_bares && g_bare_count < MAX_FUNC) {
+            unsigned int bh = hash_str(bare);
+            while (g_bare_hash[bh] >= 0 &&
+                   strcmp(g_bares[g_bare_hash[bh]].bare, bare) != 0) {
+                bh = (bh + 1) % HASH_SIZE;
+            }
+            if (g_bare_hash[bh] < 0) {
+                bare_entry_t* e = &g_bares[g_bare_count];
+                strncpy(e->bare, bare, MAX_NAME_LEN - 1);
+                e->bare[MAX_NAME_LEN - 1] = '\0';
+                strncpy(e->scoped, name, MAX_NAME_LEN - 1);
+                e->scoped[MAX_NAME_LEN - 1] = '\0';
+                e->ambiguous = 0;
+                g_bare_hash[bh] = g_bare_count++;
+            } else if (strcmp(g_bares[g_bare_hash[bh]].scoped, name) != 0) {
+                g_bares[g_bare_hash[bh]].ambiguous = 1;
+            }
+        }
+        add_func_name(bare);
     }
 }
 
@@ -219,6 +248,35 @@ static int is_func_known(const char* name) {
         h = (h + 1) % HASH_SIZE;
     }
     return 0;
+}
+
+// Go/C++ 作用域解析：调用点只有裸名，优先绑定到 caller 的 pkg/类作用域，
+// 例如 control.turnOrchestrator::runTurnLoop 内的 foo() -> 同作用域 foo。
+static const char* unique_scoped(const char* bare) {
+    if (!g_bares) return NULL;
+    unsigned int h = hash_str(bare);
+    while (g_bare_hash[h] >= 0) {
+        bare_entry_t* e = &g_bares[g_bare_hash[h]];
+        if (strcmp(e->bare, bare) == 0) {
+            return e->ambiguous ? NULL : e->scoped;
+        }
+        h = (h + 1) % HASH_SIZE;
+    }
+    return NULL;
+}
+
+static void resolve_callee(const char* caller, const char* tok, char* out, size_t outsz) {
+    const char* sep = strstr(caller, "::");
+    if (sep && sep > caller) {
+        int n = snprintf(out, outsz, "%.*s::%s", (int)(sep - caller), caller, tok);
+        if (n > 0 && (size_t)n < outsz && is_func_known(out)) return;
+    }
+    const char* scoped = unique_scoped(tok);
+    if (scoped && is_func_known(scoped)) {
+        snprintf(out, outsz, "%s", scoped);
+        return;
+    }
+    snprintf(out, outsz, "%s", tok);
 }
 
 static func_node_t* get_func_node(const char* name, int create) {
@@ -302,6 +360,8 @@ static int is_func_kind(const char* kind) {
     return kind[0] && (
         strcmp(kind, "function") == 0 ||
         strcmp(kind, "method") == 0 ||
+        strcmp(kind, "func") == 0 ||
+        strcmp(kind, "methodSpec") == 0 ||
         strcmp(kind, "ts_function") == 0 ||
         strcmp(kind, "ts_method") == 0
     );
@@ -484,6 +544,23 @@ static void load_plugin_edges(const char* plugin_file) {
     printf("  Loaded %d call edges from plugin output\n", count);
 }
 
+
+// 返回合法 UTF-8 序列长度；非法返回 0（输出时替换为 '?'）。
+static int utf8_len(const unsigned char* s, int remaining) {
+    unsigned char c = s[0];
+    if (c < 0x80) return 1;
+    int n;
+    if ((c & 0xE0) == 0xC0) n = 2;
+    else if ((c & 0xF0) == 0xE0) n = 3;
+    else if ((c & 0xF8) == 0xF0) n = 4;
+    else return 0;
+    if (n > remaining) return 0;
+    for (int i = 1; i < n; i++) {
+        if ((s[i] & 0xC0) != 0x80) return 0;
+    }
+    return n;
+}
+
 static void json_escape_str(const char* src, char* dst, int max_len) {
     int j = 0;
     for (int i = 0; src[i] && j < max_len - 1; i++) {
@@ -501,8 +578,17 @@ static void json_escape_str(const char* src, char* dst, int max_len) {
             if (j + 2 < max_len) { dst[j++] = '\\'; dst[j++] = 't'; }
         } else if (c < 0x20) {
             // skip control chars
-        } else {
+        } else if (c < 0x80) {
             dst[j++] = c;
+        } else {
+            int n = utf8_len((const unsigned char*)(src + i), (int)strlen(src + i));
+            if (n > 0 && j + n < max_len) {
+                memcpy(dst + j, src + i, n);
+                j += n;
+                i += n - 1;
+            } else {
+                dst[j++] = '?';
+            }
         }
     }
     dst[j] = '\0';
@@ -524,6 +610,9 @@ int main(int argc, char** argv) {
     g_func_names = malloc(MAX_FUNC * sizeof(char*));
     if (!g_func_names) return 1;
     memset(g_name_hash, -1, sizeof(g_name_hash));
+    g_bares = malloc((size_t)MAX_FUNC * sizeof(bare_entry_t));
+    if (!g_bares) return 1;
+    memset(g_bare_hash, -1, sizeof(g_bare_hash));
 
     printf("Phase 1: Loading functions and bodies\n");
     fflush(stdout);
@@ -644,19 +733,21 @@ int main(int argc, char** argv) {
                         char tok[MAX_NAME_LEN];
                         memcpy(tok, start, tlen);
                         tok[tlen] = '\0';
-                        if (strcmp(b->name, tok) != 0 && is_func_known(tok)) {
-                            unsigned int sh = hash_str(tok) % 256;
+                        char callee[MAX_NAME_LEN];
+                        resolve_callee(b->name, tok, callee, sizeof(callee));
+                        if (strcmp(b->name, callee) != 0 && is_func_known(callee)) {
+                            unsigned int sh = hash_str(callee) % 256;
                             int dup = 0, probes = 0;
                             while (seen[sh] && probes < 256) {
-                                if (seen[sh] == hash_str(tok)) { dup = 1; break; }
+                                if (seen[sh] == hash_str(callee)) { dup = 1; break; }
                                 sh = (sh + 1) % 256;
                                 probes++;
                             }
                             if (!dup) {
-                                seen[sh] = hash_str(tok);
+                                seen[sh] = hash_str(callee);
                                 char args[1024];
                                 if (find_call_with_args(b->content, tok, args, sizeof(args))) {
-                                    add_call_edge(tok, b->name, b->file, b->line_start, args);
+                                    add_call_edge(callee, b->name, b->file, b->line_start, args);
                                 }
                             }
                         }
@@ -703,14 +794,9 @@ int main(int argc, char** argv) {
             fprintf(out, "      {\"function\":\"%s\",\"file\":\"%s\",\"line\":%d",
                     esc_caller, esc_file, e->line);
             if (e->args[0]) {
-                fprintf(out, ",\"arguments\":[\"");
-                const char* ap = e->args;
-                while (*ap) {
-                    if (*ap == '"' || *ap == '\\') fputc('\\', out);
-                    fputc(*ap, out);
-                    ap++;
-                }
-                fprintf(out, "\"]");
+                char esc_args[4096];
+                json_escape_str(e->args, esc_args, sizeof(esc_args));
+                fprintf(out, ",\"arguments\":[\"%s\"]", esc_args);
             }
             fprintf(out, "}");
             e = e->next;

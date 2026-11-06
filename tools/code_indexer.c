@@ -525,6 +525,7 @@ static const char* detect_language(const char* filepath) {
 static int needs_range(const char* kind) {
     return kind[0] && (
         strcmp(kind, "function") == 0 || strcmp(kind, "method") == 0 ||
+        strcmp(kind, "func") == 0 ||
         strcmp(kind, "class") == 0 || strcmp(kind, "struct") == 0 ||
         strcmp(kind, "union") == 0 || strcmp(kind, "enum") == 0 ||
         strcmp(kind, "namespace") == 0
