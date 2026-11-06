@@ -82,7 +82,9 @@ word_freq.json
 # Additional compiled tool binaries
 tools/code_indexer
 tools/cache_import
-tools/cache_query
+# tools/cache_query 是净化环境的 shell 包装（要跟踪）；
+# 真正的二进制是 tools/cache_query.bin，已被上面的 *.bin 覆盖。
+tools/del_ns
 tools/vector_search
 tools/dataflow
 tools/dataflow_asan
