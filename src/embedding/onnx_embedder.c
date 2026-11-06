@@ -569,11 +569,18 @@ onnx_embedder_t* onnx_embedder_init(const char* model_path, const char* vocab_pa
     static char trt_cache_path[512];
     snprintf(trt_cache_path, sizeof(trt_cache_path), "%s/trt_cache", getenv("HOME") ? getenv("HOME") : "/tmp");
     
+    // TensorRT 只在批量编码时划算：单条 query 每次进程启动都要反序列化
+    // ~600MB engine plan（实测 1.4s -> 3.9s，RSS 1.1GB -> 4.1GB，纯亏）。
+    // vector_search / cache_query 只编码一条 query，调用方应设
+    // ONNX_EMBEDDER_DISABLE_TRT=1 直接走 CUDA EP。batch_embedder 不要设。
+    const char* no_trt_env = getenv("ONNX_EMBEDDER_DISABLE_TRT");
+    const int disable_trt = (no_trt_env && no_trt_env[0] && no_trt_env[0] != '0');
+
     OrtTensorRTProviderOptionsV2* trt_options_v2 = NULL;
     int use_tensorrt = 0;
     
     // 尝试 V2 API（支持动态 shape profile）
-    if (g_ort->CreateTensorRTProviderOptions) {
+    if (!disable_trt && g_ort->CreateTensorRTProviderOptions) {
         status = g_ort->CreateTensorRTProviderOptions(&trt_options_v2);
         if (status == NULL && trt_options_v2 != NULL) {
             const char* keys[] = {
@@ -634,7 +641,9 @@ onnx_embedder_t* onnx_embedder_init(const char* model_path, const char* vocab_pa
         trt_options.trt_engine_cache_path = trt_cache_path;
         trt_options.trt_dump_subgraphs = 0;
         
-        status = g_ort->SessionOptionsAppendExecutionProvider_TensorRT(session_options, &trt_options);
+        status = disable_trt
+            ? g_ort->CreateStatus(ORT_FAIL, "TensorRT disabled by ONNX_EMBEDDER_DISABLE_TRT")
+            : g_ort->SessionOptionsAppendExecutionProvider_TensorRT(session_options, &trt_options);
     if (status != NULL) {
         // TensorRT 不可用，回退到 CUDA
         g_ort->ReleaseStatus(status);
