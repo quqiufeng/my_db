@@ -862,9 +862,13 @@ static void save_dataflow(const char* output_file) {
     for (int v = 0; v < g_var_count; v++) {
         if (v > 0) fprintf(fp, ",\n");
         var_record_t* var = &g_vars[v];
-        fprintf(fp, "  \"%s\": {\n", var->name);
+        char escaped_name[512];
+        json_escape(escaped_name, var->name ? var->name : "", sizeof(escaped_name));
+        fprintf(fp, "  \"%s\": {\n", escaped_name);
         if (var->type[0]) {
-            fprintf(fp, "    \"type\": \"%s\",\n", var->type);
+            char escaped_type[256];
+            json_escape(escaped_type, var->type ? var->type : "", sizeof(escaped_type));
+            fprintf(fp, "    \"type\": \"%s\",\n", escaped_type);
         }
         
         if (var->field_count > 0) {
@@ -872,16 +876,20 @@ static void save_dataflow(const char* output_file) {
             for (int f = 0; f < var->field_count; f++) {
                 if (f > 0) fprintf(fp, ",\n");
                 field_record_t* field = &var->fields[f];
-                fprintf(fp, "      \"%s\": [\n", field->field_name);
+                char escaped_fname[512];
+                json_escape(escaped_fname, field->field_name ? field->field_name : "", sizeof(escaped_fname));
+                fprintf(fp, "      \"%s\": [\n", escaped_fname);
                 for (int i = 0; i < field->occur_count; i++) {
                     if (i > 0) fprintf(fp, ",\n");
                     occurrence_t* occ = &field->occurs[i];
                     const char* type_str = (occ->is_definition == 1) ? "definition" :
                                            (occ->is_definition == 2) ? "assignment" : "usage";
-                    char escaped_context[512];
+                    char escaped_context[512], escaped_file[1024], escaped_func[512];
                     json_escape(escaped_context, occ->context, sizeof(escaped_context));
+                    json_escape(escaped_file, occ->file ? occ->file : "", sizeof(escaped_file));
+                    json_escape(escaped_func, occ->func ? occ->func : "", sizeof(escaped_func));
                     fprintf(fp, "        {\"file\":\"%s\",\"func\":\"%s\",\"line\":%d,\"type\":\"%s\",\"context\":\"%s\"}",
-                           occ->file, occ->func, occ->line, type_str, escaped_context);
+                           escaped_file, escaped_func, occ->line, type_str, escaped_context);
                 }
                 fprintf(fp, "\n      ]");
             }
@@ -894,10 +902,12 @@ static void save_dataflow(const char* output_file) {
             occurrence_t* occ = &var->occurs[i];
             const char* type_str = (occ->is_definition == 1) ? "definition" :
                                    (occ->is_definition == 2) ? "assignment" : "usage";
-            char escaped_context[512];
+            char escaped_context[512], escaped_file[1024], escaped_func[512];
             json_escape(escaped_context, occ->context, sizeof(escaped_context));
+            json_escape(escaped_file, occ->file ? occ->file : "", sizeof(escaped_file));
+            json_escape(escaped_func, occ->func ? occ->func : "", sizeof(escaped_func));
             fprintf(fp, "      {\"file\":\"%s\",\"func\":\"%s\",\"line\":%d,\"type\":\"%s\",\"context\":\"%s\"}",
-                   occ->file, occ->func, occ->line, type_str, escaped_context);
+                   escaped_file, escaped_func, occ->line, type_str, escaped_context);
         }
         fprintf(fp, "\n    ]\n  }");
     }
